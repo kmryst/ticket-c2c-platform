@@ -1,0 +1,18 @@
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Dependencies and build outputs
+node_modules/
+dist/
+build/
+.next/
+
+# Terraform local files
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# OS/editor noise
+.DS_Store
