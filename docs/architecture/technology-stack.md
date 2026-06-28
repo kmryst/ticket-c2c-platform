@@ -1,120 +1,119 @@
-# Technology Stack Draft
+# 技術スタックドラフト
 
-## Status
+## ステータス
 
-Draft.
+ドラフト。
 
-This document records the current technology stack direction for the C2C ticket marketplace system design exercise. It is not an implementation plan, ADR, or final decision.
+このドキュメントは、C2C チケット販売プラットフォームのシステム設計課題における、現時点の技術スタック方針を記録するものです。実装計画、ADR、最終決定ではありません。
 
-## Target System
+## 対象システム
 
-The system is a C2C ticket marketplace where a user can act as both Buyer and Seller.
+対象システムは、1 人のユーザーが購入者（Buyer）と販売者（Seller）の両方として利用できる C2C チケット販売プラットフォームです。
 
-In scope:
+スコープ:
 
-- Search events by location, event type, and event date.
-- Allow future expansion of search conditions.
-- Display matching events.
-- Purchase event tickets.
+- イベント開催地、イベント種別、イベント開催日による検索。
+- 将来的な検索条件追加への対応。
+- 検索条件に一致したイベント一覧の表示。
+- イベントチケットの購入。
 
-Out of scope:
+スコープ外:
 
-- Payment processing.
-- Purchase cancellation.
-- Search by price or capacity.
-- Buyer/Seller messaging.
+- 決済管理。
+- 購入キャンセル。
+- 料金や収容人数による検索。
+- 購入者（Buyer）/ 販売者（Seller）間メッセージ。
 
-Key constraints:
+主な制約:
 
-- Up to 5 million users.
-- Popular events may receive around 100x normal traffic.
-- Traffic concentration on a popular event should not degrade other events.
-- Ticket reservations must not exceed available inventory.
-- Search and purchase are expected to happen around 10x more often than event listing.
+- 最大 500 万人のユーザーを想定する。
+- 人気イベントでは通常の約 100 倍のトラフィックが発生する可能性がある。
+- 人気イベントへのトラフィック集中が他イベントの性能を劣化させない必要がある。
+- チケット予約は在庫数を超えてはならない。
+- 検索と購入は、イベントリスティングの約 10 倍の頻度で行われる想定。
 
-## Recommended Stack
+## 推奨スタック
 
-| Layer | Recommendation |
+| レイヤ | 推奨 |
 |---|---|
-| Frontend | Next.js / React / TypeScript |
-| API Entry | CloudFront + WAF + API Gateway or ALB |
-| Backend | NestJS / TypeScript |
-| API Style | REST + OpenAPI |
-| Runtime | ECS Fargate |
-| Primary DB | Aurora PostgreSQL |
-| Search | OpenSearch |
-| Cache / Inventory Front Filter | ElastiCache Valkey |
-| Queue | SQS Standard, with SQS FIFO only where per-event purchase ordering is required |
-| Event Bus | EventBridge |
-| Search Sync | EventBridge + Lambda to OpenSearch |
-| Infrastructure | Terraform |
+| フロントエンド | Next.js / React / TypeScript |
+| API 入口 | CloudFront + WAF + API Gateway または ALB |
+| バックエンド | NestJS / TypeScript |
+| API 形式 | REST + OpenAPI |
+| 実行環境 | ECS Fargate |
+| 正本 DB | Aurora PostgreSQL |
+| 検索 | OpenSearch |
+| キャッシュ / 在庫前段フィルタ | ElastiCache Valkey |
+| キュー | SQS Standard。イベント単位の購入順序制御が必要な箇所のみ SQS FIFO |
+| イベントバス | EventBridge |
+| 検索同期 | EventBridge + Lambda から OpenSearch へ同期 |
+| インフラ | Terraform |
 | CI/CD | GitHub Actions |
-| Observability | CloudWatch + OpenTelemetry/ADOT + X-Ray |
+| 可観測性 | CloudWatch + OpenTelemetry/ADOT + X-Ray |
 
-## Design Direction
+## 設計方針
 
-Aurora PostgreSQL is the system of record for users, events, ticket inventory, and purchases. Purchase finalization should use database transactions and conditional updates to prevent over-selling.
+Aurora PostgreSQL は、ユーザー、イベント、チケット在庫、購入の正本とする。購入確定では、過剰販売を防ぐためにデータベーストランザクションと条件付き更新を使う。
 
-OpenSearch should serve event search because the required filters include location, event type, event date, and likely future query dimensions. Aurora remains the source of truth, while OpenSearch is a read-optimized projection.
+OpenSearch はイベント検索を担当する。検索条件には位置情報、イベント種別、イベント開催日が含まれ、将来的に検索軸が増える可能性もあるためです。Aurora を正本にし、OpenSearch は読み取り最適化された検索用プロジェクションとして扱います。
 
-Valkey should be used in front of the purchase flow as a fast inventory filter, especially for popular events. It should reject sold-out requests before they reach Aurora. Valkey is not the final source of truth.
+Valkey は、特に人気イベントの購入フロー前段で高速な在庫フィルタとして使う。売り切れ後のリクエストを Aurora に到達する前に拒否するためです。Valkey は最終的な正本ではありません。
 
-SQS Standard is appropriate for general asynchronous work. SQS FIFO can be introduced only for purchase paths that require per-event ordering or rate control, using `eventId` as the message group key.
+一般的な非同期処理には SQS Standard が適している。イベント単位の順序制御や流量制御が必要な購入パスだけ、`eventId` をメッセージグループキーとして SQS FIFO を導入する。
 
-EventBridge should publish domain events such as `EventListed`, `EventUpdated`, `InventoryChanged`, and `TicketPurchased`. Search indexing can subscribe to these events and update OpenSearch asynchronously.
+EventBridge では、`EventListed`、`EventUpdated`、`InventoryChanged`、`TicketPurchased` などのドメインイベントを発行する。検索インデックス更新はこれらのイベントを購読し、OpenSearch を非同期に更新する。
 
-REST + OpenAPI is preferred initially because the scope is straightforward, operationally simple, cache-friendly, and easy to observe. GraphQL can be reconsidered later as a BFF layer if the frontend query shape becomes complex.
+REST + OpenAPI は、今回のスコープが比較的明確で、運用が単純で、キャッシュや観測もしやすいため初期案として適している。GraphQL は、フロントエンドのクエリ形状が複雑になった段階で BFF レイヤとして再検討する。
 
-## Purchase Flow Direction
+## 購入フロー方針
 
-The purchase path should be designed to protect both correctness and throughput.
+購入パスでは、正確性とスループットの両方を守る設計にする。
 
-1. Buyer sends a purchase request.
-2. API layer applies authentication, rate limits, and basic validation.
-3. Backend checks/decrements a Valkey inventory counter for fast rejection.
-4. If stricter per-event serialization is required, enqueue to SQS FIFO with `MessageGroupId = eventId`.
-5. Worker or backend finalizes the purchase in Aurora PostgreSQL with a conditional inventory update.
-6. Publish `TicketPurchased` or `InventoryChanged` through EventBridge.
-7. Downstream consumers update OpenSearch and other read models.
+1. 購入者（Buyer）が購入リクエストを送る。
+2. API レイヤで認証、レート制限、基本的なバリデーションを行う。
+3. バックエンドが Valkey の在庫カウンタを確認・減算し、高速拒否を行う。
+4. より厳密なイベント単位の直列化が必要な場合は、`MessageGroupId = eventId` で SQS FIFO に投入する。
+5. ワーカーまたはバックエンドが Aurora PostgreSQL で条件付き在庫更新を行い、購入を確定する。
+6. EventBridge に `TicketPurchased` または `InventoryChanged` を発行する。
+7. 後続コンシューマーが OpenSearch やその他の読み取りモデルを更新する。
 
-Final inventory correctness must be guaranteed by Aurora PostgreSQL. Valkey and SQS exist to reduce load, smooth spikes, and isolate popular-event traffic.
+最終的な在庫正確性は Aurora PostgreSQL で保証する。Valkey と SQS は、負荷低減、スパイク吸収、人気イベントトラフィックの影響隔離のために使う。
 
-## Search Flow Direction
+## 検索フロー方針
 
-The search path should be optimized separately from the write path.
+検索パスは、書き込みパスとは分けて最適化する。
 
-1. Buyer searches by location, event type, event date, and future filters.
-2. API routes search requests to the search service/backend.
-3. Backend queries OpenSearch for matching event IDs and summary data.
-4. Frequently requested search results may be cached where appropriate.
-5. Aurora is used for source-of-truth reads only when necessary.
+1. 購入者（Buyer）が位置情報、イベント種別、イベント開催日、将来追加される検索条件で検索する。
+2. API が検索リクエストを検索サービスまたはバックエンドにルーティングする。
+3. バックエンドが OpenSearch に問い合わせ、一致するイベント ID と概要データを取得する。
+4. 頻繁に参照される検索結果は、必要に応じてキャッシュする。
+5. Aurora は、正本確認が必要な場合にだけ参照する。
 
-This separation supports the requirement that search and purchase are much more frequent than event listing.
+この分離により、検索と購入がイベントリスティングより高頻度で行われるという要件に対応しやすくなる。
 
-## Review Notes From Claude Code
+## Claude Code レビュー記録
 
-Claude Code reviewed the initial stack direction and considered it generally appropriate.
+Claude Code は初期スタック方針をレビューし、全体として妥当と評価した。
 
-Main concerns raised:
+主な懸念:
 
-- API Gateway or ALB should be explicit as the API entry and throttling layer.
-- Aurora-only inventory updates are correct but may become a hot-row bottleneck for popular events.
-- Popular-event purchase spikes can consume Aurora connections, CPU, or I/O and affect other events.
-- OpenSearch synchronization from Aurora should be described explicitly.
+- API Gateway または ALB を API 入口およびスロットリングレイヤとして明示すべき。
+- Aurora だけで在庫更新する方式は正確だが、人気イベントではホット行ボトルネックになる可能性がある。
+- 人気イベントの購入スパイクが Aurora のコネクション、CPU、I/O を消費し、他イベントに影響する可能性がある。
+- Aurora から OpenSearch への同期方式を明示すべき。
 
-Recommended adjustments from the review:
+レビューで推奨された調整:
 
-- Add Valkey as a fast inventory filter before Aurora.
-- Use SQS FIFO only where event-level purchase serialization is needed.
-- Keep Aurora PostgreSQL as the final source of truth.
-- Add EventBridge + Lambda as the simple initial path for OpenSearch updates.
-- Consider Aurora Reader Endpoint for read separation where useful.
+- Aurora の前段に高速な在庫フィルタとして Valkey を置く。
+- イベント単位の購入直列化が必要な箇所でのみ SQS FIFO を使う。
+- Aurora PostgreSQL を最終的な正本として維持する。
+- OpenSearch 更新の初期案として EventBridge + Lambda を使う。
+- 読み取り分離が必要な箇所では Aurora Reader Endpoint を検討する。
 
-## Open Questions
+## 未決事項
 
-- Should the API entry be API Gateway or ALB for the first design diagram?
-- Should purchase finalization be synchronous after Valkey, or asynchronous through SQS FIFO for all high-demand events?
-- What consistency delay is acceptable between Aurora and OpenSearch?
-- Should authentication be Cognito or an external provider such as Auth0?
-- Do we need a separate inventory service from the beginning, or only after the NestJS backend becomes a bottleneck?
-
+- 初回の設計図では API 入口を API Gateway と ALB のどちらで表現するか。
+- 購入確定は Valkey 後に同期処理するか、高需要イベントでは SQS FIFO 経由で非同期処理するか。
+- Aurora と OpenSearch の間で、どの程度の整合性遅延を許容するか。
+- 認証は Cognito にするか、Auth0 などの外部プロバイダーにするか。
+- 在庫サービスは最初から分離するか、NestJS バックエンドがボトルネックになってから分離するか。
