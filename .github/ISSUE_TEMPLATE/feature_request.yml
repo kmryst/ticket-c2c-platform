@@ -1,0 +1,107 @@
+name: Feature Request
+description: 新機能・PoC・改善の要望チケット
+title: "短い要約（例: 在庫購入APIを追加する）"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Web UI から起票する場合も、最小本文項目と必須4ラベル (`type / area / risk / cost`) をこのフォームで揃えます。
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: type
+      description: 変更の主題を1つ選んでください。
+      options:
+        - type:feature
+        - type:bug
+        - type:docs
+        - type:infra
+        - type:chore
+        - type:refactor
+        - type:test
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: area
+      description: 主に影響する領域を選んでください。複数選択できます。
+      multiple: true
+      options:
+        - area:architecture
+        - area:poc
+        - area:frontend
+        - area:backend
+        - area:database
+        - area:infra
+        - area:ci-cd
+        - area:docs
+    validations:
+      required: true
+
+  - type: dropdown
+    id: risk
+    attributes:
+      label: risk
+      description: 変更の危険度を1つ選んでください。
+      options:
+        - risk:low
+        - risk:medium
+        - risk:high
+    validations:
+      required: true
+
+  - type: dropdown
+    id: cost
+    attributes:
+      label: cost
+      description: コスト影響を1つ選んでください。
+      options:
+        - cost:none
+        - cost:small
+        - cost:medium
+        - cost:large
+    validations:
+      required: true
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: 目的
+      description: なぜ必要かを簡潔に書いてください。
+      placeholder: 例) 在庫PoCで同時購入時の過剰予約防止を検証したい
+    validations:
+      required: true
+
+  - type: textarea
+    id: target
+    attributes:
+      label: 対象
+      description: 主に何を変更するかを書いてください。
+      placeholder: 例) NestJS API、PostgreSQL スキーマ、k6 テスト
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 受け入れ条件
+      description: この Issue を close できる状態を書いてください。
+      placeholder: |
+        例)
+        - 購入APIが在庫を超えて確定しない
+        - 検証コマンドと結果がPRに記録されている
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 補足
+      description: 必要な場合だけ使ってください。
+      placeholder: 既知の制約、代替案、関連URLなど
+    validations:
+      required: false
+

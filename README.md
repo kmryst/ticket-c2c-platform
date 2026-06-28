@@ -12,6 +12,9 @@
 
 | パス | 目的 |
 |---|---|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Issue / Branch / Commit / PR / Label の運用ルール |
+| [AGENTS.md](AGENTS.md) | Codex 向け作業ルール |
+| [CLAUDE.md](CLAUDE.md) | Claude Code 向け作業ルール |
 | [docs/requirements/system-requirements.md](docs/requirements/system-requirements.md) | 課題要件、スコープ、制約の整理 |
 | [docs/architecture/technology-stack.md](docs/architecture/technology-stack.md) | 技術スタックと設計方針のドラフト |
 | [docs/poc/technical-validation-plan.md](docs/poc/technical-validation-plan.md) | PoC と技術検証の計画 |
