@@ -259,6 +259,15 @@ docker compose exec -T postgres psql -U ticket_poc -d ticket_poc < database/sche
 
 ラベル定義の正本は `.github/labels.yml` です。
 
+GitHub 側へ反映する場合は、次の helper を使います。
+
+```bash
+./scripts/github/sync-labels.sh
+```
+
+この helper は `.github/labels.yml` にあるラベルを作成・更新します。
+ファイルに無い既存ラベルは削除しません。
+
 ### 必須ラベル
 
 - `type:*`: ちょうど 1 つ
@@ -286,4 +295,3 @@ docker compose exec -T postgres psql -U ticket_poc -d ticket_poc < database/sche
 - [Issue Template](./.github/ISSUE_TEMPLATE/feature_request.yml)
 - [PR Template](./.github/pull_request_template.md)
 - [Labels](./.github/labels.yml)
-
