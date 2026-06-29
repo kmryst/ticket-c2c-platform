@@ -18,6 +18,7 @@
 | [docs/requirements/system-requirements.md](docs/requirements/system-requirements.md) | 課題要件、スコープ、制約の整理 |
 | [docs/architecture/technology-stack.md](docs/architecture/technology-stack.md) | 技術スタックと設計方針のドラフト |
 | [docs/poc/technical-validation-plan.md](docs/poc/technical-validation-plan.md) | PoC と技術検証の計画 |
+| [docs/poc/inventory-purchase-poc.md](docs/poc/inventory-purchase-poc.md) | 在庫購入 PoC の実行手順 |
 
 ## 現在のスコープ
 
@@ -40,3 +41,21 @@
 - 実装コードは、要件定義と設計方針が固まってから追加する。
 - 設計判断は必要に応じて `docs/architecture/` または ADR として記録する。
 - 秘密情報、`.env`、認証情報はコミットしない。
+
+## ローカル在庫 PoC
+
+PostgreSQL の条件付き更新で在庫超過を防ぐ最小 PoC を実行できます。
+
+```bash
+npm install
+cp .env.example .env
+docker compose up -d
+docker compose exec -T postgres psql -U ticket_poc -d ticket_poc < database/schema.sql
+npm run start:dev
+```
+
+別ターミナルで検証します。
+
+```bash
+npm run poc:inventory
+```

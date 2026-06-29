@@ -1,0 +1,31 @@
+{
+  "name": "ticket-c2c-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "C2C ticket platform architecture and local PoC workspace.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/main.js",
+    "start:dev": "ts-node src/main.ts",
+    "poc:inventory": "ts-node --project tsconfig.scripts.json scripts/poc/inventory-purchase-poc.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.27",
+    "@nestjs/core": "^11.1.27",
+    "@nestjs/platform-fastify": "^11.1.27",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.9.0",
+    "pg": "^8.22.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "@types/pg": "^8.20.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}

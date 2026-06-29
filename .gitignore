@@ -8,6 +8,7 @@ node_modules/
 dist/
 build/
 .next/
+npm-debug.log*
 
 # Terraform local files
 .terraform/

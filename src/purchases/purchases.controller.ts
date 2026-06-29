@@ -1,0 +1,43 @@
+import {
+  Body,
+  ConflictException,
+  Controller,
+  HttpCode,
+  Param,
+  Post,
+} from '@nestjs/common';
+import { PurchasesService } from './purchases.service';
+
+@Controller('events/:eventId/purchases')
+export class PurchasesController {
+  constructor(private readonly purchasesService: PurchasesService) {}
+
+  @Post()
+  @HttpCode(200)
+  async createPurchase(
+    @Param('eventId') eventId: string,
+    @Body() body: unknown,
+  ) {
+    try {
+      return await this.purchasesService.createPurchase(eventId, body);
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ConflictException('requestId already exists');
+      }
+
+      throw error;
+    }
+  }
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === '23505' &&
+    'constraint' in error &&
+    (error.constraint === 'purchases_request_id_uq' ||
+      error.constraint === 'purchases_rejected_request_id_uq')
+  );
+}
