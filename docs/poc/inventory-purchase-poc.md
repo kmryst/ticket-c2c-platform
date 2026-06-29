@@ -38,7 +38,7 @@ POST /events/:eventId/purchases
 3. 更新成功時は `purchases.status = confirmed` を記録する。
 4. 更新失敗時は `purchases.status = rejected` と `insufficient_inventory` を記録する。
 
-`requestId` は任意です。指定した場合、確定購入（`confirmed`）では `purchases_request_id_uq` により一意になり、重複時は API が `409` を返します。拒否された購入（`rejected`）の `requestId` は同じ値を再利用できるため、在庫補充後の再試行を妨げません。省略した場合は冪等性チェックを行いません。
+`requestId` は任意です。指定した場合、同じ購入者の確定購入（`confirmed`）では `purchases_request_id_uq` により一意になります。同じ buyer / event / requestId の確定済み購入を再試行した場合は、元の確定結果を返します。拒否された購入（`rejected`）の `requestId` は同じ値を再利用できるため、在庫補充後の再試行を妨げません。省略した場合は冪等性チェックを行いません。
 
 在庫更新の最終ガード:
 
@@ -143,7 +143,7 @@ npm run poc:inventory
 | DB confirmed quantity | 20 |
 | DB rejected purchases | 30 |
 | DB inventory version | 20 |
-| p50 latency | 159.58 ms |
-| p95 latency | 173.61 ms |
-| p99 latency | 177.78 ms |
+| p50 latency | 154.58 ms |
+| p95 latency | 170.86 ms |
+| p99 latency | 174.41 ms |
 | oversold | false |

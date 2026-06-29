@@ -69,7 +69,7 @@
 | `rejection_reason` | `TEXT` | 拒否理由 |
 | `created_at` | `TIMESTAMPTZ` | 作成日時 |
 
-`request_id` は任意ですが、確定購入（`confirmed`）では一意にします。拒否された購入（`rejected`）の `request_id` は同じ値を再利用できるため、在庫補充後の再試行を妨げません。将来的にリトライや二重送信の検証に使います。
+`request_id` は任意ですが、同じ購入者の確定購入（`confirmed`）では一意にします。拒否された購入（`rejected`）の `request_id` は同じ値を再利用できるため、在庫補充後の再試行を妨げません。将来的にリトライや二重送信の検証に使います。
 
 ## 購入確定の基本クエリ
 

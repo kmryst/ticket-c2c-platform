@@ -188,8 +188,8 @@ async function sendPurchase(
       requestId: `${runId}-${index}`,
     }),
   });
-  const latencyMs = performance.now() - startedAt;
   const body = (await response.json()) as PurchaseAttemptResult['body'];
+  const latencyMs = performance.now() - startedAt;
 
   return {
     ok: response.ok,
@@ -236,9 +236,12 @@ async function loadPurchaseSummary(pool: Pool, eventId: string) {
   };
 
   for (const row of result.rows) {
+    const count = parseFiniteNumber('purchase_count', row.purchase_count);
+    const quantity = parseFiniteNumber('total_quantity', row.total_quantity);
+
     summary[row.status] = {
-      count: Number(row.purchase_count),
-      quantity: Number(row.total_quantity),
+      count,
+      quantity,
     };
   }
 
@@ -272,6 +275,16 @@ function validatePositiveInteger(name: string, value: number) {
   if (!Number.isInteger(value) || value <= 0) {
     throw new Error(`${name} must be a positive integer`);
   }
+}
+
+function parseFiniteNumber(name: string, value: string): number {
+  const parsedValue = Number(value);
+
+  if (!Number.isFinite(parsedValue)) {
+    throw new Error(`Unexpected non-numeric ${name}: ${value}`);
+  }
+
+  return parsedValue;
 }
 
 function getRequiredDatabaseUrl(): string {

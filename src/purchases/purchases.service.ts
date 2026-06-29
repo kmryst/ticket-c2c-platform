@@ -22,6 +22,15 @@ interface InventoryUpdateRow {
   remaining_quantity: number;
 }
 
+interface ExistingConfirmedPurchaseRow {
+  purchase_id: string;
+  event_id: string;
+  buyer_id: string;
+  quantity: number;
+  rejection_reason: string | null;
+  remaining_quantity: number | null;
+}
+
 interface PurchaseRow {
   id: string;
 }
@@ -46,8 +55,46 @@ export class PurchasesService {
         [input.eventId],
       );
 
-      if (event.rowCount === 0) {
+      if (!event.rowCount) {
         throw new NotFoundException('event not found');
+      }
+
+      const existingConfirmed = input.requestId
+        ? await client.query<ExistingConfirmedPurchaseRow>(
+            `
+              SELECT
+                p.id AS purchase_id,
+                p.event_id,
+                p.buyer_id,
+                p.quantity,
+                p.rejection_reason,
+                i.remaining_quantity
+              FROM purchases p
+              LEFT JOIN ticket_inventory i
+                ON i.event_id = p.event_id
+              WHERE p.buyer_id = $1
+                AND p.event_id = $2
+                AND p.request_id = $3
+                AND p.status = 'confirmed'
+              LIMIT 1
+            `,
+            [input.buyerId, input.eventId, input.requestId],
+          )
+        : null;
+
+      if (existingConfirmed?.rowCount) {
+        await client.query('COMMIT');
+
+        const existingPurchase = existingConfirmed.rows[0];
+        return {
+          purchaseId: existingPurchase.purchase_id,
+          eventId: existingPurchase.event_id,
+          buyerId: existingPurchase.buyer_id,
+          quantity: existingPurchase.quantity,
+          status: 'confirmed',
+          rejectionReason: existingPurchase.rejection_reason,
+          remainingQuantity: existingPurchase.remaining_quantity,
+        };
       }
 
       const inventoryUpdate = await client.query<InventoryUpdateRow>(
@@ -65,6 +112,18 @@ export class PurchasesService {
       );
 
       const confirmed = inventoryUpdate.rowCount === 1;
+
+      if (!confirmed) {
+        const inventory = await client.query<EventRow>(
+          'SELECT event_id AS id FROM ticket_inventory WHERE event_id = $1',
+          [input.eventId],
+        );
+
+        if (!inventory.rowCount) {
+          throw new NotFoundException('ticket inventory not found');
+        }
+      }
+
       const rejectionReason = confirmed ? null : 'insufficient_inventory';
 
       const purchase = await client.query<PurchaseRow>(
@@ -109,6 +168,7 @@ export class PurchasesService {
       } catch (err) {
         rollbackError =
           err instanceof Error ? err : new Error('ROLLBACK failed');
+        console.error('ROLLBACK failed:', rollbackError);
         // Preserve the original purchase error if rollback fails after a broken connection.
       }
 

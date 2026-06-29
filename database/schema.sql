@@ -58,6 +58,6 @@ CREATE INDEX IF NOT EXISTS purchases_buyer_id_created_at_idx
 DROP INDEX IF EXISTS purchases_request_id_uq;
 
 CREATE UNIQUE INDEX purchases_request_id_uq
-  ON purchases (request_id)
+  ON purchases (buyer_id, request_id)
   WHERE request_id IS NOT NULL
     AND status = 'confirmed';
