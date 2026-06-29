@@ -7,7 +7,6 @@ import {
   Post,
 } from '@nestjs/common';
 import { PurchasesService } from './purchases.service';
-import { PurchaseRequestBody } from './purchase.types';
 
 @Controller('events/:eventId/purchases')
 export class PurchasesController {
@@ -17,7 +16,7 @@ export class PurchasesController {
   @HttpCode(200)
   async createPurchase(
     @Param('eventId') eventId: string,
-    @Body() body: PurchaseRequestBody,
+    @Body() body: unknown,
   ) {
     try {
       return await this.purchasesService.createPurchase(eventId, body);
@@ -39,4 +38,3 @@ function isUniqueViolation(error: unknown): boolean {
     error.code === '23505'
   );
 }
-

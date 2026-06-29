@@ -38,7 +38,7 @@ POST /events/:eventId/purchases
 3. 更新成功時は `purchases.status = confirmed` を記録する。
 4. 更新失敗時は `purchases.status = rejected` と `insufficient_inventory` を記録する。
 
-`requestId` は任意です。指定した場合は `purchases_request_id_uq` により一意になり、重複時は API が `409` を返します。省略した場合は冪等性チェックを行いません。
+`requestId` は任意です。指定した場合、確定購入（`confirmed`）では `purchases_request_id_uq` により一意になり、重複時は API が `409` を返します。拒否された購入（`rejected`）の `requestId` は同じ値を再利用できるため、在庫補充後の再試行を妨げません。省略した場合は冪等性チェックを行いません。
 
 在庫更新の最終ガード:
 
@@ -58,6 +58,12 @@ WHERE event_id = :event_id
 
 ```bash
 npm install
+```
+
+ローカル環境変数ファイルを作成する。
+
+```bash
+cp .env.example .env
 ```
 
 PostgreSQL を起動する。
@@ -101,7 +107,7 @@ npm run poc:inventory
 
 | 変数 | 既定値 | 説明 |
 |---|---:|---|
-| `DATABASE_URL` | `postgresql://ticket_poc:ticket_poc_password@localhost:5432/ticket_poc` | PostgreSQL 接続先 |
+| `DATABASE_URL` | 必須 | PostgreSQL 接続先 |
 | `API_BASE_URL` | `http://localhost:3000` | API 接続先 |
 | `POC_TOTAL_QUANTITY` | `20` | 検証イベントの総在庫 |
 | `POC_PURCHASE_ATTEMPTS` | `50` | 並列購入試行数 |
@@ -137,7 +143,7 @@ npm run poc:inventory
 | DB confirmed quantity | 20 |
 | DB rejected purchases | 30 |
 | DB inventory version | 20 |
-| p50 latency | 153.20 ms |
-| p95 latency | 166.67 ms |
-| p99 latency | 174.02 ms |
+| p50 latency | 159.58 ms |
+| p95 latency | 173.61 ms |
+| p99 latency | 177.78 ms |
 | oversold | false |

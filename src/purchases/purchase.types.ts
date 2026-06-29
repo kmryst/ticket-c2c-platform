@@ -6,6 +6,13 @@ export interface PurchaseRequestBody {
   requestId?: unknown;
 }
 
+export interface ParsedPurchaseInput {
+  eventId: string;
+  buyerId: string;
+  quantity: number;
+  requestId?: string;
+}
+
 export interface PurchaseResult {
   purchaseId: string;
   eventId: string;
@@ -15,4 +22,3 @@ export interface PurchaseResult {
   rejectionReason: string | null;
   remainingQuantity: number | null;
 }
-

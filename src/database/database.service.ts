@@ -1,13 +1,11 @@
+import 'dotenv/config';
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Pool, PoolClient } from 'pg';
-
-const DEFAULT_DATABASE_URL =
-  'postgresql://ticket_poc:ticket_poc_password@localhost:5432/ticket_poc';
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
   private readonly pool = new Pool({
-    connectionString: process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL,
+    connectionString: getRequiredDatabaseUrl(),
   });
 
   connect(): Promise<PoolClient> {
@@ -17,4 +15,12 @@ export class DatabaseService implements OnModuleDestroy {
   async onModuleDestroy() {
     await this.pool.end();
   }
+}
+
+function getRequiredDatabaseUrl(): string {
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL is required. Copy .env.example to .env for local PoC runs.');
+  }
+
+  return process.env.DATABASE_URL;
 }

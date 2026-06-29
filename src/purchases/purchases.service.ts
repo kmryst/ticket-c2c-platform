@@ -4,10 +4,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
-import { PurchaseRequestBody, PurchaseResult } from './purchase.types';
+import {
+  ParsedPurchaseInput,
+  PurchaseRequestBody,
+  PurchaseResult,
+} from './purchase.types';
 
 const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const POSTGRES_INT4_MAX = 2_147_483_647;
 
 interface EventRow {
   id: string;
@@ -27,10 +32,11 @@ export class PurchasesService {
 
   async createPurchase(
     eventId: string,
-    body: PurchaseRequestBody,
+    body: unknown,
   ): Promise<PurchaseResult> {
     const input = parsePurchaseInput(eventId, body);
     const client = await this.database.connect();
+    let rollbackError: Error | undefined;
 
     try {
       await client.query('BEGIN');
@@ -100,45 +106,63 @@ export class PurchasesService {
     } catch (error) {
       try {
         await client.query('ROLLBACK');
-      } catch {
+      } catch (err) {
+        rollbackError =
+          err instanceof Error ? err : new Error('ROLLBACK failed');
         // Preserve the original purchase error if rollback fails after a broken connection.
       }
 
       throw error;
     } finally {
-      client.release();
+      client.release(rollbackError);
     }
   }
 }
 
-function parsePurchaseInput(eventId: string, body: PurchaseRequestBody) {
+function parsePurchaseInput(
+  eventId: string,
+  body: unknown,
+): ParsedPurchaseInput {
   if (!UUID_PATTERN.test(eventId)) {
     throw new BadRequestException('eventId must be a UUID');
   }
 
-  if (typeof body.buyerId !== 'string' || !UUID_PATTERN.test(body.buyerId)) {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new BadRequestException('request body must be an object');
+  }
+
+  const requestBody = body as PurchaseRequestBody;
+
+  if (
+    typeof requestBody.buyerId !== 'string' ||
+    !UUID_PATTERN.test(requestBody.buyerId)
+  ) {
     throw new BadRequestException('buyerId must be a UUID');
   }
 
   if (
-    typeof body.quantity !== 'number' ||
-    !Number.isInteger(body.quantity) ||
-    body.quantity <= 0
+    typeof requestBody.quantity !== 'number' ||
+    !Number.isInteger(requestBody.quantity) ||
+    requestBody.quantity <= 0 ||
+    requestBody.quantity > POSTGRES_INT4_MAX
   ) {
-    throw new BadRequestException('quantity must be a positive integer');
+    throw new BadRequestException(
+      'quantity must be a positive integer up to 2147483647',
+    );
   }
 
   if (
-    body.requestId !== undefined &&
-    (typeof body.requestId !== 'string' || body.requestId.length === 0)
+    requestBody.requestId !== undefined &&
+    (typeof requestBody.requestId !== 'string' ||
+      requestBody.requestId.length === 0)
   ) {
     throw new BadRequestException('requestId must be a non-empty string');
   }
 
   return {
     eventId,
-    buyerId: body.buyerId,
-    quantity: body.quantity,
-    requestId: body.requestId,
+    buyerId: requestBody.buyerId,
+    quantity: requestBody.quantity,
+    requestId: requestBody.requestId,
   };
 }

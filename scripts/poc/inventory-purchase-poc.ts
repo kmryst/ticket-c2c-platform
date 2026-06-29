@@ -1,11 +1,9 @@
+import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Pool } from 'pg';
 
-const DEFAULT_DATABASE_URL =
-  'postgresql://ticket_poc:ticket_poc_password@localhost:5432/ticket_poc';
-
-const databaseUrl = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
+const databaseUrl = getRequiredDatabaseUrl();
 const apiBaseUrl = process.env.API_BASE_URL ?? 'http://localhost:3000';
 const totalQuantity = Number(process.env.POC_TOTAL_QUANTITY ?? 20);
 const purchaseAttempts = Number(process.env.POC_PURCHASE_ATTEMPTS ?? 50);
@@ -68,8 +66,10 @@ async function main() {
       };
     });
 
-    const inventory = await loadInventory(pool, eventId);
-    const purchaseSummary = await loadPurchaseSummary(pool, eventId);
+    const [inventory, purchaseSummary] = await Promise.all([
+      loadInventory(pool, eventId),
+      loadPurchaseSummary(pool, eventId),
+    ]);
     const latencySummary = summarizeLatency(
       settled.map((result) => result.latencyMs).filter((value) => value > 0),
     );
@@ -274,5 +274,12 @@ function validatePositiveInteger(name: string, value: number) {
   }
 }
 
-void main();
+function getRequiredDatabaseUrl(): string {
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL is required. Copy .env.example to .env for local PoC runs.');
+  }
 
+  return process.env.DATABASE_URL;
+}
+
+void main();

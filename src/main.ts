@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
@@ -8,7 +9,7 @@ async function bootstrap() {
     AppModule,
     new FastifyAdapter(),
   );
-  const port = Number(process.env.PORT ?? 3000);
+  const port = parsePort(process.env.PORT);
 
   app.enableShutdownHooks();
 
@@ -16,3 +17,17 @@ async function bootstrap() {
 }
 
 void bootstrap();
+
+function parsePort(value: string | undefined): number {
+  if (!value) {
+    return 3000;
+  }
+
+  const port = Number(value);
+
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error('PORT must be an integer between 1 and 65535');
+  }
+
+  return port;
+}
