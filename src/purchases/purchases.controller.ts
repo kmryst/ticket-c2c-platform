@@ -37,6 +37,7 @@ function isUniqueViolation(error: unknown): boolean {
     'code' in error &&
     error.code === '23505' &&
     'constraint' in error &&
-    error.constraint === 'purchases_request_id_uq'
+    (error.constraint === 'purchases_request_id_uq' ||
+      error.constraint === 'purchases_rejected_request_id_uq')
   );
 }

@@ -38,7 +38,7 @@ POST /events/:eventId/purchases
 3. 更新成功時は `purchases.status = confirmed` を記録する。
 4. 更新失敗時は `purchases.status = rejected` と `insufficient_inventory` を記録する。
 
-`requestId` は任意です。指定した場合、同じ購入者の確定購入（`confirmed`）では `purchases_request_id_uq` により一意になります。同じ buyer / event / requestId の確定済み購入を再試行した場合は、元の確定結果を返します。拒否された購入（`rejected`）の `requestId` は同じ値を再利用できるため、在庫補充後の再試行を妨げません。省略した場合は冪等性チェックを行いません。
+`requestId` は任意です。指定した場合、同じ購入者・同じイベントの確定購入（`confirmed`）では `purchases_request_id_uq` により一意になります。同じ buyer / event / requestId の確定済み購入を再試行した場合は、元の確定結果を返します。拒否された購入（`rejected`）は同じ buyer / event / requestId で重複記録しないようにしつつ、在庫補充後に確定購入として再試行できます。省略した場合は冪等性チェックを行いません。
 
 在庫更新の最終ガード:
 
@@ -97,7 +97,7 @@ npm run poc:inventory
 
 - 検証用イベントを 1 件作成する。
 - 同じイベントに初期在庫を作成する。
-- API 経由で在庫数を超える購入リクエストを並列送信する。
+- API 経由で在庫数を超える購入リクエストを、設定した concurrency で並列送信する。
 - 成功数、拒否数、API エラー数、残在庫、確定購入数、p50 / p95 / p99 レイテンシを出力する。
 - 在庫超過、または API エラーがあれば終了コード `1` にする。
 
@@ -111,6 +111,7 @@ npm run poc:inventory
 | `API_BASE_URL` | `http://localhost:3000` | API 接続先 |
 | `POC_TOTAL_QUANTITY` | `20` | 検証イベントの総在庫 |
 | `POC_PURCHASE_ATTEMPTS` | `50` | 並列購入試行数 |
+| `POC_PURCHASE_CONCURRENCY` | `9` | 同時に送る購入リクエスト数 |
 | `POC_PURCHASE_QUANTITY` | `1` | 1 リクエストあたりの購入枚数 |
 
 受け入れ確認の観点:
@@ -128,12 +129,14 @@ npm run poc:inventory
 
 - `POC_TOTAL_QUANTITY=20`
 - `POC_PURCHASE_ATTEMPTS=50`
+- `POC_PURCHASE_CONCURRENCY=9`
 - `POC_PURCHASE_QUANTITY=1`
 
 結果:
 
 | 指標 | 値 |
 |---|---:|
+| API concurrency | 9 |
 | API confirmed | 20 |
 | API rejected | 30 |
 | API errors | 0 |
@@ -143,7 +146,7 @@ npm run poc:inventory
 | DB confirmed quantity | 20 |
 | DB rejected purchases | 30 |
 | DB inventory version | 20 |
-| p50 latency | 145.17 ms |
-| p95 latency | 162.79 ms |
-| p99 latency | 167.36 ms |
+| p50 latency | 11.23 ms |
+| p95 latency | 54.41 ms |
+| p99 latency | 72.68 ms |
 | oversold | false |

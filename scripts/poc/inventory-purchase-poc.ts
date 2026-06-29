@@ -7,6 +7,7 @@ const databaseUrl = getRequiredDatabaseUrl();
 const apiBaseUrl = process.env.API_BASE_URL ?? 'http://localhost:3000';
 const totalQuantity = Number(process.env.POC_TOTAL_QUANTITY ?? 20);
 const purchaseAttempts = Number(process.env.POC_PURCHASE_ATTEMPTS ?? 50);
+const purchaseConcurrency = Number(process.env.POC_PURCHASE_CONCURRENCY ?? 9);
 const purchaseQuantity = Number(process.env.POC_PURCHASE_QUANTITY ?? 1);
 
 interface PurchaseApiResult {
@@ -38,19 +39,28 @@ interface PurchaseSummaryRow {
 async function main() {
   validatePositiveInteger('POC_TOTAL_QUANTITY', totalQuantity);
   validatePositiveInteger('POC_PURCHASE_ATTEMPTS', purchaseAttempts);
+  validatePositiveInteger('POC_PURCHASE_CONCURRENCY', purchaseConcurrency);
   validatePositiveInteger('POC_PURCHASE_QUANTITY', purchaseQuantity);
 
-  const pool = new Pool({ connectionString: databaseUrl });
+  const pool = new Pool({
+    connectionString: databaseUrl,
+    connectionTimeoutMillis: 5000,
+    idleTimeoutMillis: 30_000,
+    max: 10,
+  });
+  pool.on('error', (error) => {
+    console.error('Unexpected PoC pool error:', error);
+  });
 
   try {
     await assertApiIsReady();
     const eventId = await seedEvent(pool);
     const runId = randomUUID();
 
-    const results = await Promise.allSettled(
-      Array.from({ length: purchaseAttempts }, (_, index) =>
-        sendPurchase(eventId, runId, index),
-      ),
+    const results = await runWithConcurrency(
+      purchaseAttempts,
+      purchaseConcurrency,
+      (index) => sendPurchase(eventId, runId, index),
     );
 
     const settled = results.map((result): PurchaseAttemptResult => {
@@ -98,6 +108,7 @@ async function main() {
     const summary = {
       eventId,
       attempts: purchaseAttempts,
+      concurrency: purchaseConcurrency,
       purchaseQuantity,
       api: {
         confirmed: apiConfirmed,
@@ -275,6 +286,24 @@ function validatePositiveInteger(name: string, value: number) {
   if (!Number.isInteger(value) || value <= 0) {
     throw new Error(`${name} must be a positive integer`);
   }
+}
+
+async function runWithConcurrency<T>(
+  itemCount: number,
+  concurrency: number,
+  task: (index: number) => Promise<T>,
+): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = [];
+
+  for (let start = 0; start < itemCount; start += concurrency) {
+    const end = Math.min(itemCount, start + concurrency);
+    const batch = Array.from({ length: end - start }, (_, offset) =>
+      task(start + offset),
+    );
+    results.push(...(await Promise.allSettled(batch)));
+  }
+
+  return results;
 }
 
 function parseFiniteNumber(name: string, value: string): number {

@@ -67,9 +67,10 @@
 | `quantity` | `INTEGER` | 購入枚数 |
 | `status` | `purchase_status` | `confirmed` または `rejected` |
 | `rejection_reason` | `TEXT` | 拒否理由 |
+| `remaining_quantity_after` | `INTEGER` | 確定購入後の残在庫。拒否時は `NULL` |
 | `created_at` | `TIMESTAMPTZ` | 作成日時 |
 
-`request_id` は任意ですが、同じ購入者の確定購入（`confirmed`）では一意にします。拒否された購入（`rejected`）の `request_id` は同じ値を再利用できるため、在庫補充後の再試行を妨げません。将来的にリトライや二重送信の検証に使います。
+`request_id` は任意ですが、同じ購入者・同じイベントの確定購入（`confirmed`）では一意にします。拒否された購入（`rejected`）は同じ購入者・同じイベント・同じ `request_id` で重複記録しないようにしつつ、在庫補充後に確定購入として再試行できるようにします。将来的にリトライや二重送信の検証に使います。
 
 ## 購入確定の基本クエリ
 

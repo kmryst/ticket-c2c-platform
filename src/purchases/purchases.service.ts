@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
@@ -27,8 +28,19 @@ interface ExistingConfirmedPurchaseRow {
   event_id: string;
   buyer_id: string;
   quantity: number;
+  status: 'confirmed';
   rejection_reason: string | null;
-  remaining_quantity: number | null;
+  remaining_quantity_after: number | null;
+}
+
+interface ExistingRejectedPurchaseRow {
+  purchase_id: string;
+  event_id: string;
+  buyer_id: string;
+  quantity: number;
+  status: 'rejected';
+  rejection_reason: string;
+  remaining_quantity_after: null;
 }
 
 interface PurchaseRow {
@@ -60,41 +72,13 @@ export class PurchasesService {
       }
 
       const existingConfirmed = input.requestId
-        ? await client.query<ExistingConfirmedPurchaseRow>(
-            `
-              SELECT
-                p.id AS purchase_id,
-                p.event_id,
-                p.buyer_id,
-                p.quantity,
-                p.rejection_reason,
-                i.remaining_quantity
-              FROM purchases p
-              LEFT JOIN ticket_inventory i
-                ON i.event_id = p.event_id
-              WHERE p.buyer_id = $1
-                AND p.event_id = $2
-                AND p.request_id = $3
-                AND p.status = 'confirmed'
-              LIMIT 1
-            `,
-            [input.buyerId, input.eventId, input.requestId],
-          )
+        ? await findExistingConfirmedPurchase(client, input)
         : null;
 
       if (existingConfirmed?.rowCount) {
         await client.query('COMMIT');
 
-        const existingPurchase = existingConfirmed.rows[0];
-        return {
-          purchaseId: existingPurchase.purchase_id,
-          eventId: existingPurchase.event_id,
-          buyerId: existingPurchase.buyer_id,
-          quantity: existingPurchase.quantity,
-          status: 'confirmed',
-          rejectionReason: existingPurchase.rejection_reason,
-          remainingQuantity: existingPurchase.remaining_quantity,
-        };
+        return toPurchaseResult(existingConfirmed.rows[0]);
       }
 
       const inventoryUpdate = await client.query<InventoryUpdateRow>(
@@ -120,11 +104,32 @@ export class PurchasesService {
         );
 
         if (!inventory.rowCount) {
-          throw new NotFoundException('ticket inventory not found');
+          console.error('ticket inventory not found for existing event', {
+            eventId: input.eventId,
+          });
+          throw new InternalServerErrorException(
+            'ticket inventory is not configured',
+          );
+        }
+
+        if (input.requestId) {
+          const existingRejected = await findExistingRejectedPurchase(
+            client,
+            input,
+          );
+
+          if (existingRejected.rowCount) {
+            await client.query('COMMIT');
+
+            return toPurchaseResult(existingRejected.rows[0]);
+          }
         }
       }
 
       const rejectionReason = confirmed ? null : 'insufficient_inventory';
+      const remainingQuantityAfter = confirmed
+        ? inventoryUpdate.rows[0].remaining_quantity
+        : null;
 
       const purchase = await client.query<PurchaseRow>(
         `
@@ -134,9 +139,10 @@ export class PurchasesService {
             request_id,
             quantity,
             status,
-            rejection_reason
+            rejection_reason,
+            remaining_quantity_after
           )
-          VALUES ($1, $2, $3, $4, $5, $6)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
           RETURNING id
         `,
         [
@@ -146,6 +152,7 @@ export class PurchasesService {
           input.quantity,
           confirmed ? 'confirmed' : 'rejected',
           rejectionReason,
+          remainingQuantityAfter,
         ],
       );
 
@@ -158,9 +165,7 @@ export class PurchasesService {
         quantity: input.quantity,
         status: confirmed ? 'confirmed' : 'rejected',
         rejectionReason,
-        remainingQuantity: confirmed
-          ? inventoryUpdate.rows[0].remaining_quantity
-          : null,
+        remainingQuantity: remainingQuantityAfter,
       };
     } catch (error) {
       try {
@@ -172,11 +177,119 @@ export class PurchasesService {
         // Preserve the original purchase error if rollback fails after a broken connection.
       }
 
+      if (!rollbackError && input.requestId) {
+        if (isConfirmedRequestIdConflict(error)) {
+          const existingConfirmed = await findExistingConfirmedPurchase(
+            client,
+            input,
+          );
+
+          if (existingConfirmed.rowCount) {
+            return toPurchaseResult(existingConfirmed.rows[0]);
+          }
+        }
+
+        if (isRejectedRequestIdConflict(error)) {
+          const existingRejected = await findExistingRejectedPurchase(
+            client,
+            input,
+          );
+
+          if (existingRejected.rowCount) {
+            return toPurchaseResult(existingRejected.rows[0]);
+          }
+        }
+      }
+
       throw error;
     } finally {
       client.release(rollbackError);
     }
   }
+}
+
+function findExistingConfirmedPurchase(
+  client: { query: typeof import('pg').Client.prototype.query },
+  input: ParsedPurchaseInput,
+) {
+  return client.query<ExistingConfirmedPurchaseRow>(
+    `
+      SELECT
+        id AS purchase_id,
+        event_id,
+        buyer_id,
+        quantity,
+        status,
+        rejection_reason,
+        remaining_quantity_after
+      FROM purchases
+      WHERE buyer_id = $1
+        AND event_id = $2
+        AND request_id = $3
+        AND status = 'confirmed'
+      LIMIT 1
+    `,
+    [input.buyerId, input.eventId, input.requestId],
+  );
+}
+
+function findExistingRejectedPurchase(
+  client: { query: typeof import('pg').Client.prototype.query },
+  input: ParsedPurchaseInput,
+) {
+  return client.query<ExistingRejectedPurchaseRow>(
+    `
+      SELECT
+        id AS purchase_id,
+        event_id,
+        buyer_id,
+        quantity,
+        status,
+        rejection_reason,
+        remaining_quantity_after
+      FROM purchases
+      WHERE buyer_id = $1
+        AND event_id = $2
+        AND request_id = $3
+        AND status = 'rejected'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [input.buyerId, input.eventId, input.requestId],
+  );
+}
+
+function toPurchaseResult(
+  purchase: ExistingConfirmedPurchaseRow | ExistingRejectedPurchaseRow,
+): PurchaseResult {
+  return {
+    purchaseId: purchase.purchase_id,
+    eventId: purchase.event_id,
+    buyerId: purchase.buyer_id,
+    quantity: purchase.quantity,
+    status: purchase.status,
+    rejectionReason: purchase.rejection_reason,
+    remainingQuantity: purchase.remaining_quantity_after,
+  };
+}
+
+function isConfirmedRequestIdConflict(error: unknown): boolean {
+  return isConstraintViolation(error, 'purchases_request_id_uq');
+}
+
+function isRejectedRequestIdConflict(error: unknown): boolean {
+  return isConstraintViolation(error, 'purchases_rejected_request_id_uq');
+}
+
+function isConstraintViolation(error: unknown, constraint: string): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === '23505' &&
+    'constraint' in error &&
+    error.constraint === constraint
+  );
 }
 
 function parsePurchaseInput(
