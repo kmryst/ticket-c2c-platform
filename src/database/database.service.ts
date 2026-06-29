@@ -6,7 +6,16 @@ import { Pool, PoolClient } from 'pg';
 export class DatabaseService implements OnModuleDestroy {
   private readonly pool = new Pool({
     connectionString: getRequiredDatabaseUrl(),
+    connectionTimeoutMillis: 5000,
+    idleTimeoutMillis: 30_000,
+    max: 10,
   });
+
+  constructor() {
+    this.pool.on('error', (error) => {
+      console.error('Unexpected pg pool error:', error);
+    });
+  }
 
   connect(): Promise<PoolClient> {
     return this.pool.connect();

@@ -5,9 +5,9 @@
   "description": "C2C ticket platform architecture and local PoC workspace.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/main.js",
+    "start": "node dist/src/main.js",
     "start:dev": "ts-node src/main.ts",
-    "poc:inventory": "ts-node scripts/poc/inventory-purchase-poc.ts"
+    "poc:inventory": "ts-node --project tsconfig.scripts.json scripts/poc/inventory-purchase-poc.ts"
   },
   "engines": {
     "node": ">=20"

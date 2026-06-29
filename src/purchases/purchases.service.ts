@@ -51,7 +51,7 @@ export class PurchasesService {
       await client.query('BEGIN');
 
       const event = await client.query<EventRow>(
-        'SELECT id FROM events WHERE id = $1',
+        'SELECT id FROM events WHERE id = $1 FOR SHARE',
         [input.eventId],
       );
 

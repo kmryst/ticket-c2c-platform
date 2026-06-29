@@ -143,7 +143,7 @@ npm run poc:inventory
 | DB confirmed quantity | 20 |
 | DB rejected purchases | 30 |
 | DB inventory version | 20 |
-| p50 latency | 154.58 ms |
-| p95 latency | 170.86 ms |
-| p99 latency | 174.41 ms |
+| p50 latency | 145.17 ms |
+| p95 latency | 162.79 ms |
+| p99 latency | 167.36 ms |
 | oversold | false |
