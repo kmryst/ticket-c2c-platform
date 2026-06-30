@@ -12,18 +12,43 @@
 
 ```mermaid
 flowchart LR
-  script[PoC script<br/>inventory-purchase-poc.ts]
-  entry[HTTP入口<br/>purchases.controller.ts]
-  logic[購入判定ロジック<br/>purchases.service.ts]
-  dbconn[DB接続プール<br/>database.service.ts]
-  db[(在庫・購入DB<br/>schema.sql)]
+  script["PoC script<br>inventory-purchase-poc.ts"]
+  entry["HTTP entry<br>purchases.controller.ts"]
+  logic["Purchase logic<br>purchases.service.ts"]
+  dbconn["DB pool<br>database.service.ts"]
+  db[("Inventory DB<br>schema.sql")]
 
-  script -->|購入POST| entry
+  script -->|purchase POST| entry
   entry --> logic
   logic --> dbconn
   dbconn --> db
 
-  script -->|seed / 集計| db
+  script -->|seed / summary| db
+```
+
+Mermaid が表示されない環境では、次の関係として読みます。
+
+```text
+PoC script
+  inventory-purchase-poc.ts
+    | purchase POST
+    v
+HTTP entry
+  purchases.controller.ts
+    |
+    v
+Purchase logic
+  purchases.service.ts
+    |
+    v
+DB pool
+  database.service.ts
+    |
+    v
+Inventory DB
+  schema.sql
+
+PoC script は seed / 集計のために DB も直接読む。
 ```
 
 ## 主要ファイル
