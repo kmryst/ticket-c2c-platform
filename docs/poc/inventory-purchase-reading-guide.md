@@ -114,44 +114,6 @@ try {
 - `runWithConcurrency(...)` は購入リクエストを `purchaseConcurrency` 件ずつ並列実行する。
 - `finally` で `pool.end()` を呼び、成功・失敗に関係なく DB 接続を閉じる。
 
-## 用語メモ
-
-| 用語 | この PoC での意味 |
-|---|---|
-| `event` | チケット販売対象のライブ、試合、公演など |
-| `eventId` | 購入対象イベントの UUID |
-| `seed` | 検証前に必要なイベントや在庫を DB に入れること |
-| `pool` | PostgreSQL 接続を使い回すための接続 pool |
-| `attempt` | 成功するかどうかとは別に、購入を 1 回試すこと |
-| `runId` | 今回の PoC 実行を識別する UUID |
-| `requestId` | 同じ購入リクエストの再送を見分けるための任意 ID |
-| `confirmed` | 在庫を確保できた購入 |
-| `rejected` | 在庫不足などで確保できなかった購入 |
-| `oversold` | 在庫数を超えて購入確定してしまった状態 |
-
-## `async` / `await` の読み方
-
-`async` が付いた関数は `Promise` を返します。DB アクセスや HTTP リクエストのように、結果が返るまで時間差がある処理で使います。
-
-`await` は、非同期処理の完了を待ち、`Promise` の中身を取り出すために使います。
-
-この PoC の `main()` では、次のように読みます。
-
-```text
-await assertApiIsReady()
-  API の起動確認が終わるまで待つ。
-
-const eventId = await seedEvent(pool)
-  DB に検証用イベントと在庫を作り終わるまで待つ。
-  完了したら eventId を受け取る。
-
-const runId = randomUUID()
-  同期処理なので、その場で UUID が返る。
-
-const results = await runWithConcurrency(...)
-  購入リクエスト群の実行がすべて終わるまで待つ。
-```
-
 ## このガイドの範囲外
 
 このガイドは、現行の在庫購入 PoC を読むための最小メモです。次の内容は別フェーズで扱います。
