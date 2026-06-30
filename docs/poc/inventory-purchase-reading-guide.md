@@ -85,56 +85,7 @@ inventory-purchase-poc.ts
 
 ## `main()` の中核処理
 
-`main()` はこのスクリプト全体の流れを決める関数です。最初に読むべき中核部分は次です。
-
-```ts
-try {
-  // NestJS API が起動しているか確認する。
-  // 中では GET /health を呼ぶ。
-  // await があるので、この確認が終わるまで次の行には進まない。
-  await assertApiIsReady();
-
-  // PostgreSQL に検証用の event と ticket_inventory を作る。
-  // seedEvent は非同期関数なので、DB の INSERT が終わるまで await で待つ。
-  // 完了すると、作成されたイベントの UUID が eventId として返る。
-  const eventId = await seedEvent(pool);
-
-  // 今回の PoC 実行を識別するための UUID を作る。
-  // randomUUID は同期処理なので await は不要。
-  // この runId は、各購入リクエストの requestId に含めて使う。
-  const runId = randomUUID();
-
-  // 購入リクエストを複数回送る。
-  // purchaseAttempts は合計試行回数。
-  // purchaseConcurrency は同時に実行する件数。
-  //
-  // main から見ると await があるので、
-  // runWithConcurrency 全体が完了するまで次の処理には進まない。
-  //
-  // ただし runWithConcurrency の中では、
-  // sendPurchase を purchaseConcurrency 件ずつ並列実行する。
-  const results = await runWithConcurrency(
-    purchaseAttempts,
-    purchaseConcurrency,
-
-    // runWithConcurrency が各 index に対して呼び出す関数。
-    // index は 0, 1, 2... のような購入試行番号。
-    // sendPurchase は API に POST /events/:eventId/purchases を送る。
-    // eventId は購入対象イベント、runId は今回の実行 ID、
-    // index は requestId を一意にするために使う。
-    (index) => sendPurchase(eventId, runId, index),
-  );
-
-  // results には、各購入リクエストの実行結果が入る。
-  // この後の処理で confirmed / rejected / error を集計する。
-} finally {
-  // try の中で成功しても失敗しても必ず実行される。
-  // PostgreSQL 接続 pool を閉じて、DB 接続を後片付けする。
-  await pool.end();
-}
-```
-
-コメントを外すと、流れは次のように読めます。
+`main()` はこのスクリプト全体の流れを決める関数です。まずは次の範囲を見ると、PoC の実行順がつかめます。
 
 ```ts
 try {
@@ -157,11 +108,11 @@ try {
 
 この範囲で押さえること:
 
-- `assertApiIsReady()` は API 起動確認だけを行うため、戻り値を変数に入れない。
-- `seedEvent(pool)` は作成したイベント ID を後で使うため、`eventId` に入れる。
-- `randomUUID()` は同期処理なので `await` しない。
-- `runWithConcurrency(...)` は、内部で複数の `sendPurchase()` を並列実行する。
-- `finally` の `pool.end()` は、成功しても失敗しても DB 接続を閉じるために実行される。
+- `assertApiIsReady()` で API の `/health` を確認してから進む。
+- `seedEvent(pool)` で検証用イベントと在庫を作り、以後の購入対象になる `eventId` を受け取る。
+- `runId` は今回の実行を識別する UUID で、各購入リクエストの `requestId` に使う。
+- `runWithConcurrency(...)` は購入リクエストを `purchaseConcurrency` 件ずつ並列実行する。
+- `finally` で `pool.end()` を呼び、成功・失敗に関係なく DB 接続を閉じる。
 
 ## 用語メモ
 
