@@ -6,6 +6,8 @@
 
 この PoC は、PostgreSQL の条件付き更新で同時購入時の在庫超過を防げるかを確認するための最小検証です。
 
+コードを読む入口として、[在庫購入 PoC 読み解きガイド](./inventory-purchase-reading-guide.md) も参照してください。
+
 ## 対象
 
 - NestJS API。
