@@ -8,7 +8,7 @@
 
 ## 構成図
 
-現行 PoC は、検証スクリプトが API を叩き、API が PostgreSQL の在庫を条件付き更新する構成です。Valkey は Docker Compose にありますが、現行の購入経路ではまだ使っていません。
+現行 PoC は、検証スクリプトが API を叩き、API が PostgreSQL の在庫を条件付き更新する構成です。Valkey は Docker Compose にありますが、現行の購入経路ではまだ使っていないため、図には含めません。
 
 ```mermaid
 flowchart LR
@@ -74,6 +74,8 @@ inventory-purchase-poc.ts
 ## `inventory-purchase-poc.ts` の役割
 
 `scripts/poc/inventory-purchase-poc.ts` は、購入処理そのものではありません。PoC を外側から動かして、結果を確認するためのスクリプトです。
+
+在庫超過を防ぐ本体は、`src/purchases/purchases.service.ts` の `remaining_quantity >= quantity` を含む conditional UPDATE です。このスクリプトは、その購入経路を HTTP 経由で並列に叩き、DB の最終状態を検証します。
 
 主な役割:
 
