@@ -1,0 +1,64 @@
+name: deploy-app
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "deploy する環境"
+        required: true
+        type: choice
+        options: [dev]
+        default: dev
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+
+env:
+  ECR_REPOSITORY: ticket-c2c-dev
+  ECS_CLUSTER: ticket-c2c-dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (apply role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}"
+          docker build -t "$IMAGE:latest" -t "$IMAGE:${GITHUB_SHA::7}" .
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:${GITHUB_SHA::7}"
+          echo "pushed $IMAGE:${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update ECS services
+        run: |
+          for SVC in ticket-c2c-dev-api ticket-c2c-dev-worker; do
+            aws ecs update-service \
+              --cluster "$ECS_CLUSTER" \
+              --service "$SVC" \
+              --force-new-deployment \
+              --query 'service.serviceName' --output text
+          done
+
+      - name: Wait for services stable
+        run: |
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services ticket-c2c-dev-api ticket-c2c-dev-worker
+          echo "services stable" >> "$GITHUB_STEP_SUMMARY"

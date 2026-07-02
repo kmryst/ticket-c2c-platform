@@ -1,0 +1,51 @@
+name: terraform-apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "apply する環境"
+        required: true
+        type: choice
+        options: [dev]
+        default: dev
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-${{ inputs.environment }}
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    # Environment protection（承認・ブランチ制限）と IAM 信頼ポリシーの両方で dev に限定される
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: terraform/environments/${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.8"
+
+      - name: Configure AWS credentials (apply role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        run: terraform plan -input=false -no-color -out=tfplan.bin
+
+      - name: Terraform apply
+        run: terraform apply -input=false -no-color tfplan.bin
+
+      - name: Outputs
+        run: terraform output -no-color >> "$GITHUB_STEP_SUMMARY"

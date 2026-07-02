@@ -29,3 +29,19 @@ output "event_bus_name" {
 output "search_projection_queue_url" {
   value = module.search_projection_queue.queue_url
 }
+
+output "alb_dns_name" {
+  value = module.alb.dns_name
+}
+
+output "ecs_cluster_name" {
+  value = aws_ecs_cluster.this.name
+}
+
+output "api_service_name" {
+  value = module.api_service.service_name
+}
+
+output "worker_service_name" {
+  value = module.worker_service.service_name
+}
