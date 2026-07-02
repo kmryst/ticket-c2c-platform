@@ -35,7 +35,8 @@ export interface ParsedPurchaseInput {
 // confirmed / rejected を同じ形にしておくと、PoC script 側で集計しやすくなります。
 export interface PurchaseResult {
   // purchaseId は purchases table に記録された購入履歴 row の UUID です。
-  purchaseId: string;
+  // Valkey 前段フィルタで即時拒否した場合は DB に記録しないため null になります。
+  purchaseId: string | null;
   // eventId はどのイベントへの購入判定だったかを response に戻すための値です。
   eventId: string;
   // buyerId はどの購入者からの購入判定だったかを response に戻すための値です。

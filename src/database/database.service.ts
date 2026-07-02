@@ -10,6 +10,9 @@ import 'dotenv/config';
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 // Pool は PostgreSQL 接続プール、PoolClient はプールから借りた 1 接続を表します。
 import { Pool, PoolClient } from 'pg';
+// buildDatabaseUrl は DATABASE_URL、または dev 環境の DB_* 分解値から接続文字列を作ります。
+// isDatabaseSslEnabled は Aurora など TLS 接続が必要な環境かを判定します。
+import { buildDatabaseUrl, isDatabaseSslEnabled } from '../config';
 
 // @Injectable() により、他の service から constructor injection で使えるようになります。
 @Injectable()
@@ -18,13 +21,16 @@ export class DatabaseService implements OnModuleDestroy {
   // pool は API プロセス内で 1 つだけ作る PostgreSQL 接続プールです。
   // 購入処理ごとにこの pool から client を借りて、明示的な transaction を張ります。
   private readonly pool = new Pool({
-    // DATABASE_URL は .env から読み込み、接続先 DB を 1 箇所で決めます。
-    connectionString: getRequiredDatabaseUrl(),
+    // 接続文字列はローカル（DATABASE_URL）と dev（DB_* + Secrets Manager 注入）の両対応です。
+    connectionString: buildDatabaseUrl(),
+    // Aurora では TLS で接続します。dev は VPC 内 + SG 制限を信頼し証明書検証を省略します。
+    ssl: isDatabaseSslEnabled() ? { rejectUnauthorized: false } : undefined,
     // 接続確立が 5 秒を超えたら失敗させ、API が固まったように見える状態を避けます。
     connectionTimeoutMillis: 5000,
     // 未使用接続は 30 秒で pool から閉じ、ローカル PoC の余計な接続保持を抑えます。
     idleTimeoutMillis: 30_000,
     // API 側 pool の最大接続数です。PoC script の同時実行数はこれを超えないよう調整しています。
+    // 人気イベント集中時に 1 タスクが Aurora のコネクションを食い尽くさないための上限でもあります。
     max: 10,
   });
 
@@ -49,17 +55,4 @@ export class DatabaseService implements OnModuleDestroy {
     // pg pool を閉じることで、ローカル実行時に Node.js の open handle が残るのを防ぎます。
     await this.pool.end();
   }
-}
-
-// getRequiredDatabaseUrl は DB 接続文字列が設定済みかを起動時に検証します。
-function getRequiredDatabaseUrl(): string {
-  // ローカル値は .env.example をコピーした .env に置く想定です。
-  // ソースコードに fallback 接続文字列を書かないことで、credential の混入を避けます。
-  if (!process.env.DATABASE_URL) {
-    // DATABASE_URL がなければ、DB に触る API として起動できないため即座に失敗させます。
-    throw new Error('DATABASE_URL is required. Copy .env.example to .env for local PoC runs.');
-  }
-
-  // ここまで来たら DATABASE_URL は string として扱えます。
-  return process.env.DATABASE_URL;
 }

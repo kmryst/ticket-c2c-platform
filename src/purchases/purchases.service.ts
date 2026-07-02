@@ -15,6 +15,10 @@ import {
 } from '@nestjs/common';
 // DatabaseService は PostgreSQL の PoolClient を借りるための共有 service です。
 import { DatabaseService } from '../database/database.service';
+// InventoryCacheService は Valkey による購入前段フィルタです（未設定時は fail-open）。
+import { InventoryCacheService } from '../cache/inventory-cache.service';
+// DomainEventsService は購入確定を EventBridge へ伝えるための publisher です。
+import { DomainEventsService } from '../messaging/domain-events.service';
 // purchase.types は controller と service の間で共有する入力・出力の型です。
 import {
   ParsedPurchaseInput,
@@ -88,11 +92,15 @@ interface PurchaseRow {
 @Injectable()
 // PurchasesService は購入リクエストの validation、transaction、在庫更新、購入履歴作成を担当します。
 export class PurchasesService {
-  // constructor injection で PostgreSQL 接続管理役の DatabaseService を受け取ります。
-  constructor(private readonly database: DatabaseService) {}
+  // constructor injection で DB 接続管理・前段フィルタ・イベント発行の各 service を受け取ります。
+  constructor(
+    private readonly database: DatabaseService,
+    private readonly inventoryCache: InventoryCacheService,
+    private readonly domainEvents: DomainEventsService,
+  ) {}
 
   // createPurchase は購入 API の本体です。
-  // 流れは「入力検証 -> transaction 開始 -> 再送確認 -> 在庫 conditional UPDATE -> 購入履歴 INSERT」です。
+  // 流れは「入力検証 -> Valkey 前段フィルタ -> transaction 開始 -> 再送確認 -> 在庫 conditional UPDATE -> 購入履歴 INSERT」です。
   async createPurchase(
     // eventId は URL path parameter から渡された購入対象 event id です。
     eventId: string,
@@ -101,6 +109,60 @@ export class PurchasesService {
   ): Promise<PurchaseResult> {
     // 入力を検証し、以降の処理で信用できる ParsedPurchaseInput に変換します。
     const input = parsePurchaseInput(eventId, body);
+
+    // Valkey 前段フィルタです（technical-validation-plan の初期アーキテクチャ仮説）。
+    // カウンタ上で売り切れなら PostgreSQL に到達させず即時拒否します。
+    // requestId 付きは idempotent replay の可能性があるため DB 判定へ流します。
+    const gate = input.requestId
+      ? ('unknown' as const)
+      : await this.inventoryCache.reserve(input.eventId, input.quantity);
+
+    if (gate === 'sold_out') {
+      // 前段拒否は DB に履歴を残さない設計です（DB 保護がこのフィルタの目的のため）。
+      return {
+        purchaseId: null,
+        eventId: input.eventId,
+        buyerId: input.buyerId,
+        quantity: input.quantity,
+        status: 'rejected',
+        rejectionReason: 'sold_out_precheck',
+        remainingQuantity: null,
+      };
+    }
+
+    try {
+      const result = await this.executePurchaseTransaction(input, gate);
+
+      // 確定購入は EventBridge へ伝搬し、Worker が検索プロジェクションを更新します。
+      if (result.status === 'confirmed') {
+        await this.domainEvents.publish('TicketPurchased', {
+          eventId: result.eventId,
+          purchaseId: result.purchaseId,
+          quantity: result.quantity,
+          remainingQuantity: result.remainingQuantity,
+        });
+        await this.domainEvents.publish('InventoryChanged', {
+          eventId: result.eventId,
+          remainingQuantity: result.remainingQuantity,
+        });
+      }
+
+      return result;
+    } catch (error) {
+      // reserve 済みのまま DB 確定に失敗した場合は、カウンタを戻して次のリクエストに在庫を返します。
+      if (gate === 'reserved') {
+        await this.inventoryCache.release(input.eventId, input.quantity);
+      }
+      throw error;
+    }
+  }
+
+  // executePurchaseTransaction は PostgreSQL transaction による購入確定の本体です。
+  private async executePurchaseTransaction(
+    input: ParsedPurchaseInput,
+    // gate は前段フィルタの結果で、DB 判定後のカウンタ補正に使います。
+    gate: 'reserved' | 'unknown',
+  ): Promise<PurchaseResult> {
     // DB transaction を張るため、pool から専用 client を 1 つ借ります。
     const client = await this.database.connect();
     // rollbackError は ROLLBACK 自体が失敗したかを finally の release に伝えるための変数です。
@@ -164,17 +226,24 @@ export class PurchasesService {
       // UPDATE が 1 row 更新できた場合だけ、在庫確保に成功した confirmed とみなします。
       // 0 row の場合は、在庫不足または在庫 row 不在です。
       const confirmed = inventoryUpdate.rowCount === 1;
+      // rejectedRemaining は在庫不足で拒否した時点の DB 残在庫です。
+      // 前段カウンタと DB がずれていた場合の補正（syncCounter）に使います。
+      let rejectedRemaining: number | null = null;
 
       // confirmed できなかった場合は、rejected として扱う前に原因を確認します。
       if (!confirmed) {
         // event は存在するのに在庫 row がない場合は、売り切れではなく DB seed / 設定不備です。
-        // その区別のため、ticket_inventory の存在だけを確認します。
-        const inventory = await client.query<EventRow>(
-          // event_id を id として alias し、EventRow と同じ形で受けます。
-          'SELECT event_id AS id FROM ticket_inventory WHERE event_id = $1',
+        // その区別のため、ticket_inventory を確認しつつ現在の残在庫も取得します。
+        const inventory = await client.query<InventoryUpdateRow>(
+          'SELECT remaining_quantity FROM ticket_inventory WHERE event_id = $1',
           // $1 は入力検証済みの eventId です。
           [input.eventId],
         );
+
+        // 在庫 row があれば、補正用に現在の残在庫を控えます。
+        if (inventory.rowCount) {
+          rejectedRemaining = inventory.rows[0].remaining_quantity;
+        }
 
         // 在庫 row がない場合は PoC の前提崩れです。
         if (!inventory.rowCount) {
@@ -258,6 +327,21 @@ export class PurchasesService {
 
       // 在庫更新と購入履歴 INSERT が両方成功したので transaction を確定します。
       await client.query('COMMIT');
+
+      // COMMIT 後に前段カウンタを DB の残在庫と揃えます（Valkey は正本ではないため上書きでよい）。
+      if (confirmed && gate === 'unknown' && remainingQuantityAfter !== null) {
+        // 前段を通らず confirmed した場合、カウンタを DB 基準へ同期します。
+        await this.inventoryCache.syncCounter(
+          input.eventId,
+          remainingQuantityAfter,
+        );
+      } else if (!confirmed && gate === 'reserved') {
+        // 前段は在庫ありと判定したが DB は在庫不足だった場合、カウンタを DB 残在庫へ補正します。
+        await this.inventoryCache.syncCounter(
+          input.eventId,
+          rejectedRemaining ?? 0,
+        );
+      }
 
       // 新規に作った purchase row を API response として返します。
       return {
