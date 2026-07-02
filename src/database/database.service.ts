@@ -10,9 +10,11 @@ import 'dotenv/config';
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 // Pool は PostgreSQL 接続プール、PoolClient はプールから借りた 1 接続を表します。
 import { Pool, PoolClient } from 'pg';
-// buildDatabaseUrl は DATABASE_URL、または dev 環境の DB_* 分解値から接続文字列を作ります。
+// getDatabasePoolConfig は DATABASE_URL、または dev 環境の DB_* 分解値から pool 設定を作ります。
+// DB_PASSWORD_SECRET_ARN 設定時は、Aurora のパスワードローテーションに追従できるよう
+// 接続のたびに Secrets Manager から最新パスワードを取得する関数を返します。
 // isDatabaseSslEnabled は Aurora など TLS 接続が必要な環境かを判定します。
-import { buildDatabaseUrl, isDatabaseSslEnabled } from '../config';
+import { getDatabasePoolConfig, isDatabaseSslEnabled } from '../config';
 
 // @Injectable() により、他の service から constructor injection で使えるようになります。
 @Injectable()
@@ -21,8 +23,8 @@ export class DatabaseService implements OnModuleDestroy {
   // pool は API プロセス内で 1 つだけ作る PostgreSQL 接続プールです。
   // 購入処理ごとにこの pool から client を借りて、明示的な transaction を張ります。
   private readonly pool = new Pool({
-    // 接続文字列はローカル（DATABASE_URL）と dev（DB_* + Secrets Manager 注入）の両対応です。
-    connectionString: buildDatabaseUrl(),
+    // 接続設定はローカル（DATABASE_URL）と dev（DB_* + Secrets Manager 動的取得）の両対応です。
+    ...getDatabasePoolConfig(),
     // Aurora では TLS で接続します。dev は VPC 内 + SG 制限を信頼し証明書検証を省略します。
     ssl: isDatabaseSslEnabled() ? { rejectUnauthorized: false } : undefined,
     // 接続確立が 5 秒を超えたら失敗させ、API が固まったように見える状態を避けます。
