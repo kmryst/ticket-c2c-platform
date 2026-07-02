@@ -19,6 +19,7 @@
 | [docs/architecture/technology-stack.md](docs/architecture/technology-stack.md) | 技術スタックと設計方針のドラフト |
 | [docs/poc/technical-validation-plan.md](docs/poc/technical-validation-plan.md) | PoC と技術検証の計画 |
 | [docs/architecture/dev-environment.md](docs/architecture/dev-environment.md) | AWS dev 環境設計の正本 |
+| [docs/architecture/production-readiness.md](docs/architecture/production-readiness.md) | dev 環境の本番化ギャップ一覧（未対応課題バックログ） |
 | [docs/adr/README.md](docs/adr/README.md) | ADR（設計判断の記録）一覧と運用ルール |
 | [docs/poc/dev-environment-verification.md](docs/poc/dev-environment-verification.md) | dev 環境の初回構築・検証記録 |
 | [docs/poc/inventory-purchase-poc.md](docs/poc/inventory-purchase-poc.md) | 在庫購入 PoC の実行手順 |
