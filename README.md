@@ -4,9 +4,9 @@
 
 ## ステータス
 
-設計ドラフト。
+設計 + dev 環境構築中。
 
-このリポジトリは現時点では実装プロジェクトではなく、システム要件、技術選定、アーキテクチャ方針、提出用の設計資料を整理するための場所です。
+システム要件、技術選定、アーキテクチャ方針の整理に加え、ローカル在庫 PoC の実施を経て、AWS 上の dev 環境（本番系トラックの最初の環境）の構築を進めています。
 
 ## ドキュメント
 
@@ -18,6 +18,8 @@
 | [docs/requirements/system-requirements.md](docs/requirements/system-requirements.md) | 課題要件、スコープ、制約の整理 |
 | [docs/architecture/technology-stack.md](docs/architecture/technology-stack.md) | 技術スタックと設計方針のドラフト |
 | [docs/poc/technical-validation-plan.md](docs/poc/technical-validation-plan.md) | PoC と技術検証の計画 |
+| [docs/architecture/dev-environment.md](docs/architecture/dev-environment.md) | AWS dev 環境設計の正本 |
+| [docs/adr/README.md](docs/adr/README.md) | ADR（設計判断の記録）一覧と運用ルール |
 | [docs/poc/inventory-purchase-poc.md](docs/poc/inventory-purchase-poc.md) | 在庫購入 PoC の実行手順 |
 | [docs/poc/inventory-purchase-reading-guide.md](docs/poc/inventory-purchase-reading-guide.md) | 在庫購入 PoC の構成図と読み解きメモ |
 

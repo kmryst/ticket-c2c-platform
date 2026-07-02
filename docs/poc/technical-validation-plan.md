@@ -6,6 +6,8 @@
 
 このドキュメントは、C2C チケット販売プラットフォーム設計における高リスク領域を検証するための初期 PoC 計画を定義するものです。プロダクト全体の実装計画ではありません。
 
+なお、AWS 上の dev 環境は本計画のフェーズ 4（クラウド PoC）としてではなく、staging / prod へ育てる本番系トラックの最初の環境として別途構築する（[ADR-0002](../adr/0002-dev-environment-as-first-prod-track-environment.md)、[dev 環境設計](../architecture/dev-environment.md)）。本計画のローカル検証（フェーズ 2〜3）は dev 環境と並行して継続する。
+
 ## ドキュメント名
 
 DevOps、SRE、Platform Engineering の文脈では、この種の文書には次のような名前が使われる。
