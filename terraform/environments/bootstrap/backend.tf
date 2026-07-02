@@ -3,7 +3,7 @@
 # 手順の詳細は同ディレクトリの README.md を参照。
 terraform {
   backend "s3" {
-    bucket       = "ticket-c2c-platform-tfstate-258632448142"
+    bucket       = "ticket-c2c-platform-tfstate-85d4524d"
     key          = "bootstrap/terraform.tfstate"
     region       = "ap-northeast-1"
     use_lockfile = true

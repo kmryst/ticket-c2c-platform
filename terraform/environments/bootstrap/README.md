@@ -47,4 +47,4 @@ rm terraform.tfstate terraform.tfstate.backup
 ## 注意
 
 - apply ロールは dev 構築期間中 `AdministratorAccess`。staging 追加前に最小権限へ絞る。
-- バケット名にはグローバル一意性のためアカウント ID を含む。アカウント分離時は環境ごとに backend 設定を持つ（ADR-0003）。
+- バケット名はグローバル一意性のためランダム suffix を含む（`ticket-c2c-platform-tfstate-<8桁hex>`）。public リポジトリでの AWS アカウント ID 露出を避けるため、アカウント ID は含めない（Issue #27）。
