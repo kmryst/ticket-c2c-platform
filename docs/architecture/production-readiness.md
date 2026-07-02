@@ -20,7 +20,7 @@
 |---|---|---|---|---|
 | H-1 | IAM / CI-CD | apply IAM ロールが `AdministratorAccess` のまま。GitHub Environment `dev` / `dev-destroy` に required reviewer・ブランチ制限が未設定。write 権限が漏れた場合、任意ブランチに `environment: dev` を書いた workflow を workflow_dispatch するだけで Admin 級クレデンシャルを取得できる。 | コード変更不要。GitHub Environment 設定のみで即対応可能・無料。 | 未着手 |
 | H-2 | CI-CD | `terraform-destroy.yml` の「三重ゲート」のうち、`confirm` 入力一致チェックは workflow 定義ごと改変されれば回避できる。IAM trust は environment 名しか見ないため、H-1 と同じ対策（reviewer + ブランチ制限）で塞がる。 | H-1 と同一対応で解消。 | 未着手 |
-| H-3 | Reliability / Secrets | Aurora の RDS 管理マスターシークレットは既定で 7 日ごとに自動ローテーションされるが、ECS への注入はタスク起動時 1 回きり。7 日以上連続稼働（例: 長時間の負荷検証）させると、ローテーション後に認証エラーで API/Worker が静かに壊れる。`dev-environment.md` にこの落とし穴の記載がない。 | ローテーション時の運用手順明記、またはアプリ側の再接続実装。 | 未着手 |
+| H-3 | Reliability / Secrets | Aurora の RDS 管理マスターシークレットは既定で 7 日ごとに自動ローテーションされるが、ECS への注入はタスク起動時 1 回きり。7 日以上連続稼働（例: 長時間の負荷検証）させると、ローテーション後に認証エラーで API/Worker が静かに壊れる。`dev-environment.md` にこの落とし穴の記載がない。 | ローテーション時の運用手順明記、またはアプリ側の再接続実装。 | 対応済み（PR #32） |
 
 ## Medium
 

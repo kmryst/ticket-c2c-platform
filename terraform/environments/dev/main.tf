@@ -186,6 +186,24 @@ resource "aws_iam_role_policy" "api_task_events" {
   })
 }
 
+# Aurora の RDS 管理 secret は 7 日ごとに自動ローテーションされる。
+# API の長寿命 DB 接続 pool が追従できるよう、アプリ自身が実行時に読み直せるようにする。
+resource "aws_iam_role_policy" "api_task_db_secret" {
+  name = "read-db-secret"
+  role = aws_iam_role.api_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = [module.aurora.master_user_secret_arn]
+      }
+    ]
+  })
+}
+
 # Worker task role: プロジェクションキューの消費のみ
 resource "aws_iam_role" "worker_task" {
   name               = "${var.name}-worker-task"
@@ -238,10 +256,13 @@ module "api_service" {
     VALKEY_URL          = "redis://${module.valkey.primary_endpoint}:6379"
     EVENT_BUS_NAME      = module.eventbridge.bus_name
     OPENSEARCH_ENDPOINT = module.opensearch.endpoint
+    # 長寿命 DB 接続 pool がローテーション後も追従できるよう、secret の ARN 自体を渡す。
+    # ARN は機密情報ではないため environment（非 secret）でよい。
+    DB_PASSWORD_SECRET_ARN = module.aurora.master_user_secret_arn
   }
 
   secrets = {
-    # RDS 管理 secret の JSON から password キーのみ注入する
+    # 起動時 1 回きりの schema-on-boot 用。ローテーション影響を受けない短命接続なので静的注入のままでよい。
     DB_PASSWORD = "${module.aurora.master_user_secret_arn}:password::"
   }
 }
