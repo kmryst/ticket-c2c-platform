@@ -162,7 +162,7 @@ npm run poc:inventory
 
 `oversold = false` は、在庫数を超えた確定購入が発生していないことを表します。今回の検証では、DB 上の総在庫 `20`、残在庫 `0`、確定購入 `20` 件（`20` 枚）であり、在庫超過は発生していません。`POC_PURCHASE_QUANTITY=1` のため、この検証では確定購入の件数と枚数は同じ値になります。
 
-受け入れ観点ごとの判定:
+受け入れ観点と追加確認の判定:
 
 | 観点 | 結果 | 判定 |
 |---|---:|---|
@@ -170,7 +170,9 @@ npm run poc:inventory
 | `remainingQuantity >= 0` | `0 >= 0` | OK |
 | `totalQuantity - remainingQuantity = confirmedQuantity` | `20 - 0 = 20` | OK |
 | `oversold = false` | `false` | OK |
-| API エラー率 | `0 / 50 = 0%` | OK |
+| API エラー率（追加確認） | `0 / 50 = 0%` | OK |
+
+API エラー率は、検証スクリプトの終了コード判定に基づく追加確認です。ここでの API エラーは 5xx やネットワーク障害などを指し、在庫不足による拒否応答は期待される結果として `API rejected` に集計します。
 
 現時点で判断できること:
 
