@@ -53,37 +53,44 @@ export interface DatabasePoolConfig {
   password?: string | (() => Promise<string>);
 }
 
-// Aurora の RDS 管理 secret は既定で 7 日ごとに自動ローテーションされます。
-// キャッシュを持たず毎接続で取得すると Secrets Manager への呼び出しが増えるため、
-// ローテーション間隔よりずっと短い TTL でキャッシュし、鮮度と呼び出し回数を両立します。
-const SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
-let cachedSecretPassword: { value: string; fetchedAt: number } | undefined;
+// Aurora のパスワードローテーション直後に古い値を返し続けないよう、TTL キャッシュは持たず
+// 接続のたびに Secrets Manager から取得します。並行して複数接続が確立されるタイミングで
+// 呼び出しが重複しないよう、進行中の取得を in-flight promise として共有します。
 let secretsManagerClient: SecretsManagerClient | undefined;
+let inFlightFetch: Promise<string> | undefined;
 
 async function fetchDbPasswordFromSecretsManager(
   secretArn: string,
 ): Promise<string> {
-  const now = Date.now();
-  if (
-    cachedSecretPassword &&
-    now - cachedSecretPassword.fetchedAt < SECRET_CACHE_TTL_MS
-  ) {
-    return cachedSecretPassword.value;
+  if (inFlightFetch) {
+    return inFlightFetch;
   }
 
-  secretsManagerClient ??= new SecretsManagerClient({});
-  const result = await secretsManagerClient.send(
-    new GetSecretValueCommand({ SecretId: secretArn }),
-  );
-  const parsed = JSON.parse(result.SecretString ?? '{}') as {
-    password?: string;
-  };
-  if (!parsed.password) {
-    throw new Error(`Secret ${secretArn} does not contain a "password" field`);
-  }
+  inFlightFetch = (async () => {
+    try {
+      secretsManagerClient ??= new SecretsManagerClient({});
+      const result = await secretsManagerClient.send(
+        new GetSecretValueCommand({ SecretId: secretArn }),
+      );
+      if (!result.SecretString) {
+        throw new Error(`Secret ${secretArn} does not contain SecretString`);
+      }
+      const parsed = JSON.parse(result.SecretString) as {
+        password?: string;
+      };
+      if (!parsed.password) {
+        throw new Error(
+          `Secret ${secretArn} does not contain a "password" field`,
+        );
+      }
 
-  cachedSecretPassword = { value: parsed.password, fetchedAt: now };
-  return parsed.password;
+      return parsed.password;
+    } finally {
+      inFlightFetch = undefined;
+    }
+  })();
+
+  return inFlightFetch;
 }
 
 // getDatabasePoolConfig は DatabaseService の長寿命 pool 向けの接続設定を組み立てます。
