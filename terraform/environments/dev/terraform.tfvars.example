@@ -1,0 +1,4 @@
+# 既定値を上書きする場合のみ terraform.tfvars を作成する
+# region   = "ap-northeast-1"
+# name     = "ticket-c2c-dev"
+# vpc_cidr = "10.0.0.0/16"
