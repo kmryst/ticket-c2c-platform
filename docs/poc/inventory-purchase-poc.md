@@ -2,7 +2,7 @@
 
 ## ステータス
 
-初期実装。
+初期実装。初回ローカル検証結果を整理済み。
 
 この PoC は、PostgreSQL の条件付き更新で同時購入時の在庫超過を防げるかを確認するための最小検証です。
 
@@ -15,7 +15,7 @@
 - `ticket_inventory.remaining_quantity` の条件付き更新。
 - API 経由の並列購入検証。
 
-Valkey 前段フィルタ、k6 負荷テスト、SQS FIFO、OpenSearch はこの Issue では対象外です。
+Valkey 前段フィルタ、k6 負荷テスト、SQS FIFO、OpenSearch は、現行 PoC の初期結果を整理するこの Issue（#8）では対象外です。
 
 ## 購入 API
 
@@ -148,7 +148,54 @@ npm run poc:inventory
 | DB confirmed quantity | 20 |
 | DB rejected purchases | 30 |
 | DB inventory version | 20 |
+| PostgreSQL total UPDATE attempts | 未記録 |
 | p50 latency | 11.23 ms |
 | p95 latency | 54.41 ms |
 | p99 latency | 72.68 ms |
 | oversold | false |
+
+`DB inventory version` は在庫を減らした成功 UPDATE 回数を表します。成功と失敗を合算した PostgreSQL の総 UPDATE 試行数は、現行 PoC では DB レイヤーの計装が未実装のため未記録です。
+
+## 初回結果の整理
+
+この検証の条件と結果の数値は、上記の条件一覧と結果テーブルを正本とします。このセクションでは、結果テーブルの読み方と後続判断への含意を整理します。
+
+PostgreSQL の総 UPDATE 試行数は、結果テーブルの `PostgreSQL total UPDATE attempts` に示すとおり、現行 PoC では未記録です。
+
+`oversold = false` は、在庫数を超えた確定購入が発生していないことを表します。今回の検証では、DB 上の総在庫、残在庫、確定購入枚数の関係が成立しており、在庫超過は発生していません。`POC_PURCHASE_QUANTITY=1` のため、この検証では確定購入の件数と枚数は同じ値になります。
+
+受け入れ観点と追加確認の判定:
+
+| 観点 | 結果 | 判定 |
+|---|---:|---|
+| `confirmedQuantity <= totalQuantity` | 結果テーブル上で成立 | OK |
+| `remainingQuantity >= 0` | 結果テーブル上で成立 | OK |
+| `totalQuantity - remainingQuantity = confirmedQuantity` | 結果テーブル上で成立 | OK |
+| `oversold = false` | `false` | OK |
+| API エラー率（追加確認） | API エラーなし | OK |
+
+API エラー率は、検証スクリプトの終了コード判定に基づく追加確認です。ここでの API エラーは 5xx やネットワーク障害などを指し、在庫不足による拒否応答は期待される結果として `API rejected` に集計します。
+
+現時点で判断できること:
+
+- PostgreSQL の条件付き更新は、今回の並列購入条件では在庫超過を防げた。
+- 追加観察として、結果テーブル上の `API rejected` と `DB rejected purchases` は同じ値だった。ただし、拒否件数の一致は上記の受け入れ観点には含めていない。
+- 結果テーブル上の `DB inventory version` から、在庫を減らした成功更新回数は確定購入数と一致していた。
+- 結果テーブル上の p50 / p95 / p99 API レイテンシを初回基準値として残せた。
+
+現時点では判断できないこと:
+
+- Valkey 前段フィルタにより、売り切れ後の PostgreSQL 到達数がどれだけ減るか。
+- PostgreSQL の総更新試行数、ロック待ち、クエリレイテンシ。
+- より高い concurrency や購入試行数で同じ性質を維持できるか。
+- 1 つの人気イベントへの集中負荷が、無関係なイベントの購入レイテンシを悪化させないか。
+- 購入スパイク中の検索トラフィックへの影響。
+- SQS FIFO などのイベント単位の流量制御が必要か。
+
+次に検証する候補:
+
+1. Valkey なしの現行経路を基準値として、PostgreSQL 到達数と API レイテンシの計測を追加する。
+2. Valkey 前段フィルタを追加し、売り切れ後リクエストの拒否数と PostgreSQL 到達数を比較する。
+3. k6 で負荷テストを追加し、p50 / p95 / p99、エラー率、DB 更新試行数を同じ形式で記録する。
+4. 人気イベント 1 件に負荷を集中させ、同時に通常イベントへ購入リクエストを送り、影響隔離を確認する。
+5. 検証結果から、購入パスに Valkey を必須化するか、SQS FIFO を追加検討するかを判断メモまたは ADR 候補として残す。
