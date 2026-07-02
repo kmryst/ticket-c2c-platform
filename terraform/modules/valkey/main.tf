@@ -30,7 +30,8 @@ resource "aws_security_group" "this" {
 
 resource "aws_elasticache_replication_group" "this" {
   replication_group_id = "${var.name}-valkey"
-  description          = "${var.name} 在庫前段フィルタ"
+  # ElastiCache の description は ASCII のみ許容（日本語だと InvalidParameterValue になる）
+  description = "${var.name} inventory pre-filter"
 
   engine         = "valkey"
   engine_version = var.engine_version
