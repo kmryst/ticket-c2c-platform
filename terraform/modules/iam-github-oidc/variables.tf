@@ -18,6 +18,12 @@ variable "apply_environments" {
   type        = list(string)
 }
 
+variable "create_oidc_provider" {
+  description = "GitHub OIDC provider を新規作成するか。アカウントに既存の provider がある場合は false にして参照する"
+  type        = bool
+  default     = true
+}
+
 variable "oidc_thumbprints" {
   description = "GitHub OIDC provider の証明書 thumbprint"
   type        = list(string)

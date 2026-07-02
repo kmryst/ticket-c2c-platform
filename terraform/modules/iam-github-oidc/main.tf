@@ -1,9 +1,23 @@
 data "aws_caller_identity" "current" {}
 
+# OIDC provider はアカウントに 1 つしか作れない共有リソース。
+# 別プロジェクトが作成済みのアカウントでは create_oidc_provider = false で既存を参照する。
 resource "aws_iam_openid_connect_provider" "github" {
+  count = var.create_oidc_provider ? 1 : 0
+
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = var.oidc_thumbprints
+}
+
+data "aws_iam_openid_connect_provider" "github" {
+  count = var.create_oidc_provider ? 0 : 1
+
+  url = "https://token.actions.githubusercontent.com"
+}
+
+locals {
+  oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
 }
 
 data "aws_iam_policy_document" "plan_assume" {
@@ -13,7 +27,7 @@ data "aws_iam_policy_document" "plan_assume" {
 
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [local.oidc_provider_arn]
     }
 
     condition {
@@ -37,7 +51,7 @@ data "aws_iam_policy_document" "apply_assume" {
 
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [local.oidc_provider_arn]
     }
 
     condition {

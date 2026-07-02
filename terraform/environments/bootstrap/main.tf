@@ -40,4 +40,7 @@ module "github_oidc" {
   plan_role_name     = "${var.project}-gha-plan"
   apply_role_name    = "${var.project}-gha-apply"
   apply_environments = ["dev", "dev-destroy"]
+
+  # このアカウントには別プロジェクト作成の OIDC provider が既に存在するため参照のみ
+  create_oidc_provider = false
 }
