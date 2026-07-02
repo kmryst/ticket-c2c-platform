@@ -11,9 +11,9 @@ variable "project" {
 }
 
 variable "state_bucket_name" {
-  description = "tfstate 用 S3 バケット名（グローバル一意）"
+  description = "tfstate 用 S3 バケット名（グローバル一意、アカウント ID を含まない）"
   type        = string
-  default     = "ticket-c2c-platform-tfstate-258632448142"
+  default     = "ticket-c2c-platform-tfstate-85d4524d"
 }
 
 variable "github_repository" {
