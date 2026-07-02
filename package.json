@@ -7,17 +7,23 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/main.js",
     "start:dev": "ts-node src/main.ts",
-    "poc:inventory": "ts-node --project tsconfig.scripts.json scripts/poc/inventory-purchase-poc.ts"
+    "poc:inventory": "ts-node --project tsconfig.scripts.json scripts/poc/inventory-purchase-poc.ts",
+    "start:worker": "node dist/src/worker.js",
+    "worker:dev": "ts-node src/worker.ts"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@aws-sdk/client-eventbridge": "^3.1078.0",
+    "@aws-sdk/client-sqs": "^3.1078.0",
     "@nestjs/common": "^11.1.27",
     "@nestjs/core": "^11.1.27",
     "@nestjs/platform-fastify": "^11.1.27",
+    "@opensearch-project/opensearch": "^3.6.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.9.0",
+    "ioredis": "^5.11.1",
     "pg": "^8.22.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2"

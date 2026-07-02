@@ -14,8 +14,14 @@ import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 // AppModule は controller / service / database module を束ねた、この API のルートモジュールです。
 import { AppModule } from './app.module';
+// applySchemaOnBoot は dev 環境向けに database/schema.sql を起動時適用する helper です。
+import { applySchemaOnBoot } from './schema-on-boot';
 
 async function bootstrap() {
+  // RUN_SCHEMA_ON_BOOT=true の場合のみ、API 起動前に schema.sql を適用します。
+  // ローカル PoC は従来どおり psql での手動適用を正とし、この処理は dev（Aurora）専用です。
+  await applySchemaOnBoot();
+
   // bootstrap はローカル PC 上で NestJS API プロセスを起動する関数です。
   // PostgreSQL は Docker Compose 側、API はホスト側で動き、DATABASE_URL 経由で接続します。
   const app = await NestFactory.create<NestFastifyApplication>(
