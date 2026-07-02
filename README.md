@@ -20,6 +20,7 @@
 | [docs/poc/technical-validation-plan.md](docs/poc/technical-validation-plan.md) | PoC と技術検証の計画 |
 | [docs/architecture/dev-environment.md](docs/architecture/dev-environment.md) | AWS dev 環境設計の正本 |
 | [docs/adr/README.md](docs/adr/README.md) | ADR（設計判断の記録）一覧と運用ルール |
+| [docs/poc/dev-environment-verification.md](docs/poc/dev-environment-verification.md) | dev 環境の初回構築・検証記録 |
 | [docs/poc/inventory-purchase-poc.md](docs/poc/inventory-purchase-poc.md) | 在庫購入 PoC の実行手順 |
 | [docs/poc/inventory-purchase-reading-guide.md](docs/poc/inventory-purchase-reading-guide.md) | 在庫購入 PoC の構成図と読み解きメモ |
 
