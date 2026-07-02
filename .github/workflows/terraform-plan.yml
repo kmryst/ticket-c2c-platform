@@ -20,7 +20,7 @@ jobs:
     strategy:
       matrix:
         # 環境 root module を追加したらここに足す
-        environment: [bootstrap]
+        environment: [bootstrap, dev]
     defaults:
       run:
         working-directory: terraform/environments/${{ matrix.environment }}
