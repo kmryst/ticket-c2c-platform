@@ -5,3 +5,27 @@ output "vpc_id" {
 output "ecr_repository_url" {
   value = module.ecr.repository_url
 }
+
+output "aurora_endpoint" {
+  value = module.aurora.cluster_endpoint
+}
+
+output "aurora_master_user_secret_arn" {
+  value = module.aurora.master_user_secret_arn
+}
+
+output "valkey_endpoint" {
+  value = module.valkey.primary_endpoint
+}
+
+output "opensearch_endpoint" {
+  value = module.opensearch.endpoint
+}
+
+output "event_bus_name" {
+  value = module.eventbridge.bus_name
+}
+
+output "search_projection_queue_url" {
+  value = module.search_projection_queue.queue_url
+}
