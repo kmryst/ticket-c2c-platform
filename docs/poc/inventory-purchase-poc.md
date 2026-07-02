@@ -148,10 +148,13 @@ npm run poc:inventory
 | DB confirmed quantity | 20 |
 | DB rejected purchases | 30 |
 | DB inventory version | 20 |
+| PostgreSQL total UPDATE attempts | 未記録 |
 | p50 latency | 11.23 ms |
 | p95 latency | 54.41 ms |
 | p99 latency | 72.68 ms |
 | oversold | false |
+
+`DB inventory version` は在庫を減らした成功 UPDATE 回数を表します。成功と失敗を合算した PostgreSQL の総 UPDATE 試行数は、現行 PoC では DB レイヤーの計装が未実装のため未記録です。
 
 ## 初回結果の整理
 
