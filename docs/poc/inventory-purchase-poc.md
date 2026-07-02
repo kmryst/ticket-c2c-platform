@@ -15,7 +15,7 @@
 - `ticket_inventory.remaining_quantity` の条件付き更新。
 - API 経由の並列購入検証。
 
-Valkey 前段フィルタ、k6 負荷テスト、SQS FIFO、OpenSearch は現行 PoC では対象外です。
+Valkey 前段フィルタ、k6 負荷テスト、SQS FIFO、OpenSearch は、現行 PoC の初期結果を整理するこの Issue（#8）では対象外です。
 
 ## 購入 API
 
