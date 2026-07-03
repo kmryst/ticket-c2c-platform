@@ -1,0 +1,75 @@
+# セキュリティスキャン統合ワークフロー
+# 目的: 依存関係とコードの脆弱性を定期スキャンし GitHub Security タブで一元管理する
+# 移植元: kmryst/terraform-hannibal .github/workflows/security-scan.yml（container-scan ジョブは対象外）
+
+name: Security Scan
+on:
+  workflow_dispatch:
+  schedule:
+    # 毎週月曜 00:15 UTC / 09:15 JST。
+    # 毎時0分付近の GitHub Actions 混雑を避けるため15分にずらす。
+    - cron: "15 0 * * 1"
+
+concurrency:
+  group: security-scan
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Trivy vulnerability scanner (fs)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH"
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+
+  sast-scan:
+    name: Static Application Security Testing
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+      - name: Analyze CodeQL
+        uses: github/codeql-action/analyze@v4
+
+  summary:
+    name: Security Scan Summary
+    runs-on: ubuntu-latest
+    permissions: {}
+    needs:
+      - dependency-scan
+      - sast-scan
+    if: always()
+    steps:
+      - name: Check scan results
+        run: |
+          echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "- Dependency Scan: ${{ needs.dependency-scan.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- SAST Scan: ${{ needs.sast-scan.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "詳細は [Security > Code scanning alerts](../../security/code-scanning) を確認" >> $GITHUB_STEP_SUMMARY
