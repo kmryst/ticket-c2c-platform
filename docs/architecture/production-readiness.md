@@ -32,7 +32,7 @@
 | M-4 | Secrets | DB 接続が `rejectUnauthorized: false`（TLS 暗号化はするが証明書検証なし）。 | RDS CA バンドル同梱、数行で解消。 | 対応済み（PR #68） |
 | M-5 | Network | ALB が HTTP:80 のみで認証なし。稼働中はインターネット全体から平文で公開 API が叩ける。dev-environment.md のコスト前提（アイドル時 Aurora ≈ $0）が外部トラフィックで崩れ得る。 | 検証時のみ ingress を自分の IP に絞る変数を用意、または HTTPS 化。 | 未着手 |
 | M-6 | Cost | コスト表に Interface VPC Endpoint（ecr.api / ecr.dkr / logs × 2AZ = 6 ENI）の費用（月額約 $60）が未計上。実際は見積り（~$120/月）より高い。 | コスト表への追記。 | 未着手 |
-| M-7 | CI-CD | `deploy-app.yml` がリソース名（ECR/クラスタ/サービス名）をハードコード。`var.name` を変えると deploy が壊れる。タスク定義が `:latest`（MUTABLE）参照のため、ロールバック手段がコミット再ビルドしかない。 | イメージタグを commit SHA 固定へ移行。 | 未着手 |
+| M-7 | CI-CD | `deploy-app.yml` がリソース名（ECR/クラスタ/サービス名）をハードコード。`var.name` を変えると deploy が壊れる。タスク定義が `:latest`（MUTABLE）参照のため、ロールバック手段がコミット再ビルドしかない。 | イメージタグを commit SHA 固定へ移行。 | 対応済み（PR #70。タスク定義の SHA 固定と `image_tag` 入力によるロールバック経路を実装。リソース名のハードコードは deploy が dev 専用 workflow である間は許容） |
 
 ## Low
 

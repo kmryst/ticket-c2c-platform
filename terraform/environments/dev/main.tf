@@ -236,7 +236,7 @@ module "api_service" {
   name               = "${var.name}-api"
   region             = var.region
   cluster_arn        = aws_ecs_cluster.this.arn
-  image              = "${module.ecr.repository_url}:latest"
+  image              = "${module.ecr.repository_url}:${var.image_tag}"
   subnet_ids         = module.network.private_subnet_ids
   security_group_ids = [aws_security_group.app.id]
   execution_role_arn = aws_iam_role.execution.arn
@@ -273,7 +273,7 @@ module "worker_service" {
   name               = "${var.name}-worker"
   region             = var.region
   cluster_arn        = aws_ecs_cluster.this.arn
-  image              = "${module.ecr.repository_url}:latest"
+  image              = "${module.ecr.repository_url}:${var.image_tag}"
   command            = ["node", "dist/src/worker.js"]
   subnet_ids         = module.network.private_subnet_ids
   security_group_ids = [aws_security_group.app.id]
