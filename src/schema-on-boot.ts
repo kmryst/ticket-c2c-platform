@@ -8,8 +8,8 @@ import { readFile } from 'node:fs/promises';
 import { Client } from 'pg';
 import {
   buildDatabaseUrl,
+  getDatabaseSslConfig,
   getOptionalEnv,
-  isDatabaseSslEnabled,
 } from './config';
 
 // applySchemaOnBoot は RUN_SCHEMA_ON_BOOT=true のときだけ schema.sql を実行します。
@@ -23,7 +23,8 @@ export async function applySchemaOnBoot(): Promise<void> {
 
   const client = new Client({
     connectionString: buildDatabaseUrl(),
-    ssl: isDatabaseSslEnabled() ? { rejectUnauthorized: false } : undefined,
+    // Aurora では RDS CA バンドルによる証明書検証つき TLS で接続します（production-readiness M-4）。
+    ssl: getDatabaseSslConfig(),
     // Aurora Serverless v2 の auto-pause からの再開を待てるよう、接続タイムアウトを長めに取ります。
     connectionTimeoutMillis: 30_000,
   });

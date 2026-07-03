@@ -2,6 +2,8 @@
 // このファイルはクラウド連携のオプション設定を 1 箇所で読む helper です。
 // ローカル PoC では未設定のまま動き、dev 環境では ECS タスク定義の環境変数で有効化されます。
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   GetSecretValueCommand,
   SecretsManagerClient,
@@ -40,6 +42,35 @@ export function buildDatabaseUrl(): string {
 // isDatabaseSslEnabled は Aurora など TLS 接続が必要な環境かを判定します。
 export function isDatabaseSslEnabled(): boolean {
   return getOptionalEnv('DB_SSL') === 'true';
+}
+
+// RDS_CA_BUNDLE_PATH は AWS RDS の CA バンドル（全リージョン分）の同梱先です。
+// Dockerfile は database/ ディレクトリごとイメージへコピーするため、実行環境でもこの相対パスで読めます。
+// 更新手順: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem を再取得して上書きする。
+const RDS_CA_BUNDLE_PATH = 'database/rds-ca/global-bundle.pem';
+
+// DatabaseSslConfig は pg の ssl オプションへそのまま渡す設定です。
+export interface DatabaseSslConfig {
+  rejectUnauthorized: true;
+  ca: string;
+}
+
+// CA バンドルはプロセス内で不変なので、初回読み込み後はキャッシュします。
+let cachedRdsCaBundle: string | undefined;
+
+// getDatabaseSslConfig は DB_SSL=true のとき、RDS CA バンドルで証明書検証を行う
+// ssl 設定を返します（production-readiness M-4: rejectUnauthorized: false の解消）。
+// DB_SSL 未設定（ローカル PoC）では undefined を返し、SSL なし接続のままにします。
+export function getDatabaseSslConfig(): DatabaseSslConfig | undefined {
+  if (!isDatabaseSslEnabled()) {
+    return undefined;
+  }
+
+  const bundlePath =
+    getOptionalEnv('DB_SSL_CA_PATH') ?? resolve(process.cwd(), RDS_CA_BUNDLE_PATH);
+  cachedRdsCaBundle ??= readFileSync(bundlePath, 'utf8');
+
+  return { rejectUnauthorized: true, ca: cachedRdsCaBundle };
 }
 
 // DatabasePoolConfig は pg.Pool にそのまま渡せる接続設定の部分集合です。
