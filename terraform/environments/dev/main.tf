@@ -149,7 +149,9 @@ module "alb" {
   vpc_id            = module.network.vpc_id
   public_subnet_ids = module.network.public_subnet_ids
 
-  # 検証済み証明書の ARN を渡す（validation リソース経由にして、検証完了前にリスナーが作られないようにする）
+  # 検証済み証明書の ARN を渡す（validation リソース経由にして、検証完了前にリスナーが作られないようにする）。
+  # リスナー等の有無は plan 時に確定する enable_https で切り替える（unknown 値を count に使わない）。
+  enable_https          = true
   certificate_arn       = aws_acm_certificate_validation.api.certificate_arn
   allowed_ingress_cidrs = var.alb_allowed_ingress_cidrs
 }
