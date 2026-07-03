@@ -150,7 +150,7 @@ staging 環境を作る前に、少なくとも次を満たす。
 - [ ] seed data と smoke test を自動実行できる。
 - [ ] destroy workflow に `confirm=destroy-staging` と Environment protection を設定する。
 - [ ] API / Worker の desired count を 2 以上にする前に、`schema-on-boot` をマイグレーションツールへ移行する（複数タスク同時起動時の DDL 競合を避けるため。[production-readiness.md](./production-readiness.md) L-4）。
-- [ ] OpenSearch のアクセスポリシーを IAM 認証（SigV4 署名）に切り替える前に、アプリ側の署名クライアント実装を dev で先行検証しておく（[production-readiness.md](./production-readiness.md) M-3）。
+- [x] OpenSearch のアクセスポリシーを IAM 認証（SigV4 署名）に切り替える前に、アプリ側の署名クライアント実装を dev で先行検証しておく（[production-readiness.md](./production-readiness.md) M-3）。対応済み（2026-07-03、PR #75。API / Worker とも SigV4 署名クライアントで dev の接続・インデックス・検索を確認。アクセスポリシー切り替えは staging 構築時に実施）。
 - [ ] 本番化ギャップは `production-readiness.md` に移す。
 
 ## production-readiness.md との関係
