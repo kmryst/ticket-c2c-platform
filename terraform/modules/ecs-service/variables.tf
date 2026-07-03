@@ -11,6 +11,11 @@ variable "cluster_arn" {
   type = string
 }
 
+variable "cluster_name" {
+  description = "Application Auto Scaling resource_id に使う ECS cluster 名"
+  type        = string
+}
+
 variable "image" {
   description = "コンテナイメージ URI"
   type        = string
@@ -35,6 +40,29 @@ variable "memory" {
 variable "desired_count" {
   type    = number
   default = 1
+}
+
+variable "autoscaling_min_capacity" {
+  description = "ECS Service Auto Scaling の最小 capacity。null の場合は Auto Scaling target を作らない"
+  type        = number
+  default     = null
+}
+
+variable "autoscaling_max_capacity" {
+  description = "ECS Service Auto Scaling の最大 capacity。null の場合は Auto Scaling target を作らない"
+  type        = number
+  default     = null
+}
+
+variable "scheduled_scaling_actions" {
+  description = "ECS Service の scheduled scaling action 一覧"
+  type = list(object({
+    name         = string
+    schedule     = string
+    min_capacity = number
+    max_capacity = number
+  }))
+  default = []
 }
 
 variable "subnet_ids" {

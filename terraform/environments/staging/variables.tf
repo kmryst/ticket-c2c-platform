@@ -13,13 +13,13 @@ variable "project" {
 variable "name" {
   description = "リソース名プレフィックス"
   type        = string
-  default     = "ticket-c2c-dev"
+  default     = "ticket-c2c-staging"
 }
 
 variable "environment_profile" {
   description = "環境構成 profile。dev は既存構成、staging / staging-full は staging 検証用差分を plan に出す"
   type        = string
-  default     = "dev"
+  default     = "staging"
 
   validation {
     condition     = contains(["dev", "staging", "staging-full"], var.environment_profile)
@@ -54,7 +54,7 @@ variable "hosted_zone_name" {
 variable "api_subdomain" {
   description = "API の公開サブドメイン。<api_subdomain>.<hosted_zone_name> が FQDN になる"
   type        = string
-  default     = "ticket-api-dev"
+  default     = "ticket-api-staging"
 }
 
 variable "alb_allowed_ingress_cidrs" {

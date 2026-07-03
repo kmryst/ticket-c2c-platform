@@ -1,4 +1,4 @@
-# dev root module
+# staging root module
 # レイヤごとにブロックを分けて記述する（将来の state 分割線。ADR-0003）。
 # 1. network レイヤ
 # 2. data / messaging レイヤ（Aurora / Valkey / OpenSearch / EventBridge / SQS）

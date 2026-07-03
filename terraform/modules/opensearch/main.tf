@@ -30,8 +30,16 @@ resource "aws_opensearch_domain" "this" {
   engine_version = var.engine_version
 
   cluster_config {
-    instance_type  = var.instance_type
-    instance_count = 1
+    instance_type          = var.instance_type
+    instance_count         = var.instance_count
+    zone_awareness_enabled = var.zone_awareness_enabled
+
+    dynamic "zone_awareness_config" {
+      for_each = var.zone_awareness_enabled ? [1] : []
+      content {
+        availability_zone_count = var.availability_zone_count
+      }
+    }
   }
 
   ebs_options {
@@ -41,8 +49,7 @@ resource "aws_opensearch_domain" "this" {
   }
 
   vpc_options {
-    # シングルノードのため subnet は 1 つ
-    subnet_ids         = [var.subnet_ids[0]]
+    subnet_ids         = var.zone_awareness_enabled ? slice(var.subnet_ids, 0, var.availability_zone_count) : [var.subnet_ids[0]]
     security_group_ids = [aws_security_group.this.id]
   }
 

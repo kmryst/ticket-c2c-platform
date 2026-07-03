@@ -19,3 +19,14 @@ variable "az_count" {
   type        = number
   default     = 2
 }
+
+variable "nat_gateway_mode" {
+  description = "NAT Gateway の配置。single は 1 台共有、per_az は AZ ごとに 1 台"
+  type        = string
+  default     = "single"
+
+  validation {
+    condition     = contains(["single", "per_az"], var.nat_gateway_mode)
+    error_message = "nat_gateway_mode は single または per_az を指定してください。"
+  }
+}
