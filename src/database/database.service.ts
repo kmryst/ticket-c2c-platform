@@ -13,8 +13,9 @@ import { Pool, PoolClient } from 'pg';
 // getDatabasePoolConfig は DATABASE_URL、または dev 環境の DB_* 分解値から pool 設定を作ります。
 // DB_PASSWORD_SECRET_ARN 設定時は、Aurora のパスワードローテーションに追従できるよう
 // 接続のたびに Secrets Manager から最新パスワードを取得する関数を返します。
-// isDatabaseSslEnabled は Aurora など TLS 接続が必要な環境かを判定します。
-import { getDatabasePoolConfig, isDatabaseSslEnabled } from '../config';
+// getDatabaseSslConfig は Aurora など TLS 接続が必要な環境で、RDS CA バンドルによる
+// 証明書検証つきの ssl 設定を返します（ローカル PoC では undefined）。
+import { getDatabasePoolConfig, getDatabaseSslConfig } from '../config';
 
 // @Injectable() により、他の service から constructor injection で使えるようになります。
 @Injectable()
@@ -25,8 +26,8 @@ export class DatabaseService implements OnModuleDestroy {
   private readonly pool = new Pool({
     // 接続設定はローカル（DATABASE_URL）と dev（DB_* + Secrets Manager 動的取得）の両対応です。
     ...getDatabasePoolConfig(),
-    // Aurora では TLS で接続します。dev は VPC 内 + SG 制限を信頼し証明書検証を省略します。
-    ssl: isDatabaseSslEnabled() ? { rejectUnauthorized: false } : undefined,
+    // Aurora では RDS CA バンドルによる証明書検証つき TLS で接続します（production-readiness M-4）。
+    ssl: getDatabaseSslConfig(),
     // 接続確立が 5 秒を超えたら失敗させ、API が固まったように見える状態を避けます。
     connectionTimeoutMillis: 5000,
     // 未使用接続は 30 秒で pool から閉じ、ローカル PoC の余計な接続保持を抑えます。
