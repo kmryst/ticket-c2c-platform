@@ -137,7 +137,7 @@ smoke test では最低限、次を確認する。
 
 staging 環境を作る前に、少なくとも次を満たす。
 
-- [ ] GitHub Environment `staging` / `staging-destroy` に required reviewer と branch restriction を設定する。**Environment は先に手動作成して保護設定を入れてから workflow で参照する**（未保護のまま `environment:` で参照すると保護なしで自動作成されてしまうため）。
+- [x] GitHub Environment `staging` / `staging-destroy` に required reviewer と branch restriction を設定する。**Environment は先に手動作成して保護設定を入れてから workflow で参照する**（未保護のまま `environment:` で参照すると保護なしで自動作成されてしまうため）。設定済み（2026-07-03、reviewer: kmryst、branch restriction: 全 4 環境とも custom branch policy で `main` 固定）。
 - [ ] bootstrap の `apply_environments`（`terraform/environments/bootstrap/main.tf`、IAM OIDC trust）に `staging` / `staging-destroy` を追加し、bootstrap を再 apply する。現状は `["dev", "dev-destroy"]` のみで、staging 用ロールの trust policy が存在しない。
 - [ ] apply IAM ロールを `AdministratorAccess` から縮小する（dev で先に検証し、staging 追加時に trust policy と合わせて見直す）。
 - [ ] staging 用 Terraform backend key を dev / prod と分離する。
