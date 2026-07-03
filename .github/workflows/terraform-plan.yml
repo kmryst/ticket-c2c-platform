@@ -32,7 +32,7 @@ jobs:
           terraform_version: "1.14.8"
 
       - name: Configure AWS credentials (plan role)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
