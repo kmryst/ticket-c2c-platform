@@ -28,7 +28,7 @@
 |---|---|---|---|---|
 | M-1 | Data-integrity | `requestId` 付きリクエストは Valkey 前段フィルタを常時バイパスする。悪意あるクライアントがランダムな `requestId` を送れば、売り切れ後もフィルタを素通りして Aurora に直接負荷をかけられる（在庫超過は起きないが、影響隔離が破れる）。 | 前段フィルタの設計見直し。 | 未着手 |
 | M-2 | Data-integrity | `syncCounter` は DB の残在庫でカウンタを無条件 SET するため、並行する `reserve`（DECRBY）とのレースで、在庫があるのに `sold_out_precheck` と誤って拒否され得る（超過ではなく機会損失方向）。`release()` の INCRBY もキー不在時に新規キーを作り、誤拒否の温床になる。 | `syncCounter` / `release` の Lua 化。 | 未着手 |
-| M-3 | Network / Secrets | OpenSearch のアクセスポリシーが `Principal: "*"` + `es:*`、クライアントは無署名 HTTPS。VPC 内 SG（app SG からのみ）で dev では成立するが、staging/prod で IAM 認証を有効化するにはアプリ側の SigV4 署名実装が必須になる。 | staging 前に SigV4 署名実装。 | 未着手 |
+| M-3 | Network / Secrets | OpenSearch のアクセスポリシーが `Principal: "*"` + `es:*`、クライアントは無署名 HTTPS。VPC 内 SG（app SG からのみ）で dev では成立するが、staging/prod で IAM 認証を有効化するにはアプリ側の SigV4 署名実装が必須になる。 | staging 前に SigV4 署名実装。 | 対応済み（PR #75。クライアント側 SigV4 署名を実装し dev で検証済み。アクセスポリシーの IAM 認証必須化は staging で実施） |
 | M-4 | Secrets | DB 接続が `rejectUnauthorized: false`（TLS 暗号化はするが証明書検証なし）。 | RDS CA バンドル同梱、数行で解消。 | 対応済み（PR #68） |
 | M-5 | Network | ALB が HTTP:80 のみで認証なし。稼働中はインターネット全体から平文で公開 API が叩ける。dev-environment.md のコスト前提（アイドル時 Aurora ≈ $0）が外部トラフィックで崩れ得る。 | 検証時のみ ingress を自分の IP に絞る変数を用意、または HTTPS 化。 | 対応済み（PR #72。HTTPS 化 + `alb_allowed_ingress_cidrs` 変数。判断は [ADR-0007](../adr/0007-alb-https-with-acm-and-ingress-variable.md)） |
 | M-6 | Cost | コスト表に Interface VPC Endpoint（ecr.api / ecr.dkr / logs × 2AZ = 6 ENI）の費用（月額約 $60）が未計上。実際は見積り（~$120/月）より高い。 | コスト表への追記。 | 未着手 |

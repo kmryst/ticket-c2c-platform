@@ -6,6 +6,8 @@
 import { Injectable } from '@nestjs/common';
 import { Client } from '@opensearch-project/opensearch';
 import { getOptionalEnv } from '../config';
+// createOpenSearchClient は AWS 上では SigV4 署名付きクライアントを返します（production-readiness M-3）。
+import { createOpenSearchClient } from '../opensearch';
 
 // EVENTS_INDEX は Worker が書き込み、API が読む検索プロジェクションの index 名です。
 export const EVENTS_INDEX = 'events';
@@ -37,9 +39,7 @@ export class SearchService {
 
   constructor() {
     const endpoint = getOptionalEnv('OPENSEARCH_ENDPOINT');
-    this.client = endpoint
-      ? new Client({ node: `https://${endpoint}` })
-      : null;
+    this.client = endpoint ? createOpenSearchClient(endpoint) : null;
   }
 
   isEnabled(): boolean {

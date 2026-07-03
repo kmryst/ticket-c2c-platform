@@ -10,6 +10,8 @@ import {
   SQSClient,
 } from '@aws-sdk/client-sqs';
 import { Client } from '@opensearch-project/opensearch';
+// createOpenSearchClient は AWS 上では SigV4 署名付きクライアントを返します（production-readiness M-3）。
+import { createOpenSearchClient } from '../opensearch';
 import { EVENTS_INDEX } from '../search/search.service';
 
 // EventBridgeEnvelope は SQS body に入る EventBridge イベントの外形です。
@@ -27,7 +29,7 @@ export class SearchProjectionWorker {
     private readonly queueUrl: string,
     opensearchEndpoint: string,
   ) {
-    this.opensearch = new Client({ node: `https://${opensearchEndpoint}` });
+    this.opensearch = createOpenSearchClient(opensearchEndpoint);
   }
 
   // start は index の存在を保証してから消費ループへ入ります。
