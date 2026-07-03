@@ -13,3 +13,8 @@ output "security_group_id" {
 output "listener_arn" {
   value = aws_lb_listener.http.arn
 }
+
+output "zone_id" {
+  description = "Route53 alias レコード用の ALB hosted zone ID"
+  value       = aws_lb.this.zone_id
+}

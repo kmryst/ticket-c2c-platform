@@ -33,3 +33,21 @@ variable "image_tag" {
   type        = string
   default     = "latest"
 }
+
+variable "hosted_zone_name" {
+  description = "ACM 証明書の DNS 検証と API レコード作成に使う Route53 public hosted zone 名（ADR-0007）"
+  type        = string
+  default     = "hamilcar-hannibal.click"
+}
+
+variable "api_subdomain" {
+  description = "API の公開サブドメイン。<api_subdomain>.<hosted_zone_name> が FQDN になる"
+  type        = string
+  default     = "ticket-api-dev"
+}
+
+variable "alb_allowed_ingress_cidrs" {
+  description = "ALB への ingress を許可する CIDR。長時間の負荷検証時などに自分の IP へ絞る（ADR-0007）"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}

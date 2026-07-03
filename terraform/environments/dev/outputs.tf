@@ -45,3 +45,8 @@ output "api_service_name" {
 output "worker_service_name" {
   value = module.worker_service.service_name
 }
+
+output "api_url" {
+  description = "API の公開 HTTPS エンドポイント（ADR-0007）"
+  value       = "https://${var.api_subdomain}.${var.hosted_zone_name}"
+}

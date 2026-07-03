@@ -100,12 +100,71 @@ module "eventbridge" {
 
 # ---------- app（実行層: ALB / ECS） ----------
 
+# ADR-0007: ALB を HTTPS 化する。証明書はこのリポジトリ専用サブドメインで発行し、
+# hosted zone（兄弟リポジトリ terraform-hannibal が取得したドメイン）は data source 参照に留める。
+data "aws_route53_zone" "public" {
+  name         = var.hosted_zone_name
+  private_zone = false
+}
+
+locals {
+  api_fqdn = "${var.api_subdomain}.${var.hosted_zone_name}"
+}
+
+resource "aws_acm_certificate" "api" {
+  domain_name       = local.api_fqdn
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_route53_record" "api_cert_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.api.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      type   = dvo.resource_record_type
+      record = dvo.resource_record_value
+    }
+  }
+
+  zone_id         = data.aws_route53_zone.public.zone_id
+  name            = each.value.name
+  type            = each.value.type
+  records         = [each.value.record]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "api" {
+  certificate_arn         = aws_acm_certificate.api.arn
+  validation_record_fqdns = [for r in aws_route53_record.api_cert_validation : r.fqdn]
+}
+
 module "alb" {
   source = "../../modules/alb"
 
   name              = var.name
   vpc_id            = module.network.vpc_id
   public_subnet_ids = module.network.public_subnet_ids
+
+  # 検証済み証明書の ARN を渡す（validation リソース経由にして、検証完了前にリスナーが作られないようにする）
+  certificate_arn       = aws_acm_certificate_validation.api.certificate_arn
+  allowed_ingress_cidrs = var.alb_allowed_ingress_cidrs
+}
+
+# API の公開 FQDN を ALB へ向ける
+resource "aws_route53_record" "api_alias" {
+  zone_id = data.aws_route53_zone.public.zone_id
+  name    = local.api_fqdn
+  type    = "A"
+
+  alias {
+    name                   = module.alb.dns_name
+    zone_id                = module.alb.zone_id
+    evaluate_target_health = false
+  }
 }
 
 # ALB からの ingress を app SG に許可する
