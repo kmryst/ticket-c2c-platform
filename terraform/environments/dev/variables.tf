@@ -16,17 +16,6 @@ variable "name" {
   default     = "ticket-c2c-dev"
 }
 
-variable "environment_profile" {
-  description = "環境構成 profile。dev は既存構成、staging / staging-full は staging 検証用差分を plan に出す"
-  type        = string
-  default     = "dev"
-
-  validation {
-    condition     = contains(["dev", "staging", "staging-full"], var.environment_profile)
-    error_message = "environment_profile は dev, staging, staging-full のいずれかを指定してください。"
-  }
-}
-
 variable "vpc_cidr" {
   description = "VPC の CIDR"
   type        = string
