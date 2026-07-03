@@ -5,7 +5,7 @@ resource "aws_security_group" "alb" {
   # HTTPS 有効時は 80（リダイレクト用）と 443 を開ける（ADR-0007）。
   # allowed_ingress_cidrs で検証時に自分の IP へ絞れる。
   dynamic "ingress" {
-    for_each = var.certificate_arn != null ? [80, 443] : [80]
+    for_each = var.enable_https ? [80, 443] : [80]
     content {
       from_port   = ingress.value
       to_port     = ingress.value
@@ -58,14 +58,14 @@ resource "aws_lb_target_group" "api" {
   deregistration_delay = 30
 }
 
-# HTTP:80 は HTTPS 有効時（certificate_arn 指定時）は 443 への 301 リダイレクト専用にする（ADR-0007）。
+# HTTP:80 は HTTPS 有効時は 443 への 301 リダイレクト専用にする（ADR-0007）。
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.this.arn
   port              = 80
   protocol          = "HTTP"
 
   dynamic "default_action" {
-    for_each = var.certificate_arn == null ? [1] : []
+    for_each = var.enable_https ? [] : [1]
     content {
       type             = "forward"
       target_group_arn = aws_lb_target_group.api.arn
@@ -73,7 +73,7 @@ resource "aws_lb_listener" "http" {
   }
 
   dynamic "default_action" {
-    for_each = var.certificate_arn != null ? [1] : []
+    for_each = var.enable_https ? [1] : []
     content {
       type = "redirect"
       redirect {
@@ -86,7 +86,7 @@ resource "aws_lb_listener" "http" {
 }
 
 resource "aws_lb_listener" "https" {
-  count = var.certificate_arn != null ? 1 : 0
+  count = var.enable_https ? 1 : 0
 
   load_balancer_arn = aws_lb.this.arn
   port              = 443

@@ -16,8 +16,18 @@ variable "container_port" {
   default = 3000
 }
 
+variable "enable_https" {
+  description = <<-EOT
+    HTTPS リスナーと 80→443 リダイレクトを有効にするか（ADR-0007）。
+    certificate_arn は apply 時まで確定しない値（ACM validation の出力）を受けるため、
+    リスナーの有無は plan 時に確定するこのフラグで切り替える。
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "certificate_arn" {
-  description = "HTTPS リスナーに使う ACM 証明書 ARN（null なら従来どおり HTTP:80 のみ）"
+  description = "HTTPS リスナーに使う ACM 証明書 ARN（enable_https = true のとき必須）"
   type        = string
   default     = null
 }
