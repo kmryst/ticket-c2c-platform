@@ -72,3 +72,4 @@ YYYY-MM-DD
 | [0004](./0004-defer-sqs-fifo.md) | SQS FIFO を初期 dev 環境に含めない | Accepted |
 | [0005](./0005-alb-as-api-entry.md) | API 入口に ALB を採用する | Accepted |
 | [0006](./0006-ecs-fargate-worker.md) | Worker を ECS Fargate にする | Accepted |
+| [0007](./0007-alb-https-with-acm-and-ingress-variable.md) | dev の ALB を HTTPS 化し、HTTP は明示的リダイレクトに限定する | Accepted |
