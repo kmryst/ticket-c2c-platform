@@ -38,17 +38,17 @@ resource "aws_elasticache_replication_group" "this" {
   node_type      = var.node_type
   port           = 6379
 
-  num_cache_clusters = 1
+  num_cache_clusters = var.num_cache_clusters
 
   subnet_group_name  = aws_elasticache_subnet_group.this.name
   security_group_ids = [aws_security_group.this.id]
 
   # dev はアプリ実装を単純化するため TLS なし（VPC 内 + SG 制限）。
-  # staging / prod では transit encryption を有効化する
-  transit_encryption_enabled = false
-  at_rest_encryption_enabled = false
+  # staging 以降は profile から encryption を有効化する。
+  transit_encryption_enabled = var.transit_encryption_enabled
+  at_rest_encryption_enabled = var.at_rest_encryption_enabled
 
-  automatic_failover_enabled = false
+  automatic_failover_enabled = var.automatic_failover_enabled
   snapshot_retention_limit   = 0
 
   apply_immediately = true

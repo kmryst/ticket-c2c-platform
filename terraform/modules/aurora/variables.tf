@@ -60,3 +60,9 @@ variable "skip_final_snapshot" {
   type    = bool
   default = true
 }
+
+variable "reader_instance_count" {
+  description = "failover 用 reader インスタンス数（dev: 0 / staging 以降: 1+）"
+  type        = number
+  default     = 0
+}

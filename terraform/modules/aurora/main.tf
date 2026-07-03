@@ -62,3 +62,18 @@ resource "aws_rds_cluster_instance" "this" {
   engine             = aws_rds_cluster.this.engine
   engine_version     = aws_rds_cluster.this.engine_version
 }
+
+# failover 用 reader（staging 以降。dev は 0 台）。writer 障害時の昇格先になる。
+# Serverless v2 の reader は writer と同じ scaling configuration に従う。
+resource "aws_rds_cluster_instance" "reader" {
+  count = var.reader_instance_count
+
+  identifier         = "${var.name}-aurora-${count.index + 2}"
+  cluster_identifier = aws_rds_cluster.this.id
+  instance_class     = "db.serverless"
+  engine             = aws_rds_cluster.this.engine
+  engine_version     = aws_rds_cluster.this.engine_version
+
+  # writer 作成完了後に追加する（初回 apply 時のインスタンス作成競合を避ける）
+  depends_on = [aws_rds_cluster_instance.this]
+}

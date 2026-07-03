@@ -140,13 +140,13 @@ staging 環境を作る前に、少なくとも次を満たす。
 - [x] GitHub Environment `staging` / `staging-destroy` に required reviewer と branch restriction を設定する。**Environment は先に手動作成して保護設定を入れてから workflow で参照する**（未保護のまま `environment:` で参照すると保護なしで自動作成されてしまうため）。設定済み（2026-07-03、reviewer: kmryst、branch restriction: 全 4 環境とも custom branch policy で `main` 固定）。
 - [ ] bootstrap の `apply_environments`（`terraform/environments/bootstrap/main.tf`、IAM OIDC trust）に `staging` / `staging-destroy` を追加し、bootstrap を再 apply する。現状は `["dev", "dev-destroy"]` のみで、staging 用ロールの trust policy が存在しない。
 - [ ] apply IAM ロールを `AdministratorAccess` から縮小する（dev で先に検証し、staging 追加時に trust policy と合わせて見直す）。
-- [ ] staging 用 Terraform backend key を dev / prod と分離する。
-- [ ] `environment_profile` または同等の変数で `dev` / `staging` / `staging-full` / `prod` を切り替えられる。
-- [ ] API / Worker の desired count、min / max capacity、scheduled scaling を変数化する。
-- [ ] Aurora の failover reader 有無、min / max ACU、deletion protection、final snapshot を変数化する。
-- [ ] Valkey の replica count、automatic failover、encryption 設定を変数化する。
-- [ ] OpenSearch の single-node / Multi-AZ profile を切り替えられる。
-- [ ] NAT Gateway の single / per-AZ 構成を切り替えられる。
+- [x] staging 用 Terraform backend key を dev / prod と分離する。対応済み（Issue #78。`terraform/environments/staging/` を `staging/app/terraform.tfstate` で追加）。
+- [x] `environment_profile` または同等の変数で `dev` / `staging` / `staging-full` / `prod` を切り替えられる。対応済み（Issue #78。対象は `dev` / `staging` / `staging-full`。prod は対象外）。
+- [x] API / Worker の desired count、min / max capacity、scheduled scaling を変数化する。対応済み（Issue #78）。
+- [x] Aurora の failover reader 有無、min / max ACU、deletion protection、final snapshot を変数化する。対応済み（Issue #78）。
+- [x] Valkey の replica count、automatic failover、encryption 設定を変数化する。対応済み（Issue #78）。
+- [x] OpenSearch の single-node / Multi-AZ profile を切り替えられる。対応済み（Issue #78）。
+- [x] NAT Gateway の single / per-AZ 構成を切り替えられる。対応済み（Issue #78）。
 - [ ] seed data と smoke test を自動実行できる。
 - [ ] destroy workflow に `confirm=destroy-staging` と Environment protection を設定する。
 - [ ] API / Worker の desired count を 2 以上にする前に、`schema-on-boot` をマイグレーションツールへ移行する（複数タスク同時起動時の DDL 競合を避けるため。[production-readiness.md](./production-readiness.md) L-4）。

@@ -3,7 +3,8 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  azs = slice(data.aws_availability_zones.available.names, 0, var.az_count)
+  azs                     = slice(data.aws_availability_zones.available.names, 0, var.az_count)
+  extra_nat_gateway_count = var.nat_gateway_mode == "per_az" ? var.az_count - 1 : 0
 }
 
 resource "aws_vpc" "this" {
@@ -41,11 +42,20 @@ resource "aws_subnet" "private" {
   tags = { Name = "${var.name}-private-${local.azs[count.index]}" }
 }
 
-# dev はコスト優先で NAT Gateway を 1 つに絞る（prod では AZ ごとに配置する）
+# dev / staging 通常時はコスト優先で NAT Gateway を 1 つに絞る。
+# staging-full / prod 相当検証では AZ ごとに配置する。
 resource "aws_eip" "nat" {
   domain = "vpc"
 
   tags = { Name = "${var.name}-nat" }
+}
+
+resource "aws_eip" "nat_extra" {
+  count = local.extra_nat_gateway_count
+
+  domain = "vpc"
+
+  tags = { Name = "${var.name}-nat-${local.azs[count.index + 1]}" }
 }
 
 resource "aws_nat_gateway" "this" {
@@ -53,6 +63,17 @@ resource "aws_nat_gateway" "this" {
   subnet_id     = aws_subnet.public[0].id
 
   tags = { Name = "${var.name}-nat" }
+
+  depends_on = [aws_internet_gateway.this]
+}
+
+resource "aws_nat_gateway" "extra" {
+  count = local.extra_nat_gateway_count
+
+  allocation_id = aws_eip.nat_extra[count.index].id
+  subnet_id     = aws_subnet.public[count.index + 1].id
+
+  tags = { Name = "${var.name}-nat-${local.azs[count.index + 1]}" }
 
   depends_on = [aws_internet_gateway.this]
 }
@@ -79,6 +100,19 @@ resource "aws_route_table" "private" {
   tags = { Name = "${var.name}-private" }
 }
 
+resource "aws_route_table" "private_extra" {
+  count = local.extra_nat_gateway_count
+
+  vpc_id = aws_vpc.this.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.extra[count.index].id
+  }
+
+  tags = { Name = "${var.name}-private-${local.azs[count.index + 1]}" }
+}
+
 resource "aws_route_table_association" "public" {
   count = var.az_count
 
@@ -90,7 +124,7 @@ resource "aws_route_table_association" "private" {
   count = var.az_count
 
   subnet_id      = aws_subnet.private[count.index].id
-  route_table_id = aws_route_table.private.id
+  route_table_id = var.nat_gateway_mode == "per_az" && count.index > 0 ? aws_route_table.private_extra[count.index - 1].id : aws_route_table.private.id
 }
 
 # ECR / Logs へのアクセスを NAT 経由にしないための VPC endpoints
@@ -136,7 +170,7 @@ resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.this.id
   service_name      = "com.amazonaws.${var.region}.s3"
   vpc_endpoint_type = "Gateway"
-  route_table_ids   = [aws_route_table.private.id]
+  route_table_ids   = concat([aws_route_table.private.id], aws_route_table.private_extra[*].id)
 
   tags = { Name = "${var.name}-vpce-s3" }
 }

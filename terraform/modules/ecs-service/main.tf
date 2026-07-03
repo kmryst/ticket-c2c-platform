@@ -1,6 +1,10 @@
 # API / Worker 共用の ECS Fargate サービスモジュール（ADR-0006）。
 # 同一イメージを command 差し替えで使い分け、ALB 接続はオプション。
 
+locals {
+  autoscaling_enabled = var.autoscaling_min_capacity != null && var.autoscaling_max_capacity != null
+}
+
 resource "aws_ecs_task_definition" "this" {
   family                   = var.name
   requires_compatibilities = ["FARGATE"]
@@ -77,5 +81,32 @@ resource "aws_ecs_service" "this" {
   # 実行して反映する。
   lifecycle {
     ignore_changes = [task_definition]
+  }
+}
+
+resource "aws_appautoscaling_target" "this" {
+  count = local.autoscaling_enabled ? 1 : 0
+
+  max_capacity       = var.autoscaling_max_capacity
+  min_capacity       = var.autoscaling_min_capacity
+  resource_id        = "service/${var.cluster_name}/${aws_ecs_service.this.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_scheduled_action" "this" {
+  for_each = local.autoscaling_enabled ? {
+    for action in var.scheduled_scaling_actions : action.name => action
+  } : {}
+
+  name               = each.value.name
+  service_namespace  = aws_appautoscaling_target.this[0].service_namespace
+  resource_id        = aws_appautoscaling_target.this[0].resource_id
+  scalable_dimension = aws_appautoscaling_target.this[0].scalable_dimension
+  schedule           = each.value.schedule
+
+  scalable_target_action {
+    min_capacity = each.value.min_capacity
+    max_capacity = each.value.max_capacity
   }
 }
