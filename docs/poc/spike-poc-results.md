@@ -82,7 +82,7 @@
 
 - 在庫超過防止（正確性）は集中負荷下でも維持された（oversold 0）。
 - 売り切れ後の DB 保護は Valkey で完全に機能した。
-- 在庫あり期間の集中負荷では、dev 最小構成において ADR-0004 の再検討トリガー相当の劣化（background の p50 60ms → 5 秒、エラー率 95%）が観測された。ただし支配的なボトルネックは「行ロック直列化 + 共有コネクションプールの head-of-line blocking + Aurora 2 ACU 上限」の複合であり、FIFO 導入の要否判断は本番相当サイジング（staging-full）での再測定が必要。判定の詳細は [ADR-0004](../adr/0004-defer-sqs-fifo.md) の追記を正本とする。
+- 在庫あり期間の集中負荷では、dev 最小構成において ADR-0004 の再検討トリガー相当の劣化（background の p50 60ms → 5 秒、エラー率 95%）が観測された。ただし支配的なボトルネックは「行ロック直列化 + 共有コネクションプールの head-of-line blocking + Aurora 2 ACU 上限」の複合であり、FIFO 導入の要否判断は本番相当サイジング（staging の `capacity_profile=full`）での再測定が必要。判定の詳細は [ADR-0004](../adr/0004-defer-sqs-fifo.md) の追記を正本とする。
 
 ## 再現手順
 

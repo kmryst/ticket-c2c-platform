@@ -13,9 +13,11 @@
 | 環境 | 目的 | コスト方針 | データ方針 |
 |---|---|---|---|
 | dev | 本番系トラックの最初の環境。構築・配線・機能検証 | 最小構成。未使用時 destroy | 破棄可能 |
-| staging | prod 移行前の本番相当トポロジー検証 | 本番相当構成を最小サイズで運用。未使用時 destroy / scale down | seed で再作成可能 |
-| staging-full | リリース前・負荷検証・failover 検証用の一時的な強化プロファイル | 短時間のみ本番に近い冗長構成 | seed + 検証データ |
+| staging (`capacity_profile=normal`) | prod 移行前の本番相当トポロジー検証 | 本番相当構成を最小サイズで運用。未使用時 destroy / scale down | seed で再作成可能 |
+| staging (`capacity_profile=full`) | リリース前・負荷検証・failover 検証用の一時的な強化プロファイル | 短時間のみ本番に近い冗長構成 | seed + 検証データ |
 | prod | 本番サービス提供 | 常時稼働。可用性・保護優先 | 永続・保護対象 |
+
+Terraform では `terraform/environments/<name>/` の root module と state を環境単位とし、`capacity_profile` は同じ環境内のサイズ・冗長化モードとして扱う。`staging-full` は独立した環境名ではなく、staging root に `capacity_profile=full` を指定した状態を指す。
 
 ## 基本方針
 
@@ -47,8 +49,8 @@ ALB
           |      - automatic failover
           |
           +--> OpenSearch
-          |      - staging: small profile
-          |      - staging-full: Multi-AZ profile
+          |      - capacity_profile=normal: single-node profile
+          |      - capacity_profile=full: Multi-AZ profile
           |
           +--> EventBridge
                     |
@@ -87,15 +89,15 @@ ALB
 
 ### OpenSearch
 
-- staging 通常時は小さい profile でよい。
-- staging-full では Multi-AZ profile を使い、index replication、AZ 障害、Worker 再投入、検索プロジェクション遅延を検証する。
+- staging 通常時（`capacity_profile=normal`）は小さい profile でよい。
+- `capacity_profile=full` では Multi-AZ profile を使い、index replication、AZ 障害、Worker 再投入、検索プロジェクション遅延を検証する。
 - OpenSearch は正本ではないが、検索が主要導線なので prod では冗長化を必須にする。
 - staging では OpenSearch を常時本番相当サイズで動かさず、リリース前や障害訓練時だけ強化 profile に切り替える。
 
 ### Network
 
 - VPC は 2 AZ 以上を維持する。
-- staging 通常時は dev と同じく NAT Gateway 1 台も許容するが、staging-full / prod では AZ ごとの NAT Gateway を検証する。
+- staging 通常時（`capacity_profile=normal`）は dev と同じく NAT Gateway 1 台も許容するが、`capacity_profile=full` / prod では AZ ごとの NAT Gateway を検証する。
 - SQS、EventBridge、Secrets Manager など、NAT 依存を減らせる VPC endpoint は段階的に追加する。
 
 ## コスト削減策
@@ -106,7 +108,7 @@ ALB
 | scheduled scaling | ECS API / Worker | 夜間・週末に desired count を 0 にする |
 | Aurora auto-pause | Aurora Serverless v2 | ECS 停止中に DB compute を止める |
 | 最小サイズ profile | ECS / Aurora / Valkey / OpenSearch | staging 通常時は本番相当構成を小さいサイズで動かす |
-| staging-full profile | OpenSearch / NAT / 負荷検証 | リリース前・障害訓練時だけ本番寄せ構成へ切り替える |
+| `capacity_profile=full` | OpenSearch / NAT / 負荷検証 | リリース前・障害訓練時だけ本番寄せ構成へ切り替える |
 | seed 再投入 | DB / Search projection | destroy 後も再現できるデータだけを保持する |
 | Fargate Spot | Worker / 検証ジョブ | 中断しても SQS 再処理や再実行で回復できる処理に限定して使う |
 
@@ -141,7 +143,7 @@ staging 環境を作る前に、少なくとも次を満たす。
 - [ ] bootstrap の `apply_environments`（`terraform/environments/bootstrap/main.tf`、IAM OIDC trust）に `staging` / `staging-destroy` を追加し、bootstrap を再 apply する。現状は `["dev", "dev-destroy"]` のみで、staging 用ロールの trust policy が存在しない。
 - [ ] apply IAM ロールを `AdministratorAccess` から縮小する（dev で先に検証し、staging 追加時に trust policy と合わせて見直す）。
 - [x] staging 用 Terraform backend key を dev / prod と分離する。対応済み（Issue #78。`terraform/environments/staging/` を `staging/app/terraform.tfstate` で追加）。
-- [x] `environment_profile` または同等の変数で `dev` / `staging` / `staging-full` / `prod` を切り替えられる。対応済み（Issue #78。対象は `dev` / `staging` / `staging-full`。prod は対象外）。
+- [x] Terraform root / state は `dev` / `staging` の環境単位にし、staging の通常構成 / 本番寄せ構成は `capacity_profile=normal|full` で切り替えられる。対応済み（Issue #78、Issue #80。prod は対象外）。
 - [x] API / Worker の desired count、min / max capacity、scheduled scaling を変数化する。対応済み（Issue #78）。
 - [x] Aurora の failover reader 有無、min / max ACU、deletion protection、final snapshot を変数化する。対応済み（Issue #78）。
 - [x] Valkey の replica count、automatic failover、encryption 設定を変数化する。対応済み（Issue #78）。
@@ -165,7 +167,7 @@ staging 環境を作る前に、少なくとも次を満たす。
 
 - staging を destroy 可能な prod-like 環境として扱うか。
 - staging data を seed 再作成前提にするか。
-- OpenSearch Multi-AZ を staging 常時構成にするか、staging-full の一時構成にするか。
+- OpenSearch Multi-AZ を staging 常時構成にするか、`capacity_profile=full` の一時構成にするか。
 - Fargate Spot を Worker / 検証ジョブで使うか。
 
 ## 関連ドキュメント

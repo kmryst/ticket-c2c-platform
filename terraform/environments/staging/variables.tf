@@ -16,14 +16,14 @@ variable "name" {
   default     = "ticket-c2c-staging"
 }
 
-variable "environment_profile" {
-  description = "環境構成 profile。dev は既存構成、staging / staging-full は staging 検証用差分を plan に出す"
+variable "capacity_profile" {
+  description = "staging の構成サイズ・冗長化 profile。normal は通常 staging、full は負荷試験・failover 検証用"
   type        = string
-  default     = "staging"
+  default     = "normal"
 
   validation {
-    condition     = contains(["dev", "staging", "staging-full"], var.environment_profile)
-    error_message = "environment_profile は dev, staging, staging-full のいずれかを指定してください。"
+    condition     = contains(["normal", "full"], var.capacity_profile)
+    error_message = "capacity_profile は normal または full を指定してください。"
   }
 }
 

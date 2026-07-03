@@ -43,7 +43,7 @@ resource "aws_subnet" "private" {
 }
 
 # dev / staging 通常時はコスト優先で NAT Gateway を 1 つに絞る。
-# staging-full / prod 相当検証では AZ ごとに配置する。
+# staging の capacity_profile=full / prod 相当検証では AZ ごとに配置する。
 resource "aws_eip" "nat" {
   domain = "vpc"
 
