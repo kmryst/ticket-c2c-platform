@@ -137,7 +137,9 @@ smoke test では最低限、次を確認する。
 
 staging 環境を作る前に、少なくとも次を満たす。
 
-- [ ] GitHub Environment `staging` / `staging-destroy` に required reviewer と branch restriction を設定する。
+- [ ] GitHub Environment `staging` / `staging-destroy` に required reviewer と branch restriction を設定する。**Environment は先に手動作成して保護設定を入れてから workflow で参照する**（未保護のまま `environment:` で参照すると保護なしで自動作成されてしまうため）。
+- [ ] bootstrap の `apply_environments`（`terraform/environments/bootstrap/main.tf`、IAM OIDC trust）に `staging` / `staging-destroy` を追加し、bootstrap を再 apply する。現状は `["dev", "dev-destroy"]` のみで、staging 用ロールの trust policy が存在しない。
+- [ ] apply IAM ロールを `AdministratorAccess` から縮小する（dev で先に検証し、staging 追加時に trust policy と合わせて見直す）。
 - [ ] staging 用 Terraform backend key を dev / prod と分離する。
 - [ ] `environment_profile` または同等の変数で `dev` / `staging` / `staging-full` / `prod` を切り替えられる。
 - [ ] API / Worker の desired count、min / max capacity、scheduled scaling を変数化する。
@@ -147,6 +149,8 @@ staging 環境を作る前に、少なくとも次を満たす。
 - [ ] NAT Gateway の single / per-AZ 構成を切り替えられる。
 - [ ] seed data と smoke test を自動実行できる。
 - [ ] destroy workflow に `confirm=destroy-staging` と Environment protection を設定する。
+- [ ] API / Worker の desired count を 2 以上にする前に、`schema-on-boot` をマイグレーションツールへ移行する（複数タスク同時起動時の DDL 競合を避けるため。[production-readiness.md](./production-readiness.md) L-4）。
+- [ ] OpenSearch のアクセスポリシーを IAM 認証（SigV4 署名）に切り替える前に、アプリ側の署名クライアント実装を dev で先行検証しておく（[production-readiness.md](./production-readiness.md) M-3）。
 - [ ] 本番化ギャップは `production-readiness.md` に移す。
 
 ## production-readiness.md との関係
