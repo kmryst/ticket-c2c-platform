@@ -1,0 +1,50 @@
+# PR Commitlint
+# 目的: CONTRIBUTING.md の Conventional Commits 規約をコミットメッセージと PR タイトルの両方で検証する
+# 移植元: kmryst/terraform-hannibal .github/workflows/pr-commitlint.yml
+
+name: PR Commitlint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commitlint-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  commitlint:
+    name: Commitlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint PR commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: npm run commitlint -- --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+
+      - name: Lint PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE" | npm run commitlint -- --verbose
