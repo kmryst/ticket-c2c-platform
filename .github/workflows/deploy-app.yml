@@ -9,6 +9,10 @@ on:
         type: choice
         options: [dev]
         default: dev
+      image_tag:
+        description: "デプロイする既存 ECR タグ（省略時は現在のコミットをビルドし short SHA タグでデプロイ。ロールバック時は過去の short SHA を指定）"
+        required: false
+        type: string
 
 permissions:
   id-token: write
@@ -38,22 +42,61 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # デプロイするタグを決める（production-readiness M-7: タスク定義は commit SHA 固定で参照する）。
+      # image_tag 入力があればビルドせず既存タグを使う（ロールバック経路）。存在しないタグは即失敗させる。
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            TAG="${{ inputs.image_tag }}"
+            aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids imageTag="$TAG" \
+              --query 'imageDetails[0].imagePushedAt' --output text
+            echo "rollback to existing tag $TAG" >> "$GITHUB_STEP_SUMMARY"
+          else
+            TAG="${GITHUB_SHA::7}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # :latest も併せて push する。これはデプロイには使わず、Terraform 初回 apply 時の
+      # タスク定義（image_tag 変数の既定値 latest）が参照できるイメージを残すブートストラップ用。
       - name: Build and push image
+        if: inputs.image_tag == ''
         run: |
           IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}"
-          docker build -t "$IMAGE:latest" -t "$IMAGE:${GITHUB_SHA::7}" .
+          TAG="${{ steps.tag.outputs.tag }}"
+          docker build -t "$IMAGE:latest" -t "$IMAGE:$TAG" .
           docker push "$IMAGE:latest"
-          docker push "$IMAGE:${GITHUB_SHA::7}"
-          echo "pushed $IMAGE:${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"
+          docker push "$IMAGE:$TAG"
+          echo "pushed $IMAGE:$TAG" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Update ECS services
+      # 現行タスク定義のイメージだけを commit SHA タグへ差し替えた新リビジョンを register し、
+      # サービスをそのリビジョンへ更新する。これによりタスク定義から稼働コミットを特定でき、
+      # ロールバックは過去タグの再指定だけで済む（再ビルド不要）。
+      - name: Register SHA-pinned task definitions and update services
         run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${{ steps.tag.outputs.tag }}"
           for SVC in ticket-c2c-dev-api ticket-c2c-dev-worker; do
+            CURRENT_TD=$(aws ecs describe-services \
+              --cluster "$ECS_CLUSTER" --services "$SVC" \
+              --query 'services[0].taskDefinition' --output text)
+            aws ecs describe-task-definition \
+              --task-definition "$CURRENT_TD" \
+              --query 'taskDefinition' > td.json
+            jq --arg image "$IMAGE" '
+              del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
+              | .containerDefinitions[0].image = $image
+            ' td.json > td-new.json
+            NEW_TD=$(aws ecs register-task-definition \
+              --cli-input-json file://td-new.json \
+              --query 'taskDefinition.taskDefinitionArn' --output text)
             aws ecs update-service \
-              --cluster "$ECS_CLUSTER" \
-              --service "$SVC" \
-              --force-new-deployment \
+              --cluster "$ECS_CLUSTER" --service "$SVC" \
+              --task-definition "$NEW_TD" \
               --query 'service.serviceName' --output text
+            echo "updated $SVC -> ${NEW_TD##*/} ($IMAGE)" >> "$GITHUB_STEP_SUMMARY"
           done
 
       - name: Wait for services stable

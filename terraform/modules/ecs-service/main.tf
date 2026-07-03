@@ -66,7 +66,16 @@ resource "aws_ecs_service" "this" {
     }
   }
 
-  # deploy workflow が新イメージ push 後に force-new-deployment で入れ替えるため、
-  # タスク定義の差分以外での再デプロイを Terraform では待たない
+  # deploy workflow がタスク定義を更新した直後の再デプロイ完了を Terraform では待たない
   wait_for_steady_state = false
+
+  # deploy workflow は commit SHA タグへ差し替えた新しいタスク定義リビジョンを register して
+  # サービスを更新する（production-readiness M-7）。Terraform がそのリビジョンを
+  # 自身のリビジョン（ブートストラップ用イメージタグ）へ巻き戻さないよう、差分を無視する。
+  # 注意: Terraform 側でタスク定義（環境変数・リソースサイズ等）を変更した場合、
+  # 新リビジョンは作られるがサービスには自動反映されない。apply 後に deploy-app workflow を
+  # 実行して反映する。
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 }
