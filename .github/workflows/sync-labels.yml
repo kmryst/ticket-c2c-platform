@@ -1,0 +1,30 @@
+# Sync Labels
+# 目的: ラベル定義の正本 .github/labels.yml を GitHub に自動同期する
+# 実体は既存 helper scripts/github/sync-labels.sh を呼ぶ（二重実装を避ける）
+
+name: Sync Labels
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/labels.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync-labels:
+    name: Sync Labels
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Sync labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/github/sync-labels.sh --repo "$GITHUB_REPOSITORY"
