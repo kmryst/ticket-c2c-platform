@@ -1,0 +1,24 @@
+# Dependabot 設定
+# 目的: npm / GitHub Actions / Terraform の依存関係更新を週次で自動追従する
+
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "terraform"
+    directories:
+      - "/terraform/environments/bootstrap"
+      - "/terraform/environments/dev"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
