@@ -9,7 +9,8 @@
     "start:dev": "ts-node src/main.ts",
     "poc:inventory": "ts-node --project tsconfig.scripts.json scripts/poc/inventory-purchase-poc.ts",
     "start:worker": "node dist/src/worker.js",
-    "worker:dev": "ts-node src/worker.ts"
+    "worker:dev": "ts-node src/worker.ts",
+    "commitlint": "commitlint"
   },
   "engines": {
     "node": ">=20"
@@ -30,6 +31,8 @@
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
+    "@commitlint/cli": "^21.2.0",
+    "@commitlint/config-conventional": "^21.2.0",
     "@types/node": "^26.0.1",
     "@types/pg": "^8.20.0",
     "ts-node": "^10.9.2",
