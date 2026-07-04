@@ -10,7 +10,8 @@
     "poc:inventory": "ts-node --project tsconfig.scripts.json scripts/poc/inventory-purchase-poc.ts",
     "start:worker": "node dist/src/worker.js",
     "worker:dev": "ts-node src/worker.ts",
-    "commitlint": "commitlint"
+    "commitlint": "commitlint",
+    "smoke:staging": "ts-node --project tsconfig.scripts.json scripts/staging/smoke-test.ts"
   },
   "engines": {
     "node": ">=20"
