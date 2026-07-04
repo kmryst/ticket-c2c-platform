@@ -385,7 +385,7 @@ staging normal を初回 apply する前に、少なくとも次を満たす。
 - [x] Terraform root / state は `dev` / `staging` の環境単位にし、staging の通常構成 / 本番寄せ構成は `capacity_profile=normal|full` で切り替える。対応済み（Issue #78、Issue #80）。
 - [x] staging の VPC CIDR を `10.10.0.0/16` にする。対応済み（Issue #88）。
 - [x] staging の初回 endpoint を `alb-http-only` にする。対応済み（Issue #88。`public_endpoint_mode` 変数、既定 `alb-http-only`。判断は [ADR-0008](../adr/0008-staging-ephemeral-prod-like-environment.md)）。
-- [x] staging normal の API desired count を 1、Worker desired count を 1 にする。対応済み（Issue #88。API autoscaling max も 1 に固定、Worker autoscaling max は 4）。
+- [x] staging normal の API desired count を 1、Worker desired count を 1 にする。対応済み（Issue #88。Worker autoscaling max は 4。API autoscaling max は当初 1 に固定していたが、Issue #92 で schema-on-boot の DDL 競合ブロッカーが解消したため normal 3 / full 4 へ引き上げ済み）。
 - [x] seed data と smoke test を自動実行できる。対応済み（Issue #90、PR #98。smoke test が API 経由で test event を seed し、`staging-smoke-test.yml` が green で完走した実績あり（Issue #91 の検証サイクル））。
 - [x] destroy workflow に `confirm=destroy-staging`、Environment protection、destroy 後確認を設定する。対応済み（Issue #89。`terraform-destroy-staging.yml` + `scripts/deployment/check-residual-resources.sh`）。
 - [x] API / Worker の desired count を 2 以上にする前に、`schema-on-boot` を migration workflow / script へ移行する。対応済み（Issue #92。TypeORM versioned migrations + db-migrate workflow / deploy-app の run_migrations 入力）。
