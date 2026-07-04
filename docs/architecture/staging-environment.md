@@ -134,7 +134,7 @@ Next.js SSR が必要な場合は、Node.js runtime がリクエスト時に API
 
 ## capacity profile
 
-`dev` は `small` 固定で、workflow から profile を選ばせない。`staging` だけ `normal` / `full` を選べる。
+`capacity_profile` は staging 専用の切り替え入力。dev は `small` という入力 / profile を持たず、capacity profile の概念を使わない固定の小さい構成（Terraform 上も `dev_settings` という dev 固有の設定名で保持し、`CapacityProfile` タグを付けない。Issue #82）。`staging` だけ `normal` / `full` を選べる。
 
 | 項目 | dev small | staging normal | staging full |
 |---|---:|---:|---:|

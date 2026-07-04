@@ -14,10 +14,9 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project         = var.project
-      Environment     = local.environment
-      CapacityProfile = local.capacity_profile
-      ManagedBy       = "terraform"
+      Project     = var.project
+      Environment = local.environment
+      ManagedBy   = "terraform"
     }
   }
 }
