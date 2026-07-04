@@ -17,7 +17,7 @@
 hot（人気イベント）1 件と background（分散負荷用）4 件を API 経由で作成します。
 
 ```bash
-eval "$(./scripts/load-testing/seed-events.sh https://ticket-api-dev.hamilcar-hannibal.click)"
+eval "$(./scripts/load-testing/seed-events.sh https://ticket-api-dev.ticket-c2c.click)"
 ```
 
 hot の在庫は既定 6,000 枚です。HOT_RATE=200 req/s なら約 30 秒で売り切れ、

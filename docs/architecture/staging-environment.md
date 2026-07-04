@@ -128,7 +128,7 @@ Next.js SSR が必要な場合は、Node.js runtime がリクエスト時に API
 | mode | 初期採用 | 内容 | smoke test URL |
 |---|---:|---|---|
 | `alb-http-only` | Yes | ALB HTTP listener のみ。ACM 証明書なし、HTTPS listener なし、Route53 alias なし | `http://<alb_dns_name>` |
-| `https-dns` | Later | `ticket-api-staging.hamilcar-hannibal.click`、ACM DNS 検証、ALB HTTPS listener、Route53 alias | `https://ticket-api-staging.hamilcar-hannibal.click` |
+| `https-dns` | Later | `ticket-api-staging.ticket-c2c.click`、ACM DNS 検証、ALB HTTPS listener、Route53 alias | `https://ticket-api-staging.ticket-c2c.click` |
 
 初回 staging は `alb-http-only` にする（[ADR-0008](../adr/0008-staging-ephemeral-prod-like-environment.md)）。`terraform/environments/staging` に `public_endpoint_mode` 変数（`alb-http-only` 既定 / `https-dns`）を実装済み（Issue #88）。`https-dns` を指定した場合のみ ACM 証明書・DNS 検証レコード・Route53 alias・HTTPS リスナーが作成される。smoke test 等の base URL は Terraform output `api_base_url` で取得する。
 

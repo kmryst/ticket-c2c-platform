@@ -35,9 +35,9 @@ variable "image_tag" {
 }
 
 variable "hosted_zone_name" {
-  description = "ACM 証明書の DNS 検証と API レコード作成に使う Route53 public hosted zone 名（ADR-0007）"
+  description = "ACM 証明書の DNS 検証と API レコード作成に使う Route53 public hosted zone 名（ADR-0007 / ADR-0009）"
   type        = string
-  default     = "hamilcar-hannibal.click"
+  default     = "ticket-c2c.click"
 }
 
 variable "api_subdomain" {
