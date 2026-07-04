@@ -17,7 +17,8 @@ ENV NODE_ENV=production
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
-# schema-on-boot（RUN_SCHEMA_ON_BOOT=true）用にスキーマを同梱する
+# RDS CA バンドル（database/rds-ca、TLS 証明書検証用）と
+# ローカル参照用スキーマを同梱する（DDL 適用は dist 内の TypeORM migrations で行う。Issue #92）
 COPY database ./database
 EXPOSE 3000
 USER node

@@ -11,7 +11,10 @@
     "start:worker": "node dist/src/worker.js",
     "worker:dev": "ts-node src/worker.ts",
     "commitlint": "commitlint",
-    "smoke:staging": "ts-node --project tsconfig.scripts.json scripts/staging/smoke-test.ts"
+    "smoke:staging": "ts-node --project tsconfig.scripts.json scripts/staging/smoke-test.ts",
+    "migration:run": "node dist/src/database/run-migrations.js",
+    "migration:run:local": "ts-node src/database/run-migrations.ts",
+    "migration:create": "typeorm migration:create"
   },
   "engines": {
     "node": ">=20"
@@ -30,7 +33,8 @@
     "ioredis": "^5.11.1",
     "pg": "^8.22.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.2"
+    "rxjs": "^7.8.2",
+    "typeorm": "^1.0.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.0",

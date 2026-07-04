@@ -358,7 +358,6 @@ module "api_service" {
     DB_NAME             = module.aurora.database_name
     DB_USERNAME         = "ticket_admin"
     DB_SSL              = "true"
-    RUN_SCHEMA_ON_BOOT  = "true"
     VALKEY_URL          = "${local.dev_settings.valkey_transit_encryption ? "rediss" : "redis"}://${module.valkey.primary_endpoint}:6379"
     EVENT_BUS_NAME      = module.eventbridge.bus_name
     OPENSEARCH_ENDPOINT = module.opensearch.endpoint
@@ -368,7 +367,7 @@ module "api_service" {
   }
 
   secrets = {
-    # 起動時 1 回きりの schema-on-boot 用。ローテーション影響を受けない短命接続なので静的注入のままでよい。
+    # migration runner（db-migrate workflow の ECS run-task）用。短命接続のためローテーション影響を受けず、静的注入のままでよい（Issue #92）。
     DB_PASSWORD = "${module.aurora.master_user_secret_arn}:password::"
   }
 }
