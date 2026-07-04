@@ -1,0 +1,47 @@
+# bootstrap（tfstate バケット / GitHub OIDC IAM ロール）専用の apply workflow。
+# 環境ごとの分岐を持たせないため、環境選択入力は置かない（staging-environment.md「GitHub Actions」）。
+# 注意: apply ロールの trust に environment:bootstrap を追加する変更自体は、
+# 初回のみローカル apply で反映する必要がある（鶏卵。bootstrap README 参照）。
+name: terraform-apply-bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-bootstrap
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: bootstrap
+    defaults:
+      run:
+        working-directory: terraform/environments/bootstrap
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.8"
+
+      - name: Configure AWS credentials (apply role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        run: terraform plan -input=false -no-color -out=tfplan.bin
+
+      - name: Terraform apply
+        run: terraform apply -input=false -no-color tfplan.bin
+
+      - name: Outputs
+        run: terraform output -no-color >> "$GITHUB_STEP_SUMMARY"

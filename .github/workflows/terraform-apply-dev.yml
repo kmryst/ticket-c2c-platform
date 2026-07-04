@@ -1,30 +1,24 @@
-name: terraform-apply
+# dev 専用の terraform apply workflow（staging-environment.md「GitHub Actions」）。
+# 環境選択入力は持たない。承認は GitHub Environment `dev` の protection で行う。
+name: terraform-apply-dev
 
 on:
   workflow_dispatch:
-    inputs:
-      environment:
-        description: "apply する環境"
-        required: true
-        type: choice
-        options: [dev]
-        default: dev
 
 permissions:
   id-token: write
   contents: read
 
 concurrency:
-  group: terraform-${{ inputs.environment }}
+  group: terraform-dev
 
 jobs:
   apply:
     runs-on: ubuntu-latest
-    # Environment protection（承認・ブランチ制限）と IAM 信頼ポリシーの両方で dev に限定される
-    environment: ${{ inputs.environment }}
+    environment: dev
     defaults:
       run:
-        working-directory: terraform/environments/${{ inputs.environment }}
+        working-directory: terraform/environments/dev
     steps:
       - uses: actions/checkout@v7
 

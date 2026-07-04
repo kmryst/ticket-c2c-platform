@@ -1,14 +1,10 @@
-name: deploy-app
+# staging 専用のアプリデプロイ workflow（staging-environment.md「GitHub Actions」）。
+# 環境選択入力は持たない。承認は GitHub Environment `staging` の protection で行う。
+name: deploy-app-staging
 
 on:
   workflow_dispatch:
     inputs:
-      environment:
-        description: "deploy する環境"
-        required: true
-        type: choice
-        options: [dev]
-        default: dev
       image_tag:
         description: "デプロイする既存 ECR タグ（省略時は現在のコミットをビルドし short SHA タグでデプロイ。ロールバック時は過去の short SHA を指定）"
         required: false
@@ -19,16 +15,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-${{ inputs.environment }}
+  group: deploy-staging
 
 env:
-  ECR_REPOSITORY: ticket-c2c-dev
-  ECS_CLUSTER: ticket-c2c-dev
+  ECR_REPOSITORY: ticket-c2c-staging
+  ECS_CLUSTER: ticket-c2c-staging
+  ECS_SERVICES: "ticket-c2c-staging-api ticket-c2c-staging-worker"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    environment: staging
     steps:
       - uses: actions/checkout@v7
 
@@ -77,7 +74,7 @@ jobs:
       - name: Register SHA-pinned task definitions and update services
         run: |
           IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${{ steps.tag.outputs.tag }}"
-          for SVC in ticket-c2c-dev-api ticket-c2c-dev-worker; do
+          for SVC in $ECS_SERVICES; do
             CURRENT_TD=$(aws ecs describe-services \
               --cluster "$ECS_CLUSTER" --services "$SVC" \
               --query 'services[0].taskDefinition' --output text)
@@ -103,5 +100,5 @@ jobs:
         run: |
           aws ecs wait services-stable \
             --cluster "$ECS_CLUSTER" \
-            --services ticket-c2c-dev-api ticket-c2c-dev-worker
+            --services $ECS_SERVICES
           echo "services stable" >> "$GITHUB_STEP_SUMMARY"

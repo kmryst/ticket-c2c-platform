@@ -1,0 +1,68 @@
+# dev 専用の terraform destroy workflow。三重ゲート:
+# 1. workflow_dispatch のみ（自動トリガーなし）
+# 2. confirm 入力が "destroy-dev" と完全一致
+# 3. Environment "dev-destroy" の protection（required reviewer / branch restriction）
+# destroy 後確認（state 空・高コスト残存リソース検査）を行う（staging-environment.md「destroy 後確認」）。
+name: terraform-destroy-dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '確認のため "destroy-dev" を入力'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-dev
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    if: inputs.confirm == 'destroy-dev'
+    environment: dev-destroy
+    defaults:
+      run:
+        working-directory: terraform/environments/dev
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.8"
+
+      - name: Configure AWS credentials (apply role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform destroy
+        run: terraform destroy -input=false -no-color -auto-approve
+
+      - name: Verify state is empty
+        run: |
+          remaining=$(terraform state list | wc -l)
+          echo "terraform state entries: $remaining" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$remaining" -ne 0 ]; then
+            terraform state list
+            exit 1
+          fi
+
+      - name: Verify destroy plan is no-op
+        run: terraform plan -destroy -input=false -no-color -detailed-exitcode
+
+      - name: Check residual AWS resources
+        working-directory: .
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          ./scripts/deployment/check-residual-resources.sh ticket-c2c-dev | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "検査対象外の軽微リソース: CloudWatch Logs / ECR image / S3 state bucket" >> "$GITHUB_STEP_SUMMARY"

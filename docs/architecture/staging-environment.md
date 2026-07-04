@@ -192,7 +192,7 @@ Next.js SSR が必要な場合は、Node.js runtime がリクエスト時に API
 
 dev と staging は workflow を分ける。dev workflow に `normal` / `full` の選択肢を出さないため。
 
-環境ごとに入力・承認フローが分岐していくため、汎用 workflow に環境選択式の入力を持たせず、環境ごとに専用 workflow へ完全分割する。既存の汎用 `terraform-apply.yml` / `terraform-destroy.yml`（`environment` 入力で bootstrap / dev / staging を切り替える方式）は、bootstrap 用 apply/destroy workflow を切り出した上で退役させる。汎用 workflow に「dev では無視される入力」のような不要な選択肢を残さないため。
+環境ごとに入力・承認フローが分岐していくため、汎用 workflow に環境選択式の入力を持たせず、環境ごとに専用 workflow へ完全分割する。既存の汎用 `terraform-apply.yml` / `terraform-destroy.yml`（`environment` 入力で環境を切り替える方式）と `deploy-app.yml` は、bootstrap 用 apply workflow を切り出した上で退役させる。汎用 workflow に「dev では無視される入力」のような不要な選択肢を残さないため。対応済み（Issue #89。下表の workflow へ分割し、汎用 3 workflow は削除済み）。
 
 | workflow | 目的 | 入力 | Environment | 備考 |
 |---|---|---|---|---|
@@ -332,7 +332,7 @@ staging normal を初回 apply する前に、少なくとも次を満たす。
 - [x] staging の初回 endpoint を `alb-http-only` にする。対応済み（Issue #88。`public_endpoint_mode` 変数、既定 `alb-http-only`。判断は [ADR-0008](../adr/0008-staging-ephemeral-prod-like-environment.md)）。
 - [x] staging normal の API desired count を 1、Worker desired count を 1 にする。対応済み（Issue #88。API autoscaling max も 1 に固定、Worker autoscaling max は 4）。
 - [ ] seed data と smoke test を自動実行できる。
-- [ ] destroy workflow に `confirm=destroy-staging`、Environment protection、destroy 後確認を設定する。
+- [x] destroy workflow に `confirm=destroy-staging`、Environment protection、destroy 後確認を設定する。対応済み（Issue #89。`terraform-destroy-staging.yml` + `scripts/deployment/check-residual-resources.sh`）。
 - [ ] API / Worker の desired count を 2 以上にする前に、`schema-on-boot` を migration workflow / script へ移行する。
 - [x] OpenSearch のアクセスポリシーを IAM 認証（SigV4 署名）に切り替える。署名クライアント実装は dev で先行検証済み（[production-readiness.md](./production-readiness.md) M-3、PR #75）。staging のアクセスポリシー Principal を API / Worker task role に限定（Issue #88。dev は `Principal:"*"` のまま互換維持）。
 - [ ] 本番化ギャップは `production-readiness.md` に移す。
