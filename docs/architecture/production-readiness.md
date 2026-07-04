@@ -44,7 +44,7 @@
 | L-4 | Reliability | `schema-on-boot` は複数タスク同時起動時に DDL が競合し得る（現状 desired_count=1 のため未発生）。 | staging でマイグレーションツールへ移行。 | 対応済み（Issue #92。起動時 DDL を廃止し TypeORM versioned migrations + ECS run-task の migration workflow へ移行。runner は advisory lock で直列化） |
 | L-5 | Reliability | Worker のバッチ処理で、1件でも例外を投げると同バッチ内の正常メッセージの削除もスキップされる。SQS DLQ に CloudWatch アラームがなく、滞留に気づけない。 | DLQ アラーム追加。 | 一部対応済み（Issue #100。DLQ 滞留 1 件以上で ALARM になる CloudWatch アラームを sqs モジュールへ追加。SNS 等の通知配線と、バッチ内の部分削除（正常メッセージのみ削除）は未対応） |
 | L-6 | Network | Aurora / Valkey / OpenSearch の各 SG の egress が全開放（`0.0.0.0/0`）。マネージドサービス SG としては定番だが prod では絞る余地がある。 | prod 移行時に見直し。 | 未着手 |
-| L-7 | Reliability | Aurora のバックアップ保持期間・マイナーバージョン方針が未指定（既定 1 日）。staging 用の変数化もまだ。 | staging 用変数の追加。 | 未着手 |
+| L-7 | Reliability | Aurora のバックアップ保持期間・マイナーバージョン方針が未指定（既定 1 日）。staging 用の変数化もまだ。 | staging 用変数の追加。 | 対応済み（Issue #101。aurora モジュールに backup_retention_period / preferred_backup_window / auto_minor_version_upgrade を変数化し、dev / staging root が明示値（retention 1 日・自動マイナー適用）を設定。prod では retention 7 日以上へ引き上げる） |
 
 ## 監査で「問題なし」と確認済みの観点
 

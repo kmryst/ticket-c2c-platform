@@ -52,6 +52,11 @@ resource "aws_rds_cluster" "this" {
   deletion_protection = var.deletion_protection
   skip_final_snapshot = var.skip_final_snapshot
 
+  # バックアップ方針（production-readiness L-7）。dev / staging はエフェメラル環境
+  # （ADR-0008）のため最小の 1 日を明示し、prod では 7 日以上へ引き上げる。
+  backup_retention_period = var.backup_retention_period
+  preferred_backup_window = var.preferred_backup_window
+
   apply_immediately = true
 }
 
@@ -61,6 +66,10 @@ resource "aws_rds_cluster_instance" "this" {
   instance_class     = "db.serverless"
   engine             = aws_rds_cluster.this.engine
   engine_version     = aws_rds_cluster.this.engine_version
+
+  # マイナーバージョン方針（production-readiness L-7）: 自動適用を明示する。
+  # 適用タイミングはメンテナンスウィンドウ。prod で固定運用したくなったら false + 手動更新へ。
+  auto_minor_version_upgrade = var.auto_minor_version_upgrade
 }
 
 # failover 用 reader（staging 以降。dev は 0 台）。writer 障害時の昇格先になる。
@@ -73,6 +82,8 @@ resource "aws_rds_cluster_instance" "reader" {
   instance_class     = "db.serverless"
   engine             = aws_rds_cluster.this.engine
   engine_version     = aws_rds_cluster.this.engine_version
+
+  auto_minor_version_upgrade = var.auto_minor_version_upgrade
 
   # writer 作成完了後に追加する（初回 apply 時のインスタンス作成競合を避ける）
   depends_on = [aws_rds_cluster_instance.this]

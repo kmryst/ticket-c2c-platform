@@ -136,6 +136,11 @@ module "aurora" {
   deletion_protection      = local.capacity_profile_settings.aurora_deletion_protection
   skip_final_snapshot      = local.capacity_profile_settings.aurora_skip_final_snapshot
   reader_instance_count    = local.capacity_profile_settings.aurora_reader_instance_count
+
+  # バックアップ・マイナーバージョン方針（production-readiness L-7）。
+  # staging は検証後毎回 destroy するエフェメラル環境（ADR-0008）のため保持 1 日。prod では 7 日以上へ。
+  backup_retention_period    = 1
+  auto_minor_version_upgrade = true
 }
 
 module "valkey" {
