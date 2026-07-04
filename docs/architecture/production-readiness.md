@@ -21,6 +21,7 @@
 | H-1 | IAM / CI-CD | apply IAM ロールが `AdministratorAccess` のまま。write 権限が漏れた場合、任意ブランチに `environment: dev` を書いた workflow を workflow_dispatch するだけで Admin 級クレデンシャルを取得できる。GitHub Environment `dev` / `dev-destroy` の required reviewer・ブランチ制限は対応済み（2026-07-03、Issue #65、PR #66）だが、IAM ロールの `AdministratorAccess` 縮小は未着手のまま残る。 | IAM ロールのスコープ縮小。dev で先に検証。 | 一部対応済み（reviewer/branch restriction: PR #66） |
 | H-2 | CI-CD | `terraform-destroy.yml` の「三重ゲート」のうち、`confirm` 入力一致チェックは workflow 定義ごと改変されれば回避できる。IAM trust は environment 名しか見ないため、H-1 と同じ対策（reviewer + ブランチ制限）で塞がる。 | H-1 と同一対応で解消。 | 対応済み（2026-07-03、Issue #65、PR #66） |
 | H-3 | Reliability / Secrets | Aurora の RDS 管理マスターシークレットは既定で 7 日ごとに自動ローテーションされるが、ECS への注入はタスク起動時 1 回きり。7 日以上連続稼働（例: 長時間の負荷検証）させると、ローテーション後に認証エラーで API/Worker が静かに壊れる。`dev-environment.md` にこの落とし穴の記載がない。 | ローテーション時の運用手順明記、またはアプリ側の再接続実装。 | 対応済み（PR #32） |
+| H-4 | Reliability | Aurora reader failover 中、チェックアウト中の `PoolClient`（`DatabaseService`）で予期しない接続切断が起きると、`pool.on('error')` では捕捉できず未捕捉例外で API プロセスがクラッシュする。2026-07-04 の staging full 検証（Issue #93）で実測: AWS 側の failover 完了は約39秒だが、クラッシュ+ECS 再起動により実際のサービス断は約84.2秒に拡大した。 | チェックアウト中 client にも error handler を付与する。 | 未着手（Issue #108） |
 
 ## Medium
 
@@ -28,7 +29,7 @@
 |---|---|---|---|---|
 | M-1 | Data-integrity | `requestId` 付きリクエストは Valkey 前段フィルタを常時バイパスする。悪意あるクライアントがランダムな `requestId` を送れば、売り切れ後もフィルタを素通りして Aurora に直接負荷をかけられる（在庫超過は起きないが、影響隔離が破れる）。 | 前段フィルタの設計見直し。 | 未着手 |
 | M-2 | Data-integrity | `syncCounter` は DB の残在庫でカウンタを無条件 SET するため、並行する `reserve`（DECRBY）とのレースで、在庫があるのに `sold_out_precheck` と誤って拒否され得る（超過ではなく機会損失方向）。`release()` の INCRBY もキー不在時に新規キーを作り、誤拒否の温床になる。 | `syncCounter` / `release` の Lua 化。 | 未着手 |
-| M-3 | Network / Secrets | OpenSearch のアクセスポリシーが `Principal: "*"` + `es:*`、クライアントは無署名 HTTPS。VPC 内 SG（app SG からのみ）で dev では成立するが、staging/prod で IAM 認証を有効化するにはアプリ側の SigV4 署名実装が必須になる。 | staging 前に SigV4 署名実装。 | 対応済み（PR #75。クライアント側 SigV4 署名を実装し dev で検証済み。アクセスポリシーの IAM 認証必須化は staging で実施） |
+| M-3 | Network / Secrets | OpenSearch のアクセスポリシーが `Principal: "*"` + `es:*`、クライアントは無署名 HTTPS。VPC 内 SG（app SG からのみ）で dev では成立するが、staging/prod で IAM 認証を有効化するにはアプリ側の SigV4 署名実装が必須になる。 | staging 前に SigV4 署名実装。 | 対応済み（PR #75 でクライアント側 SigV4 署名を実装、PR #95（Issue #88）でアクセスポリシーを API/Worker task role に限定。2026-07-04、Issue #93 の staging full 検証で実地確認済み: `describe-domain-config` で Principal 限定、smoke test の検索アサーション成功で SigV4 疎通を確認） |
 | M-4 | Secrets | DB 接続が `rejectUnauthorized: false`（TLS 暗号化はするが証明書検証なし）。 | RDS CA バンドル同梱、数行で解消。 | 対応済み（PR #68） |
 | M-5 | Network | ALB が HTTP:80 のみで認証なし。稼働中はインターネット全体から平文で公開 API が叩ける。dev-environment.md のコスト前提（アイドル時 Aurora ≈ $0）が外部トラフィックで崩れ得る。 | 検証時のみ ingress を自分の IP に絞る変数を用意、または HTTPS 化。 | 対応済み（PR #72。HTTPS 化 + `alb_allowed_ingress_cidrs` 変数。判断は [ADR-0007](../adr/0007-alb-https-with-acm-and-ingress-variable.md)） |
 | M-6 | Cost | コスト表に Interface VPC Endpoint（ecr.api / ecr.dkr / logs × 2AZ = 6 ENI）の費用（月額約 $60）が未計上。実際は見積り（~$120/月）より高い。 | コスト表への追記。 | 未着手 |
