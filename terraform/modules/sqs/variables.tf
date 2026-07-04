@@ -19,3 +19,9 @@ variable "max_receive_count" {
   type        = number
   default     = 5
 }
+
+variable "create_dlq_alarm" {
+  description = "DLQ 滞留を検知する CloudWatch アラームを作成するか（production-readiness L-5）"
+  type        = bool
+  default     = true
+}

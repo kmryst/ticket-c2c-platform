@@ -25,3 +25,25 @@ resource "aws_sqs_queue" "this" {
     maxReceiveCount     = var.max_receive_count
   })
 }
+
+# DLQ 滞留の検知（production-readiness L-5）。
+# Worker の処理失敗で DLQ に移ったメッセージに気づけるよう、1 件以上の滞留で ALARM にする。
+# 通知先（SNS 等）は未整備のため、初期はアラーム状態の可視化のみ（actions なし）。
+resource "aws_cloudwatch_metric_alarm" "dlq_messages" {
+  count = var.create_dlq_alarm ? 1 : 0
+
+  alarm_name          = "${local.dlq_name}-messages-visible"
+  alarm_description   = "DLQ ${local.dlq_name} に滞留メッセージがある（Worker の処理失敗を確認する）"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    QueueName = aws_sqs_queue.dlq.name
+  }
+}
