@@ -12,3 +12,8 @@ output "apply_role_arn" {
   description = "GitHub Actions の apply / destroy / deploy 用ロール ARN（AWS_APPLY_ROLE_ARN に設定する）"
   value       = module.github_oidc.apply_role_arn
 }
+
+output "staging_state_readonly_role_arn" {
+  description = "staging-smoke-test.yml 用の staging state 読み取り専用ロール ARN（AWS_STAGING_READONLY_ROLE_ARN に設定する）"
+  value       = aws_iam_role.staging_state_readonly.arn
+}

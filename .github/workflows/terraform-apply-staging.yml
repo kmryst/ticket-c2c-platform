@@ -1,0 +1,59 @@
+# staging 専用の terraform apply workflow（staging-environment.md「GitHub Actions」）。
+# 環境選択入力は持たず、staging 固有の capacity_profile のみ受け取る。
+# full への追加 confirm は置かない。承認は GitHub Environment `staging` の protection で行う。
+name: terraform-apply-staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      capacity_profile:
+        description: "staging の構成サイズ・冗長化 profile（normal: 通常検証 / full: 負荷・failover 検証）"
+        required: true
+        type: choice
+        options: [normal, full]
+        default: normal
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-staging
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: staging
+    defaults:
+      run:
+        working-directory: terraform/environments/staging
+    env:
+      TF_VAR_capacity_profile: ${{ inputs.capacity_profile }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.8"
+
+      - name: Configure AWS credentials (apply role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        run: terraform plan -input=false -no-color -out=tfplan.bin
+
+      - name: Terraform apply
+        run: terraform apply -input=false -no-color tfplan.bin
+
+      - name: Outputs
+        run: |
+          {
+            echo "capacity_profile: ${{ inputs.capacity_profile }}"
+            terraform output -no-color
+          } >> "$GITHUB_STEP_SUMMARY"
