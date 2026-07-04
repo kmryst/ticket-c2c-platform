@@ -46,6 +46,7 @@
 | L-5 | Reliability | Worker のバッチ処理で、1件でも例外を投げると同バッチ内の正常メッセージの削除もスキップされる。SQS DLQ に CloudWatch アラームがなく、滞留に気づけない。 | DLQ アラーム追加。 | 一部対応済み（Issue #100。DLQ 滞留 1 件以上で ALARM になる CloudWatch アラームを sqs モジュールへ追加。SNS 等の通知配線と、バッチ内の部分削除（正常メッセージのみ削除）は未対応） |
 | L-6 | Network | Aurora / Valkey / OpenSearch の各 SG の egress が全開放（`0.0.0.0/0`）。マネージドサービス SG としては定番だが prod では絞る余地がある。 | prod 移行時に見直し。 | 未着手 |
 | L-7 | Reliability | Aurora のバックアップ保持期間・マイナーバージョン方針が未指定（既定 1 日）。staging 用の変数化もまだ。 | staging 用変数の追加。 | 対応済み（Issue #101。aurora モジュールに backup_retention_period / preferred_backup_window / auto_minor_version_upgrade を変数化し、dev / staging root が明示値（retention 1 日・自動マイナー適用）を設定。prod では retention 7 日以上へ引き上げる） |
+| L-8 | Reliability | 2026-07-04 の staging full 負荷検証（Issue #93）で、spike 高負荷（HOT_RATE=200rps）時に k6 のエラー率が約30%まで悪化した。baseline（20rps）では p95=68.7ms・エラー率 0% だが、spike では p50=4.6〜4.7s、p95=7.4〜7.5s、p99=7.6〜7.9s、エラー率約30%。原因は Postgres 接続プール上限（API タスクあたり 10 接続 × 稼働 2 タスク = 合計 20 接続）で、コード側のバグではない。oversold=0（過剰販売なし）はこの負荷条件下でも維持されていた。 | 対応の選択肢: (1) API タスクあたりのプールサイズ増（無料だがタスク数×プールサイズが Aurora の `max_connections` を超えないよう設計が必要）、(2) Aurora Serverless の ACU 上限引き上げ（コスト増）、(3) RDS Proxy 導入（追加の常駐コストが発生）。対応前に想定同時接続数（実トラフィック見込み）を確定させる必要がある。 | 未着手（Issue #113。想定トラフィックが未確定のため意図的に見送り。Issue #108（Aurora failover クラッシュ修正）と同じ検証サイクルで発見） |
 
 ## 監査で「問題なし」と確認済みの観点
 
