@@ -1,0 +1,72 @@
+# staging の配線を検証する smoke test workflow（staging-environment.md「smoke test」）。
+# apply ロールは流用せず、staging state の S3 read-only に限定した専用ロール
+# （Environment `staging-readonly`）で `terraform output` を取得する。
+# 以降の HTTP 検証（scripts/staging/smoke-test.ts）は AWS credential を使わない。
+name: staging-smoke-test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: staging-smoke-test
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    environment: staging-readonly
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.8"
+          # terraform output の生値を取得するため wrapper を無効化する
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (staging state read-only role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_STAGING_READONLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Resolve staging base URL from terraform output
+        id: tf
+        working-directory: terraform/environments/staging
+        run: |
+          terraform init -input=false
+          BASE_URL=$(terraform output -raw api_base_url)
+          echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
+          echo "base URL: $BASE_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run smoke test (HTTP only, no AWS credential)
+        # 明示的な shell: bash で pipefail を有効化し、tee がテスト失敗の exit code を隠さないようにする
+        shell: bash
+        env:
+          STAGING_BASE_URL: ${{ steps.tf.outputs.base_url }}
+          # smoke test 本体に AWS credential を渡さない（設計方針）
+          AWS_ACCESS_KEY_ID: ""
+          AWS_SECRET_ACCESS_KEY: ""
+          AWS_SESSION_TOKEN: ""
+        run: npm run smoke:staging | tee smoke.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '```'
+            tail -n 20 smoke.log 2>/dev/null || echo "no smoke.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
