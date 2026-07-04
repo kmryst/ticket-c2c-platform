@@ -12,6 +12,12 @@ on:
         type: choice
         options: [normal, full]
         default: normal
+      public_endpoint_mode:
+        description: "公開エンドポイント（https-dns: ticket-api-staging.ticket-c2c.click + ACM / alb-http-only: ALB HTTP のみ）"
+        required: true
+        type: choice
+        options: [https-dns, alb-http-only]
+        default: https-dns
 
 permissions:
   id-token: write
@@ -29,6 +35,7 @@ jobs:
         working-directory: terraform/environments/staging
     env:
       TF_VAR_capacity_profile: ${{ inputs.capacity_profile }}
+      TF_VAR_public_endpoint_mode: ${{ inputs.public_endpoint_mode }}
     steps:
       - uses: actions/checkout@v7
 
@@ -54,6 +61,6 @@ jobs:
       - name: Outputs
         run: |
           {
-            echo "capacity_profile: ${{ inputs.capacity_profile }}"
+            echo "capacity_profile: ${{ inputs.capacity_profile }} / public_endpoint_mode: ${{ inputs.public_endpoint_mode }}"
             terraform output -no-color
           } >> "$GITHUB_STEP_SUMMARY"
