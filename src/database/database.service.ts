@@ -48,9 +48,37 @@ export class DatabaseService implements OnModuleDestroy {
   }
 
   // connect は transaction を張りたい処理へ生の PoolClient を渡すための method です。
-  connect(): Promise<PoolClient> {
+  async connect(): Promise<PoolClient> {
     // PurchasesService は BEGIN / COMMIT / ROLLBACK を直接実行したいので、query wrapper ではなく client を借ります。
-    return this.pool.connect();
+    const client = await this.pool.connect();
+
+    // pool.on('error') は pool に返却済み（idle）の connection だけをカバーします。
+    // 借用中（チェックアウト済み）の client で接続が予期せず切れると、その error event は
+    // client インスタンス自身から発火し、listener が無ければ Node.js の未捕捉例外として
+    // プロセス全体をクラッシュさせます（production-readiness H-4。Aurora reader failover の
+    // 実測で、AWS 側の切替は約39秒だったにもかかわらず、このクラッシュ経由の ECS 再起動を
+    // 挟んで実際のサービス断が約84.2秒まで拡大したことを確認済み）。
+    // ここで listener を付けてログに残すだけに留め、進行中の query は通常どおり reject させます
+    // （呼び出し側の try/catch がリクエスト単位のエラーとして処理し、プロセスは継続します）。
+    let connectionError: Error | undefined;
+    client.on('error', (error) => {
+      connectionError = error;
+      console.error(
+        'Unexpected pg client error while checked out (connection likely lost):',
+        error,
+      );
+    });
+
+    // 呼び出し側は多くの場合 `client.release()`（引数なし）を呼びますが、
+    // 接続が壊れていた場合はそのまま pool に返すと次の借用者が壊れた接続を掴みます。
+    // release をラップし、呼び出し側が明示的に渡したエラー（例: rollbackError）が
+    // 無い場合は、ここで捕捉した connectionError を使って pool に破棄させます。
+    const originalRelease = client.release.bind(client);
+    client.release = ((errorOrBoolean?: Error | boolean) => {
+      originalRelease(errorOrBoolean ?? connectionError);
+    }) as PoolClient['release'];
+
+    return client;
   }
 
   // onModuleDestroy は NestJS が終了処理を行うときに呼び出されます。
