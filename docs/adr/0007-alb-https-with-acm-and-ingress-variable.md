@@ -2,7 +2,7 @@
 
 ## ステータス
 
-Accepted
+Accepted（hosted zone の選定は [0009](./0009-migrate-to-project-domain.md) が更新。`hamilcar-hannibal.click` からプロジェクト専用ドメイン `ticket-c2c.click` へ移行済み）
 
 ## 日付
 

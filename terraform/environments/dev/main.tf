@@ -139,8 +139,8 @@ module "eventbridge" {
 
 # ---------- app（実行層: ALB / ECS） ----------
 
-# ADR-0007: ALB を HTTPS 化する。証明書はこのリポジトリ専用サブドメインで発行し、
-# hosted zone（兄弟リポジトリ terraform-hannibal が取得したドメイン）は data source 参照に留める。
+# ADR-0007: ALB を HTTPS 化する。証明書はこのリポジトリ専用サブドメインで発行する。
+# ADR-0009: hosted zone はプロジェクト専用ドメイン ticket-c2c.click（bootstrap 外で取得済み）を data source 参照する。
 data "aws_route53_zone" "public" {
   name         = var.hosted_zone_name
   private_zone = false

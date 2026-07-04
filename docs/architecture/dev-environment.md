@@ -34,7 +34,7 @@
 ```
 
 - VPC: 2 AZ。public subnet に ALB、private subnet に ECS / Aurora / Valkey / OpenSearch。
-- API 入口は HTTPS（[ADR-0007](../adr/0007-alb-https-with-acm-and-ingress-variable.md)）。`ticket-api-dev.hamilcar-hannibal.click` の ACM 証明書（DNS 検証）を ALB:443 で終端し、HTTP:80 は 443 への 301 リダイレクト専用。ingress は `alb_allowed_ingress_cidrs` 変数（既定 `0.0.0.0/0`）で絞り込み可能。
+- API 入口は HTTPS（[ADR-0007](../adr/0007-alb-https-with-acm-and-ingress-variable.md)）。`ticket-api-dev.ticket-c2c.click`（プロジェクト専用ドメイン。[ADR-0009](../adr/0009-migrate-to-project-domain.md)）の ACM 証明書（DNS 検証）を ALB:443 で終端し、HTTP:80 は 443 への 301 リダイレクト専用。ingress は `alb_allowed_ingress_cidrs` 変数（既定 `0.0.0.0/0`）で絞り込み可能。
 - NAT Gateway は dev では 1 つ（コスト優先。prod では AZ ごとに配置）。ECR / S3 / CloudWatch Logs は VPC endpoint 経由にして NAT 転送量を抑える。
 - 書き込み経路（購入）: API → Valkey 前段フィルタ → Aurora 条件付き更新 → EventBridge 発行。
 - 読み取り経路（検索・一覧）: API → OpenSearch。正本確認が必要な場合のみ Aurora。
