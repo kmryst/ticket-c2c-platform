@@ -94,6 +94,11 @@ module "aurora" {
   deletion_protection      = local.dev_settings.aurora_deletion_protection
   skip_final_snapshot      = local.dev_settings.aurora_skip_final_snapshot
   reader_instance_count    = local.dev_settings.aurora_reader_instance_count
+
+  # バックアップ・マイナーバージョン方針（production-readiness L-7）。
+  # dev はエフェメラル環境（未使用時 destroy）のため保持 1 日で十分。prod では 7 日以上へ。
+  backup_retention_period    = 1
+  auto_minor_version_upgrade = true
 }
 
 module "valkey" {

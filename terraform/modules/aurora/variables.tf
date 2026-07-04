@@ -66,3 +66,21 @@ variable "reader_instance_count" {
   type        = number
   default     = 0
 }
+
+variable "backup_retention_period" {
+  description = "自動バックアップの保持日数（production-readiness L-7）。dev / staging はエフェメラル環境のため 1、prod は 7 以上を想定"
+  type        = number
+  default     = 1
+}
+
+variable "preferred_backup_window" {
+  description = "自動バックアップの時間帯（UTC、例: 17:00-18:00 = JST 深夜）。null は AWS 任せ"
+  type        = string
+  default     = null
+}
+
+variable "auto_minor_version_upgrade" {
+  description = "マイナーバージョンをメンテナンスウィンドウで自動適用するか（production-readiness L-7）"
+  type        = bool
+  default     = true
+}
