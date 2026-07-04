@@ -9,6 +9,11 @@ on:
         description: "デプロイする既存 ECR タグ（省略時は現在のコミットをビルドし short SHA タグでデプロイ。ロールバック時は過去の short SHA を指定）"
         required: false
         type: string
+      run_migrations:
+        description: "サービス更新前に DB migration を実行する（スキーマ変更を含むリリース時。migration 失敗時はデプロイを中断）"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
@@ -68,10 +73,11 @@ jobs:
           docker push "$IMAGE:$TAG"
           echo "pushed $IMAGE:$TAG" >> "$GITHUB_STEP_SUMMARY"
 
-      # 現行タスク定義のイメージだけを commit SHA タグへ差し替えた新リビジョンを register し、
-      # サービスをそのリビジョンへ更新する。これによりタスク定義から稼働コミットを特定でき、
-      # ロールバックは過去タグの再指定だけで済む（再ビルド不要）。
-      - name: Register SHA-pinned task definitions and update services
+      # 現行タスク定義のイメージだけを commit SHA タグへ差し替えた新リビジョンを register する。
+      # これによりタスク定義から稼働コミットを特定でき、ロールバックは過去タグの再指定だけで済む
+      # （再ビルド不要）。サービス更新は migration（任意）の後に行う。
+      - name: Register SHA-pinned task definitions
+        id: td
         run: |
           IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${{ steps.tag.outputs.tag }}"
           for SVC in $ECS_SERVICES; do
@@ -89,11 +95,31 @@ jobs:
             NEW_TD=$(aws ecs register-task-definition \
               --cli-input-json file://td-new.json \
               --query 'taskDefinition.taskDefinitionArn' --output text)
+            echo "registered $SVC -> ${NEW_TD##*/} ($IMAGE)" >> "$GITHUB_STEP_SUMMARY"
+            echo "td_${SVC##*-}=$NEW_TD" >> "$GITHUB_OUTPUT"
+          done
+
+      # スキーマ変更を含むリリースでは、migration 成功後にサービス更新へ進む（Issue #92）。
+      # 新イメージのタスク定義（command override）で migration を実行するため、
+      # 旧タスクは旧スキーマのまま動き続け、失敗時はデプロイ自体が中断される。
+      - name: Run DB migration (before service update)
+        if: inputs.run_migrations
+        # 明示的な shell: bash で pipefail を有効化し、tee が migration 失敗の exit code を隠さないようにする
+        shell: bash
+        run: |
+          ./scripts/deployment/run-db-migration.sh "$ECS_CLUSTER" ticket-c2c-dev-api \
+            "${{ steps.td.outputs.td_api }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Update services
+        run: |
+          for SVC in $ECS_SERVICES; do
+            TD_VAR="td_${SVC##*-}"
+            NEW_TD=$([ "$TD_VAR" = "td_api" ] && echo "${{ steps.td.outputs.td_api }}" || echo "${{ steps.td.outputs.td_worker }}")
             aws ecs update-service \
               --cluster "$ECS_CLUSTER" --service "$SVC" \
               --task-definition "$NEW_TD" \
               --query 'service.serviceName' --output text
-            echo "updated $SVC -> ${NEW_TD##*/} ($IMAGE)" >> "$GITHUB_STEP_SUMMARY"
+            echo "updated $SVC -> ${NEW_TD##*/}" >> "$GITHUB_STEP_SUMMARY"
           done
 
       - name: Wait for services stable

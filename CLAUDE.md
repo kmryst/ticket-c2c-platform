@@ -152,6 +152,18 @@ docker compose exec -T postgres psql -U ticket_poc -d ticket_poc < database/sche
 
 `database/schema.sql` を変更した場合は、`docs/poc/inventory-schema.md` も合わせて更新する。
 
+### スキーマ変更フロー（AWS 環境 / Issue #92）
+
+AWS 環境（dev / staging）の DDL は起動時適用ではなく TypeORM versioned migrations で管理する。
+
+1. `npm run migration:create -- src/database/migrations/<変更内容のPascalCase名>` で雛形を作成し、SQL を手書きする（entity は定義していないため `migration:generate` は使えない。raw SQL を `queryRunner.query` で書く）。
+2. 作成した migration class を `src/database/data-source.ts` の `migrations` 配列へ追加する。
+3. ローカル PoC の正本 `database/schema.sql` も同じ PR で同期更新する。
+4. ローカル検証: `npm run migration:run:local`（Docker Compose の PostgreSQL に適用）。
+5. AWS への適用: スキーマ変更を含むリリースは `deploy-app-<env>.yml` の `run_migrations=true` で実行する（migration 成功後にサービス更新）。単発適用は `db-migrate-<env>.yml`。
+6. migration は後方互換（expand-contract）で書く。旧タスクが新スキーマ上で動く時間帯があるため。
+7. baseline（`1751594400000-baseline.ts`）は凍結されており編集しない。
+
 ## コミットメッセージ
 
 コミットを作成する場合は、必ず `CONTRIBUTING.md` の Conventional Commits ルールに従う。

@@ -1,0 +1,36 @@
+# dev の DB schema migration を deploy とは独立に実行する workflow（Issue #92）。
+# API サービスの現行タスク定義を ECS run-task + command override で流用し、
+# TypeORM versioned migrations（node dist/src/database/run-migrations.js）を適用する。
+# 新イメージの migration を「デプロイ前」に流したい場合は
+# deploy-app-dev.yml の run_migrations 入力を使う（migration 成功後にサービス更新される）。
+name: db-migrate-dev
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: db-migrate-dev
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (apply role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Run DB migration task
+        # 明示的な shell: bash で pipefail を有効化し、tee が失敗の exit code を隠さないようにする
+        shell: bash
+        run: |
+          ./scripts/deployment/run-db-migration.sh ticket-c2c-dev ticket-c2c-dev-api | tee -a "$GITHUB_STEP_SUMMARY"

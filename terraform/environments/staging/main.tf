@@ -11,14 +11,15 @@ locals {
 
   capacity_profiles = {
     # normal: 本番相当トポロジーを最小サイズで検証する profile（staging-environment.md capacity profile 表）。
-    # API desired / autoscaling max は schema-on-boot の DDL 競合リスクがある間 1 に固定する。
+    # schema migration は boot path から分離済み（Issue #92）のため、API の scale out 制約は解消。
+    # normal は desired 1 / max 3 とし、rolling deploy とスケールアウトを安価に検証できるようにする。
     normal = {
       nat_gateway_mode = "single"
 
       api_desired_count         = 1
       worker_desired_count      = 1
       api_autoscaling_min       = 0
-      api_autoscaling_max       = 1
+      api_autoscaling_max       = 3
       worker_autoscaling_min    = 0
       worker_autoscaling_max    = 4
       scheduled_scaling_actions = []
@@ -40,7 +41,7 @@ locals {
     }
 
     # full: 負荷試験・failover 検証用の一時的な強化 profile。
-    # API 2+ は schema migration の boot path 分離（実装順序 step 5）が前提ブロッカー。
+    # schema migration 分離済み（Issue #92）のため API 2+ のブロッカーは解消済み。
     full = {
       nat_gateway_mode = "per_az"
 
@@ -414,7 +415,6 @@ module "api_service" {
     DB_NAME             = module.aurora.database_name
     DB_USERNAME         = "ticket_admin"
     DB_SSL              = "true"
-    RUN_SCHEMA_ON_BOOT  = "true"
     VALKEY_URL          = "${local.capacity_profile_settings.valkey_transit_encryption ? "rediss" : "redis"}://${module.valkey.primary_endpoint}:6379"
     EVENT_BUS_NAME      = module.eventbridge.bus_name
     OPENSEARCH_ENDPOINT = module.opensearch.endpoint
@@ -424,7 +424,7 @@ module "api_service" {
   }
 
   secrets = {
-    # 起動時 1 回きりの schema-on-boot 用。ローテーション影響を受けない短命接続なので静的注入のままでよい。
+    # migration runner（db-migrate workflow の ECS run-task）用。短命接続のためローテーション影響を受けず、静的注入のままでよい（Issue #92）。
     DB_PASSWORD = "${module.aurora.master_user_secret_arn}:password::"
   }
 }
