@@ -55,6 +55,18 @@ async function main(): Promise<void> {
     return res.status === 200;
   });
 
+  // public_endpoint_mode=https-dns の場合、HTTP は 443 への 301 リダイレクト専用であること
+  // （ADR-0007 / Issue #94）。redirect: manual でリダイレクト自体を検証する。
+  if (baseUrl.startsWith('https://')) {
+    const httpUrl = baseUrl.replace(/^https:\/\//, 'http://');
+    const res = await fetch(`${httpUrl}/healthz`, { redirect: 'manual' });
+    const location = res.headers.get('location') ?? '';
+    assert(
+      res.status === 301 && location.startsWith('https://'),
+      `HTTP is 301-redirected to HTTPS (got ${res.status} -> ${location || 'no location'})`,
+    );
+  }
+
   // 2. seed: capacity 2 の test event を API 経由で作成する
   const eventType = `smoke-${runId}`;
   const created = await requestJson<EventSummary>('POST /events', `${baseUrl}/events`, {
