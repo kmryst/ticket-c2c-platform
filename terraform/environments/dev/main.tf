@@ -6,10 +6,11 @@
 # 4. observability レイヤ
 
 locals {
-  environment      = "dev"
-  capacity_profile = "small"
+  environment = "dev"
 
-  capacity_profile_settings = {
+  # dev は capacity profile の切り替え入力を持たない固定の小型構成（staging-environment.md）。
+  # capacity_profile（normal / full）は staging 専用の概念のため、dev では使わない。
+  dev_settings = {
     nat_gateway_mode = "single"
 
     api_desired_count         = 1
@@ -43,7 +44,7 @@ module "network" {
   name             = var.name
   region           = var.region
   vpc_cidr         = var.vpc_cidr
-  nat_gateway_mode = local.capacity_profile_settings.nat_gateway_mode
+  nat_gateway_mode = local.dev_settings.nat_gateway_mode
 }
 
 # ---------- app（コンテナレジストリ・共通 SG） ----------
@@ -87,12 +88,12 @@ module "aurora" {
   allowed_security_group_ids = [aws_security_group.app.id]
 
   # ACU / reader / 削除保護は固定の small profile から決める。
-  min_capacity             = local.capacity_profile_settings.aurora_min_capacity
-  max_capacity             = local.capacity_profile_settings.aurora_max_capacity
+  min_capacity             = local.dev_settings.aurora_min_capacity
+  max_capacity             = local.dev_settings.aurora_max_capacity
   seconds_until_auto_pause = 1800
-  deletion_protection      = local.capacity_profile_settings.aurora_deletion_protection
-  skip_final_snapshot      = local.capacity_profile_settings.aurora_skip_final_snapshot
-  reader_instance_count    = local.capacity_profile_settings.aurora_reader_instance_count
+  deletion_protection      = local.dev_settings.aurora_deletion_protection
+  skip_final_snapshot      = local.dev_settings.aurora_skip_final_snapshot
+  reader_instance_count    = local.dev_settings.aurora_reader_instance_count
 }
 
 module "valkey" {
@@ -102,10 +103,10 @@ module "valkey" {
   vpc_id                     = module.network.vpc_id
   subnet_ids                 = module.network.private_subnet_ids
   allowed_security_group_ids = [aws_security_group.app.id]
-  num_cache_clusters         = local.capacity_profile_settings.valkey_num_cache_clusters
-  automatic_failover_enabled = local.capacity_profile_settings.valkey_automatic_failover
-  transit_encryption_enabled = local.capacity_profile_settings.valkey_transit_encryption
-  at_rest_encryption_enabled = local.capacity_profile_settings.valkey_at_rest_encryption
+  num_cache_clusters         = local.dev_settings.valkey_num_cache_clusters
+  automatic_failover_enabled = local.dev_settings.valkey_automatic_failover
+  transit_encryption_enabled = local.dev_settings.valkey_transit_encryption
+  at_rest_encryption_enabled = local.dev_settings.valkey_at_rest_encryption
 }
 
 module "opensearch" {
@@ -116,9 +117,9 @@ module "opensearch" {
   vpc_id                     = module.network.vpc_id
   subnet_ids                 = module.network.private_subnet_ids
   allowed_security_group_ids = [aws_security_group.app.id]
-  instance_count             = local.capacity_profile_settings.opensearch_instance_count
-  zone_awareness_enabled     = local.capacity_profile_settings.opensearch_zone_awareness_enabled
-  availability_zone_count    = local.capacity_profile_settings.opensearch_availability_zones
+  instance_count             = local.dev_settings.opensearch_instance_count
+  zone_awareness_enabled     = local.dev_settings.opensearch_zone_awareness_enabled
+  availability_zone_count    = local.dev_settings.opensearch_availability_zones
 }
 
 module "search_projection_queue" {
@@ -345,10 +346,10 @@ module "api_service" {
   container_port            = 3000
   target_group_arn          = module.alb.target_group_arn
   log_group_name            = "/ecs/${var.name}-api"
-  desired_count             = local.capacity_profile_settings.api_desired_count
-  autoscaling_min_capacity  = local.capacity_profile_settings.autoscaling_min
-  autoscaling_max_capacity  = local.capacity_profile_settings.autoscaling_max
-  scheduled_scaling_actions = local.capacity_profile_settings.scheduled_scaling_actions
+  desired_count             = local.dev_settings.api_desired_count
+  autoscaling_min_capacity  = local.dev_settings.autoscaling_min
+  autoscaling_max_capacity  = local.dev_settings.autoscaling_max
+  scheduled_scaling_actions = local.dev_settings.scheduled_scaling_actions
 
   environment = {
     PORT                = "3000"
@@ -358,7 +359,7 @@ module "api_service" {
     DB_USERNAME         = "ticket_admin"
     DB_SSL              = "true"
     RUN_SCHEMA_ON_BOOT  = "true"
-    VALKEY_URL          = "${local.capacity_profile_settings.valkey_transit_encryption ? "rediss" : "redis"}://${module.valkey.primary_endpoint}:6379"
+    VALKEY_URL          = "${local.dev_settings.valkey_transit_encryption ? "rediss" : "redis"}://${module.valkey.primary_endpoint}:6379"
     EVENT_BUS_NAME      = module.eventbridge.bus_name
     OPENSEARCH_ENDPOINT = module.opensearch.endpoint
     # 長寿命 DB 接続 pool がローテーション後も追従できるよう、secret の ARN 自体を渡す。
@@ -386,10 +387,10 @@ module "worker_service" {
   execution_role_arn        = aws_iam_role.execution.arn
   task_role_arn             = aws_iam_role.worker_task.arn
   log_group_name            = "/ecs/${var.name}-worker"
-  desired_count             = local.capacity_profile_settings.worker_desired_count
-  autoscaling_min_capacity  = local.capacity_profile_settings.autoscaling_min
-  autoscaling_max_capacity  = local.capacity_profile_settings.autoscaling_max
-  scheduled_scaling_actions = local.capacity_profile_settings.scheduled_scaling_actions
+  desired_count             = local.dev_settings.worker_desired_count
+  autoscaling_min_capacity  = local.dev_settings.autoscaling_min
+  autoscaling_max_capacity  = local.dev_settings.autoscaling_max
+  scheduled_scaling_actions = local.dev_settings.scheduled_scaling_actions
 
   environment = {
     SQS_QUEUE_URL       = module.search_projection_queue.queue_url
