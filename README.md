@@ -4,9 +4,9 @@
 
 ## ステータス
 
-設計 + dev 環境構築中。
+staging 環境での検証まで完了。prod 化は未着手。
 
-システム要件、技術選定、アーキテクチャ方針の整理に加え、ローカル在庫 PoC の実施を経て、AWS 上の dev 環境（本番系トラックの最初の環境）の構築を進めています。
+システム要件、技術選定、アーキテクチャ方針の整理とローカル在庫 PoC を経て、AWS 上の dev 環境を構築し、staging 環境（本番寄せ構成 `capacity_profile=full`）で k6 負荷検証・Aurora / Valkey / OpenSearch の failover 検証まで実施済みです。検証で見つかった課題や残作業は [docs/architecture/production-readiness.md](docs/architecture/production-readiness.md) にバックログとして記録しています。
 
 ## ドキュメント
 
@@ -44,7 +44,6 @@
 
 ## リポジトリ方針
 
-- 実装コードは、要件定義と設計方針が固まってから追加する。
 - 設計判断は必要に応じて `docs/architecture/` または ADR として記録する。
 - 秘密情報、`.env`、認証情報はコミットしない。
 
