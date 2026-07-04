@@ -61,13 +61,14 @@ export class DatabaseService implements OnModuleDestroy {
     // ここで listener を付けてログに残すだけに留め、進行中の query は通常どおり reject させます
     // （呼び出し側の try/catch がリクエスト単位のエラーとして処理し、プロセスは継続します）。
     let connectionError: Error | undefined;
-    client.on('error', (error) => {
+    const onClientError = (error: Error) => {
       connectionError = error;
       console.error(
         'Unexpected pg client error while checked out (connection likely lost):',
         error,
       );
-    });
+    };
+    client.on('error', onClientError);
 
     // 呼び出し側は多くの場合 `client.release()`（引数なし）を呼びますが、
     // 接続が壊れていた場合はそのまま pool に返すと次の借用者が壊れた接続を掴みます。
@@ -75,6 +76,10 @@ export class DatabaseService implements OnModuleDestroy {
     // 無い場合は、ここで捕捉した connectionError を使って pool に破棄させます。
     const originalRelease = client.release.bind(client);
     client.release = ((errorOrBoolean?: Error | boolean) => {
+      // pool は同じ Client インスタンスを次の借用者へ再利用します。ここで listener を
+      // 外さずに release すると、借用のたびに listener が積み重なり、
+      // MaxListenersExceededWarning や同一エラーの重複ログの原因になります。
+      client.removeListener('error', onClientError);
       originalRelease(errorOrBoolean ?? connectionError);
     }) as PoolClient['release'];
 
