@@ -95,9 +95,9 @@ terraform/
 | workflow | トリガー | 内容 |
 |---|---|---|
 | `terraform-plan.yml` | PR（`terraform/**`） | fmt / validate / plan。plan 専用ロール |
-| `terraform-apply.yml` | workflow_dispatch | plan → Environment `dev` の承認 → apply |
-| `terraform-destroy.yml` | workflow_dispatch | `confirm` 入力（`destroy-dev` 完全一致）+ Environment `dev-destroy` の承認 |
-| `deploy-app.yml` | workflow_dispatch | Docker build → ECR push → ECS 2 サービス更新 |
+| `terraform-apply-dev.yml` | workflow_dispatch | plan → Environment `dev` の承認 → apply |
+| `terraform-destroy-dev.yml` | workflow_dispatch | `confirm` 入力（`destroy-dev` 完全一致）+ Environment `dev-destroy` の承認 |
+| `deploy-app-dev.yml` | workflow_dispatch | Docker build → ECR push → ECS 2 サービス更新 |
 
 GitHub Environments / Variables:
 
