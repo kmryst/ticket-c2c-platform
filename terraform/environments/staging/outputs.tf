@@ -46,7 +46,7 @@ output "worker_service_name" {
   value = module.worker_service.service_name
 }
 
-output "api_url" {
-  description = "API の公開 HTTPS エンドポイント（ADR-0007）"
-  value       = "https://${var.api_subdomain}.${var.hosted_zone_name}"
+output "api_base_url" {
+  description = "smoke test 等が使う API の base URL。https-dns では公開 FQDN、alb-http-only では ALB DNS 名"
+  value       = var.public_endpoint_mode == "https-dns" ? "https://${var.api_subdomain}.${var.hosted_zone_name}" : "http://${module.alb.dns_name}"
 }

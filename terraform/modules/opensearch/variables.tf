@@ -52,3 +52,9 @@ variable "volume_size" {
   type    = number
   default = 10
 }
+
+variable "allowed_principal_arns" {
+  description = "アクセスポリシーで es:* を許可する IAM principal の ARN（production-readiness M-3）。null の場合はアカウント内から自由にアクセス可（dev 互換の Principal \"*\"）"
+  type        = list(string)
+  default     = null
+}
