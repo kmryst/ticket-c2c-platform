@@ -73,3 +73,4 @@ YYYY-MM-DD
 | [0005](./0005-alb-as-api-entry.md) | API 入口に ALB を採用する | Accepted |
 | [0006](./0006-ecs-fargate-worker.md) | Worker を ECS Fargate にする | Accepted |
 | [0007](./0007-alb-https-with-acm-and-ingress-variable.md) | dev の ALB を HTTPS 化し、HTTP は明示的リダイレクトに限定する | Accepted |
+| [0008](./0008-staging-ephemeral-prod-like-environment.md) | staging をエフェメラルな prod-like 環境とし、初回 endpoint を alb-http-only にする | Accepted |

@@ -66,13 +66,25 @@ resource "aws_opensearch_domain" "this" {
     tls_security_policy = "Policy-Min-TLS-1-2-2019-07"
   }
 
-  # VPC 内ドメイン + SG 制限を前提に、ドメイン内はアカウント内から自由にアクセス可とする（dev）
-  access_policies = jsonencode({
+  # アクセスポリシー（production-readiness M-3）:
+  # - allowed_principal_arns 指定時は、SigV4 署名済みリクエストの principal を task role 等に限定する（staging 以降）。
+  # - null の場合は VPC 内ドメイン + SG 制限を前提に、アカウント内から自由にアクセス可とする（dev 互換）。
+  access_policies = var.allowed_principal_arns == null ? jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
         Effect    = "Allow"
         Principal = { AWS = "*" }
+        Action    = "es:*"
+        Resource  = "arn:aws:es:${var.region}:${data.aws_caller_identity.current.account_id}:domain/${var.name}/*"
+      }
+    ]
+    }) : jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { AWS = var.allowed_principal_arns }
         Action    = "es:*"
         Resource  = "arn:aws:es:${var.region}:${data.aws_caller_identity.current.account_id}:domain/${var.name}/*"
       }

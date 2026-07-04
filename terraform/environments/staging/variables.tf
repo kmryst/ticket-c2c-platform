@@ -28,9 +28,24 @@ variable "capacity_profile" {
 }
 
 variable "vpc_cidr" {
-  description = "VPC の CIDR"
+  description = "VPC の CIDR。環境ごとに重複させない（dev: 10.0.0.0/16 / staging: 10.10.0.0/16 / prod candidate: 10.20.0.0/16）"
   type        = string
-  default     = "10.0.0.0/16"
+  default     = "10.10.0.0/16"
+}
+
+variable "public_endpoint_mode" {
+  description = <<-EOT
+    公開エンドポイントのモード（staging-environment.md / ADR-0008）。
+    alb-http-only: ALB HTTP リスナーのみ。ACM 証明書・HTTPS リスナー・Route53 alias を作らない（初回 staging）。
+    https-dns: <api_subdomain>.<hosted_zone_name> の ACM 証明書（DNS 検証）・HTTPS リスナー・Route53 alias を作る。
+  EOT
+  type        = string
+  default     = "alb-http-only"
+
+  validation {
+    condition     = contains(["alb-http-only", "https-dns"], var.public_endpoint_mode)
+    error_message = "public_endpoint_mode は alb-http-only または https-dns を指定してください。"
+  }
 }
 
 variable "image_tag" {

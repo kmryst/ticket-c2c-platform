@@ -61,6 +61,14 @@ resource "aws_ecs_service" "this" {
     assign_public_ip = false
   }
 
+  # 壊れたイメージを push した際に、デプロイ失敗のまま `aws ecs wait services-stable` が
+  # タイムアウトまでハングし続けるのを防ぐ（production-readiness L-3）。
+  # rollback = true で直前の安定リビジョンへ自動で戻す。
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   dynamic "load_balancer" {
     for_each = var.target_group_arn != null ? [1] : []
     content {

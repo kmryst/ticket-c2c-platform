@@ -130,7 +130,7 @@ Next.js SSR が必要な場合は、Node.js runtime がリクエスト時に API
 | `alb-http-only` | Yes | ALB HTTP listener のみ。ACM 証明書なし、HTTPS listener なし、Route53 alias なし | `http://<alb_dns_name>` |
 | `https-dns` | Later | `ticket-api-staging.hamilcar-hannibal.click`、ACM DNS 検証、ALB HTTPS listener、Route53 alias | `https://ticket-api-staging.hamilcar-hannibal.click` |
 
-初回 staging は `alb-http-only` にする。現在の `terraform/environments/staging/main.tf` は ACM 証明書発行・Route53 DNS 検証・alias レコード・`enable_https = true` を無条件で作成する構成になっているため、初回構築前に `public_endpoint_mode` 変数（型・条件化方法は未定義。ACM/Route53 リソースを `count`/`for_each` で切り替える実装が必要）を追加し、`alb-http-only` を選べるようにする。
+初回 staging は `alb-http-only` にする（[ADR-0008](../adr/0008-staging-ephemeral-prod-like-environment.md)）。`terraform/environments/staging` に `public_endpoint_mode` 変数（`alb-http-only` 既定 / `https-dns`）を実装済み（Issue #88）。`https-dns` を指定した場合のみ ACM 証明書・DNS 検証レコード・Route53 alias・HTTPS リスナーが作成される。smoke test 等の base URL は Terraform output `api_base_url` で取得する。
 
 ## capacity profile
 
@@ -328,13 +328,13 @@ staging normal を初回 apply する前に、少なくとも次を満たす。
 - [ ] apply IAM ロールを `AdministratorAccess` から縮小する。dev で先に検証し、staging 追加時に trust policy と合わせて見直す。
 - [x] staging 用 Terraform backend key を dev / prod と分離する。対応済み（Issue #78。`terraform/environments/staging/` を `staging/app/terraform.tfstate` で追加）。
 - [x] Terraform root / state は `dev` / `staging` の環境単位にし、staging の通常構成 / 本番寄せ構成は `capacity_profile=normal|full` で切り替える。対応済み（Issue #78、Issue #80）。
-- [ ] staging の VPC CIDR を `10.10.0.0/16` にする。
-- [ ] staging の初回 endpoint を `alb-http-only` にする。
-- [ ] staging normal の API desired count を 1、Worker desired count を 1 にする（現状 TF は API / Worker とも desired 2）。
+- [x] staging の VPC CIDR を `10.10.0.0/16` にする。対応済み（Issue #88）。
+- [x] staging の初回 endpoint を `alb-http-only` にする。対応済み（Issue #88。`public_endpoint_mode` 変数、既定 `alb-http-only`。判断は [ADR-0008](../adr/0008-staging-ephemeral-prod-like-environment.md)）。
+- [x] staging normal の API desired count を 1、Worker desired count を 1 にする。対応済み（Issue #88。API autoscaling max も 1 に固定、Worker autoscaling max は 4）。
 - [ ] seed data と smoke test を自動実行できる。
 - [ ] destroy workflow に `confirm=destroy-staging`、Environment protection、destroy 後確認を設定する。
 - [ ] API / Worker の desired count を 2 以上にする前に、`schema-on-boot` を migration workflow / script へ移行する。
-- [ ] OpenSearch のアクセスポリシーを IAM 認証（SigV4 署名）に切り替える。署名クライアント実装は dev で先行検証済み（[production-readiness.md](./production-readiness.md) M-3、PR #75）。アクセスポリシーの `Principal:"*"` からの切り替え本体は staging 構築時に実施する。
+- [x] OpenSearch のアクセスポリシーを IAM 認証（SigV4 署名）に切り替える。署名クライアント実装は dev で先行検証済み（[production-readiness.md](./production-readiness.md) M-3、PR #75）。staging のアクセスポリシー Principal を API / Worker task role に限定（Issue #88。dev は `Principal:"*"` のまま互換維持）。
 - [ ] 本番化ギャップは `production-readiness.md` に移す。
 
 ## production-readiness.md との関係
@@ -345,12 +345,15 @@ staging normal を初回 apply する前に、少なくとも次を満たす。
 
 ## ADR 候補
 
-次の判断が固まった時点で ADR として記録する。
+次の判断は [ADR-0008](../adr/0008-staging-ephemeral-prod-like-environment.md) で確定した。
 
-- staging を毎回 destroy する prod-like 環境として扱うか。
-- staging data を seed / API 作成データで再作成する前提にするか。
-- OpenSearch Multi-AZ を staging 常時構成にするか、`capacity_profile=full` の一時構成にするか。
-- `public_endpoint_mode=alb-http-only` を初回 staging の正式方針にするか。
+- staging を毎回 destroy する prod-like 環境として扱う。
+- staging data は seed / API 作成データで再作成する前提にする。
+- OpenSearch Multi-AZ は `capacity_profile=full` の一時構成にする。
+- `public_endpoint_mode=alb-http-only` を初回 staging の正式方針にする。
+
+未確定の ADR 候補:
+
 - Fargate Spot を Worker / 検証ジョブで使うか。
 
 ## 関連ドキュメント

@@ -40,7 +40,7 @@
 |---|---|---|---|---|
 | L-1 | CI-CD | GitHub Actions がタグ pin（`@v4` 等）で SHA pin でない。Admin 級ロールを扱う workflow としてはサプライチェーン改竄の影響が大きい。 | commit SHA pin への切り替え。 | 未着手 |
 | L-2 | CI-CD | `terraform-plan.yml`（pull_request トリガー）は、同一リポジトリの PR で悪意ある provider/external data source を仕込むと plan ロール（ReadOnlyAccess）で任意コード実行が可能。フォーク PR からは `id-token: write` が付与されないため悪用不可（現状はコラボレータ本人のみのため許容）。 | 将来的な plan ロール sub のスコープ縮小。 | 未着手 |
-| L-3 | Reliability | ECS サービスに `deployment_circuit_breaker` 未設定。壊れたイメージを push すると `aws ecs wait services-stable` がタイムアウトまでハングし、タスクが起動ループする。 | circuit breaker 設定の追加。 | 未着手 |
+| L-3 | Reliability | ECS サービスに `deployment_circuit_breaker` 未設定。壊れたイメージを push すると `aws ecs wait services-stable` がタイムアウトまでハングし、タスクが起動ループする。 | circuit breaker 設定の追加。 | 対応済み（Issue #88。ecs-service モジュールで rollback 付き circuit breaker を共通有効化。dev へは次回 apply で反映） |
 | L-4 | Reliability | `schema-on-boot` は複数タスク同時起動時に DDL が競合し得る（現状 desired_count=1 のため未発生）。 | staging でマイグレーションツールへ移行。 | 未着手 |
 | L-5 | Reliability | Worker のバッチ処理で、1件でも例外を投げると同バッチ内の正常メッセージの削除もスキップされる。SQS DLQ に CloudWatch アラームがなく、滞留に気づけない。 | DLQ アラーム追加。 | 未着手 |
 | L-6 | Network | Aurora / Valkey / OpenSearch の各 SG の egress が全開放（`0.0.0.0/0`）。マネージドサービス SG としては定番だが prod では絞る余地がある。 | prod 移行時に見直し。 | 未着手 |

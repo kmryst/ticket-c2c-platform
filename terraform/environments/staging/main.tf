@@ -10,13 +10,17 @@ locals {
   capacity_profile = var.capacity_profile
 
   capacity_profiles = {
+    # normal: 本番相当トポロジーを最小サイズで検証する profile（staging-environment.md capacity profile 表）。
+    # API desired / autoscaling max は schema-on-boot の DDL 競合リスクがある間 1 に固定する。
     normal = {
       nat_gateway_mode = "single"
 
-      api_desired_count         = 2
-      worker_desired_count      = 2
-      autoscaling_min           = 0
-      autoscaling_max           = 4
+      api_desired_count         = 1
+      worker_desired_count      = 1
+      api_autoscaling_min       = 0
+      api_autoscaling_max       = 1
+      worker_autoscaling_min    = 0
+      worker_autoscaling_max    = 4
       scheduled_scaling_actions = []
 
       aurora_min_capacity          = 0
@@ -35,13 +39,17 @@ locals {
       opensearch_availability_zones     = 2
     }
 
+    # full: 負荷試験・failover 検証用の一時的な強化 profile。
+    # API 2+ は schema migration の boot path 分離（実装順序 step 5）が前提ブロッカー。
     full = {
       nat_gateway_mode = "per_az"
 
       api_desired_count         = 2
       worker_desired_count      = 2
-      autoscaling_min           = 0
-      autoscaling_max           = 8
+      api_autoscaling_min       = 0
+      api_autoscaling_max       = 4
+      worker_autoscaling_min    = 0
+      worker_autoscaling_max    = 8
       scheduled_scaling_actions = []
 
       aurora_min_capacity          = 0.5
@@ -62,6 +70,11 @@ locals {
   }
 
   capacity_profile_settings = local.capacity_profiles[local.capacity_profile]
+
+  # endpoint mode（staging-environment.md / ADR-0008）:
+  # 初回 staging は alb-http-only（ACM 証明書なし・HTTPS リスナーなし・Route53 alias なし）。
+  # https-dns は ACM / Route53 / HTTPS を staging で検証する後続 step で有効化する。
+  https_enabled = var.public_endpoint_mode == "https-dns"
 }
 
 # ---------- network ----------
@@ -148,6 +161,13 @@ module "opensearch" {
   instance_count             = local.capacity_profile_settings.opensearch_instance_count
   zone_awareness_enabled     = local.capacity_profile_settings.opensearch_zone_awareness_enabled
   availability_zone_count    = local.capacity_profile_settings.opensearch_availability_zones
+
+  # staging からはアクセスポリシーの principal を API / Worker task role に限定する
+  # （production-readiness M-3 の残件。SigV4 署名クライアントは PR #75 で実装済み）。
+  allowed_principal_arns = [
+    aws_iam_role.api_task.arn,
+    aws_iam_role.worker_task.arn,
+  ]
 }
 
 module "search_projection_queue" {
@@ -168,9 +188,11 @@ module "eventbridge" {
 
 # ---------- app（実行層: ALB / ECS） ----------
 
-# ADR-0007: ALB を HTTPS 化する。証明書はこのリポジトリ専用サブドメインで発行し、
-# hosted zone（兄弟リポジトリ terraform-hannibal が取得したドメイン）は data source 参照に留める。
+# ADR-0007 / ADR-0008: HTTPS 化（ACM 証明書・DNS 検証・Route53 alias）は
+# public_endpoint_mode = "https-dns" のときだけ作成する。初回 staging は alb-http-only。
 data "aws_route53_zone" "public" {
+  count = local.https_enabled ? 1 : 0
+
   name         = var.hosted_zone_name
   private_zone = false
 }
@@ -180,6 +202,8 @@ locals {
 }
 
 resource "aws_acm_certificate" "api" {
+  count = local.https_enabled ? 1 : 0
+
   domain_name       = local.api_fqdn
   validation_method = "DNS"
 
@@ -189,15 +213,15 @@ resource "aws_acm_certificate" "api" {
 }
 
 resource "aws_route53_record" "api_cert_validation" {
-  for_each = {
-    for dvo in aws_acm_certificate.api.domain_validation_options : dvo.domain_name => {
+  for_each = local.https_enabled ? {
+    for dvo in aws_acm_certificate.api[0].domain_validation_options : dvo.domain_name => {
       name   = dvo.resource_record_name
       type   = dvo.resource_record_type
       record = dvo.resource_record_value
     }
-  }
+  } : {}
 
-  zone_id         = data.aws_route53_zone.public.zone_id
+  zone_id         = data.aws_route53_zone.public[0].zone_id
   name            = each.value.name
   type            = each.value.type
   records         = [each.value.record]
@@ -206,7 +230,9 @@ resource "aws_route53_record" "api_cert_validation" {
 }
 
 resource "aws_acm_certificate_validation" "api" {
-  certificate_arn         = aws_acm_certificate.api.arn
+  count = local.https_enabled ? 1 : 0
+
+  certificate_arn         = aws_acm_certificate.api[0].arn
   validation_record_fqdns = [for r in aws_route53_record.api_cert_validation : r.fqdn]
 }
 
@@ -219,14 +245,16 @@ module "alb" {
 
   # 検証済み証明書の ARN を渡す（validation リソース経由にして、検証完了前にリスナーが作られないようにする）。
   # リスナー等の有無は plan 時に確定する enable_https で切り替える（unknown 値を count に使わない）。
-  enable_https          = true
-  certificate_arn       = aws_acm_certificate_validation.api.certificate_arn
+  enable_https          = local.https_enabled
+  certificate_arn       = local.https_enabled ? aws_acm_certificate_validation.api[0].certificate_arn : null
   allowed_ingress_cidrs = var.alb_allowed_ingress_cidrs
 }
 
-# API の公開 FQDN を ALB へ向ける
+# API の公開 FQDN を ALB へ向ける（https-dns のみ）
 resource "aws_route53_record" "api_alias" {
-  zone_id = data.aws_route53_zone.public.zone_id
+  count = local.https_enabled ? 1 : 0
+
+  zone_id = data.aws_route53_zone.public[0].zone_id
   name    = local.api_fqdn
   type    = "A"
 
@@ -375,8 +403,8 @@ module "api_service" {
   target_group_arn          = module.alb.target_group_arn
   log_group_name            = "/ecs/${var.name}-api"
   desired_count             = local.capacity_profile_settings.api_desired_count
-  autoscaling_min_capacity  = local.capacity_profile_settings.autoscaling_min
-  autoscaling_max_capacity  = local.capacity_profile_settings.autoscaling_max
+  autoscaling_min_capacity  = local.capacity_profile_settings.api_autoscaling_min
+  autoscaling_max_capacity  = local.capacity_profile_settings.api_autoscaling_max
   scheduled_scaling_actions = local.capacity_profile_settings.scheduled_scaling_actions
 
   environment = {
@@ -416,8 +444,8 @@ module "worker_service" {
   task_role_arn             = aws_iam_role.worker_task.arn
   log_group_name            = "/ecs/${var.name}-worker"
   desired_count             = local.capacity_profile_settings.worker_desired_count
-  autoscaling_min_capacity  = local.capacity_profile_settings.autoscaling_min
-  autoscaling_max_capacity  = local.capacity_profile_settings.autoscaling_max
+  autoscaling_min_capacity  = local.capacity_profile_settings.worker_autoscaling_min
+  autoscaling_max_capacity  = local.capacity_profile_settings.worker_autoscaling_max
   scheduled_scaling_actions = local.capacity_profile_settings.scheduled_scaling_actions
 
   environment = {
