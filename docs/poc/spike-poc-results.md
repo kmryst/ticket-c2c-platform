@@ -13,7 +13,7 @@
 
 ## 環境・条件
 
-- 対象: dev 環境（`https://ticket-api-dev.hamilcar-hannibal.click`）。API 1 タスク（0.25 vCPU / 512MB）、pg pool max 10（接続待ちタイムアウト 5 秒）、Aurora Serverless v2 min 0 / max 2 ACU、Valkey cache.t4g.micro ×1。
+- 対象: dev 環境（`https://ticket-api-dev.hamilcar-hannibal.click`。このドメインは [ADR-0009](../adr/0009-migrate-to-project-domain.md) により `ticket-c2c.click` へ移行済みで、現在は存在しない。再現する場合は現行ドメインを使うこと）。API 1 タスク（0.25 vCPU / 512MB）、pg pool max 10（接続待ちタイムアウト 5 秒）、Aurora Serverless v2 min 0 / max 2 ACU、Valkey cache.t4g.micro ×1。
 - ツール: k6 v1.1.0（[scripts/load-testing/](../../scripts/load-testing/README.md)）。負荷元はローカル PC（東京リージョンへのインターネット経由）。
 - 購入リクエストは `requestId` なし・quantity 1（Valkey 前段フィルタを通る本番ホットパス）。
 - 計測前に warmup（10 req/s × 30 秒）で Aurora auto-pause の cold start を除去した。
