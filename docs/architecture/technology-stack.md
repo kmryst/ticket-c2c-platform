@@ -36,7 +36,7 @@
 
 | レイヤ | 推奨 |
 |---|---|
-| フロントエンド | Next.js / React / TypeScript |
+| フロントエンド | Next.js（App Router / SSR）/ React / TypeScript / Tailwind CSS（[ADR-0011](../adr/0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md)） |
 | API 入口 | ALB（prod では CloudFront + WAF を前段に追加。[ADR-0005](../adr/0005-alb-as-api-entry.md)） |
 | バックエンド | NestJS / TypeScript |
 | API 形式 | REST + OpenAPI |

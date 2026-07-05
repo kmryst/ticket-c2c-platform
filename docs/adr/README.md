@@ -76,3 +76,4 @@ YYYY-MM-DD
 | [0008](./0008-staging-ephemeral-prod-like-environment.md) | staging をエフェメラルな prod-like 環境とし、初回 endpoint を alb-http-only にする | Accepted |
 | [0009](./0009-migrate-to-project-domain.md) | プロジェクト専用ドメイン ticket-c2c.click へ移行する | Accepted |
 | [0010](./0010-email-password-jwt-auth.md) | メール+パスワード認証を自前実装（bcrypt + JWT + 自作 Guard）で行う | Accepted |
+| [0011](./0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md) | フロントエンドを Next.js SSR コンテナとして ECS でホスティングし、CloudFront 統合オリジン + httpOnly Cookie 認証を採用する | Accepted |
