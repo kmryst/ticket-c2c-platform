@@ -392,6 +392,18 @@ staging normal を初回 apply する前に、少なくとも次を満たす。
 - [x] OpenSearch のアクセスポリシーを IAM 認証（SigV4 署名）に切り替える。署名クライアント実装は dev で先行検証済み（[production-readiness.md](./production-readiness.md) M-3、PR #75）。staging のアクセスポリシー Principal を API / Worker task role に限定（Issue #88）。**full 検証（Issue #93）で実地確認済み**: `describe-domain-config` で Principal 限定を確認、smoke test の検索アサーション成功により SigV4 署名クライアントでの疎通も確認（dev は `Principal:"*"` のまま互換維持）。
 - [x] 本番化ギャップは `production-readiness.md` に移す。継続的に実施中（L-3/L-4/L-5/L-7/M-3 を本セッションで反映済み。full 検証で新たに発見した Aurora failover 時のクラッシュは Issue #108 として `production-readiness.md` に追加）。
 
+## フロントエンド実地検証（ADR-0011、Issue #146〜#148、2026-07-05〜06）
+
+`public_endpoint_mode=https-dns` で staging normal を apply し、frontend service（Next.js SSR）と CloudFront 統合オリジンを含めて実地検証した。
+
+- **apply / deploy**: `terraform-apply-staging`（`capacity_profile=normal` / `public_endpoint_mode=https-dns`）成功 → `deploy-app-staging`（`run_migrations=true`）成功。frontend ECR push + SHA 固定タスク定義 + `services-stable` 待ちも成功。
+- **CloudFront ルーティング分割**: `https://ticket-app-staging.ticket-c2c.click/` が SSR トップ（`イベント一覧` を含む HTML）、`https://ticket-app-staging.ticket-c2c.click/api/events` が JSON（`[]`）、`.../events/new` が SSR HTML を返すことを確認。既存 `https://ticket-api-staging.ticket-c2c.click` への直接アクセスは無変更。
+- **認証（httpOnly Cookie）**: `POST /api/auth/signup` が 201 + `Set-Cookie: access_token=...; Max-Age=3600; Path=/; HttpOnly; Secure; SameSite=Lax`（dev/staging とも `Secure` 付与を確認。ローカルは `COOKIE_SECURE=false` で無効化）。
+- **購入フロー**: 在庫 2 に対し `quantity=2` の購入が `status: confirmed`（`remainingQuantity: 0`）、続く `quantity=1` が `status: rejected` / `rejectionReason: sold_out_precheck`。トークンなし購入は 401。
+- **Playwright E2E**（`E2E_BASE_URL=https://ticket-app-staging.ticket-c2c.click npx playwright test`）: signup→login→イベント登録→検索→購入 confirmed/sold_out→未ログイン誘導の 6 テストが **6/6 pass（11.3秒）**。
+- dev（`https://ticket-app-dev.ticket-c2c.click`）でも同一検証を実施し、6/6 pass（16.4秒）。スクリーンショットは `docs/architecture/screenshots/frontend-dev/`（トップ / signup / login / 検索結果 / 購入確定 / 売り切れ）。
+- 検証後、dev / staging とも destroy 済み（下記コスト表・destroy 手順は ADR-0008 のエフェメラル運用を継続）。
+
 ## production-readiness.md との関係
 
 このドキュメントは staging 自体の設計正本です。
