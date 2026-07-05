@@ -24,8 +24,10 @@ concurrency:
 
 env:
   ECR_REPOSITORY: ticket-c2c-dev
+  ECR_REPOSITORY_FRONTEND: ticket-c2c-dev-frontend
   ECS_CLUSTER: ticket-c2c-dev
   ECS_SERVICES: "ticket-c2c-dev-api ticket-c2c-dev-worker"
+  ECS_SERVICE_FRONTEND: ticket-c2c-dev-frontend
 
 jobs:
   deploy:
@@ -55,6 +57,10 @@ jobs:
               --repository-name "$ECR_REPOSITORY" \
               --image-ids imageTag="$TAG" \
               --query 'imageDetails[0].imagePushedAt' --output text
+            aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY_FRONTEND" \
+              --image-ids imageTag="$TAG" \
+              --query 'imageDetails[0].imagePushedAt' --output text
             echo "rollback to existing tag $TAG" >> "$GITHUB_STEP_SUMMARY"
           else
             TAG="${GITHUB_SHA::7}"
@@ -69,6 +75,17 @@ jobs:
           IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}"
           TAG="${{ steps.tag.outputs.tag }}"
           docker build -t "$IMAGE:latest" -t "$IMAGE:$TAG" .
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:$TAG"
+          echo "pushed $IMAGE:$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      # frontend は別イメージ（frontend/Dockerfile。ADR-0011）のため専用リポジトリへ push する。
+      - name: Build and push frontend image
+        if: inputs.image_tag == ''
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY_FRONTEND}"
+          TAG="${{ steps.tag.outputs.tag }}"
+          docker build -t "$IMAGE:latest" -t "$IMAGE:$TAG" frontend
           docker push "$IMAGE:latest"
           docker push "$IMAGE:$TAG"
           echo "pushed $IMAGE:$TAG" >> "$GITHUB_STEP_SUMMARY"
@@ -128,3 +145,37 @@ jobs:
             --cluster "$ECS_CLUSTER" \
             --services $ECS_SERVICES
           echo "services stable" >> "$GITHUB_STEP_SUMMARY"
+
+      # frontend service の更新。staging の alb-http-only モードでは frontend service が
+      # 存在しないため（ADR-0011）、ACTIVE でない場合はスキップする。
+      - name: Deploy frontend service
+        run: |
+          STATUS=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE_FRONTEND" \
+            --query 'services[0].status' --output text 2>/dev/null || echo "MISSING")
+          if [ "$STATUS" != "ACTIVE" ]; then
+            echo "frontend service not active ($STATUS), skipped" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY_FRONTEND}:${{ steps.tag.outputs.tag }}"
+          CURRENT_TD=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE_FRONTEND" \
+            --query 'services[0].taskDefinition' --output text)
+          aws ecs describe-task-definition \
+            --task-definition "$CURRENT_TD" \
+            --query 'taskDefinition' > td-frontend.json
+          jq --arg image "$IMAGE" '
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
+            | .containerDefinitions[0].image = $image
+          ' td-frontend.json > td-frontend-new.json
+          NEW_TD=$(aws ecs register-task-definition \
+            --cli-input-json file://td-frontend-new.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE_FRONTEND" \
+            --task-definition "$NEW_TD" \
+            --query 'service.serviceName' --output text
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE_FRONTEND"
+          echo "updated $ECS_SERVICE_FRONTEND -> ${NEW_TD##*/} ($IMAGE)" >> "$GITHUB_STEP_SUMMARY"
