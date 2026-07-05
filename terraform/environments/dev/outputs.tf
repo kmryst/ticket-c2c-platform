@@ -50,3 +50,20 @@ output "api_url" {
   description = "API の公開 HTTPS エンドポイント（ADR-0007）"
   value       = "https://${var.api_subdomain}.${var.hosted_zone_name}"
 }
+
+output "frontend_ecr_repository_url" {
+  value = module.ecr_frontend.repository_url
+}
+
+output "frontend_service_name" {
+  value = module.frontend_service.service_name
+}
+
+output "cloudfront_distribution_id" {
+  value = module.cloudfront.distribution_id
+}
+
+output "app_url" {
+  description = "フロントエンドの公開 HTTPS エンドポイント（ADR-0011）"
+  value       = "https://${var.app_subdomain}.${var.hosted_zone_name}"
+}

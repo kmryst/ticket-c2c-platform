@@ -99,3 +99,51 @@ resource "aws_lb_listener" "https" {
     target_group_arn = aws_lb_target_group.api.arn
   }
 }
+
+# ---------- フロントエンド（ADR-0011） ----------
+
+# フロントエンド（Next.js SSR コンテナ）用 target group。
+# ヘルスチェックは API 非依存の /healthz（frontend 側の liveness 専用ルート）を使い、
+# API 障害時に frontend タスクまで再起動ループしないようにする。
+resource "aws_lb_target_group" "frontend" {
+  count = var.enable_frontend ? 1 : 0
+
+  name        = "${var.name}-frontend"
+  port        = var.frontend_container_port
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    path                = "/healthz"
+    interval            = 30
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  deregistration_delay = 30
+}
+
+# CloudFront の frontend origin にだけ付く識別ヘッダーで frontend へ振り分ける。
+# パスではなくヘッダーで判定するのは、CloudFront からの SSR リクエスト（Host は API の FQDN、
+# パスは任意）と既存の API 直接アクセスを、default action を変えずに区別するため（ADR-0011）。
+resource "aws_lb_listener_rule" "frontend" {
+  count = var.enable_frontend ? 1 : 0
+
+  # HTTPS 有効時は 443 リスナー（80 は 301 リダイレクト専用）、無効時は 80 リスナーに付ける。
+  listener_arn = var.enable_https ? aws_lb_listener.https[0].arn : aws_lb_listener.http.arn
+  priority     = 20
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.frontend[0].arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = var.frontend_header_name
+      values           = [var.frontend_header_value]
+    }
+  }
+}

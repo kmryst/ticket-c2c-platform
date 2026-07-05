@@ -51,3 +51,9 @@ variable "alb_allowed_ingress_cidrs" {
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
+
+variable "app_subdomain" {
+  description = "フロントエンドの公開サブドメイン（ADR-0011）。<app_subdomain>.<hosted_zone_name> が CloudFront の alias になる"
+  type        = string
+  default     = "ticket-app-dev"
+}

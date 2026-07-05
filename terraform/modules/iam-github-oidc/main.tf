@@ -379,6 +379,41 @@ resource "aws_iam_policy" "apply_state_iam" {
     Version = "2012-10-17"
     Statement = [
       {
+        # CloudFront の viewer certificate は us-east-1 の ACM 限定のため（ADR-0011）、
+        # RegionalServiceWrite（ap-northeast-1 条件）とは別に us-east-1 の ACM write を許可する。
+        Sid    = "UsEast1AcmWrite"
+        Effect = "Allow"
+        Action = [
+          "acm:AddTagsToCertificate",
+          "acm:DeleteCertificate",
+          "acm:RemoveTagsFromCertificate",
+          "acm:RenewCertificate",
+          "acm:RequestCertificate",
+          "acm:UpdateCertificateOptions",
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = { "aws:RequestedRegion" = "us-east-1" }
+        }
+      },
+      {
+        # CloudFront distribution の CRUD（ADR-0011 のフロントエンド統合オリジン）。
+        # distribution ARN はランダム ID のため名前プレフィックスで絞れない。
+        # グローバルサービスのためリージョン条件も付かないが、アクションを distribution 系に限定する。
+        Sid    = "CloudFrontWrite"
+        Effect = "Allow"
+        Action = [
+          "cloudfront:CreateDistribution",
+          "cloudfront:CreateDistributionWithTags",
+          "cloudfront:CreateInvalidation",
+          "cloudfront:DeleteDistribution",
+          "cloudfront:TagResource",
+          "cloudfront:UntagResource",
+          "cloudfront:UpdateDistribution",
+        ]
+        Resource = "*"
+      },
+      {
         # backend の state / lock オブジェクト操作（use_lockfile = true）と、bootstrap が管理する
         # バケット設定（versioning / SSE / public access block）の write。read は ReadStateBucket 参照。
         # バケット削除系は含めない（bootstrap root は prevent_destroy で保護しており destroy しない）。

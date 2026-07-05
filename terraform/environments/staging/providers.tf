@@ -26,3 +26,18 @@ provider "aws" {
     }
   }
 }
+
+# CloudFront の viewer certificate は us-east-1 の ACM でしか発行できない（ADR-0011）。
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"
+
+  default_tags {
+    tags = {
+      Project         = var.project
+      Environment     = local.environment
+      CapacityProfile = local.capacity_profile
+      ManagedBy       = "terraform"
+    }
+  }
+}

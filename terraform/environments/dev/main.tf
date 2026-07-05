@@ -226,6 +226,10 @@ module "alb" {
   enable_https          = true
   certificate_arn       = aws_acm_certificate_validation.api.certificate_arn
   allowed_ingress_cidrs = var.alb_allowed_ingress_cidrs
+
+  # フロントエンド用 target group と CloudFront 識別ヘッダーの listener rule（ADR-0011）。
+  # default action は API のまま維持され、ticket-api-dev への直接アクセスは変わらない。
+  enable_frontend = true
 }
 
 # API の公開 FQDN を ALB へ向ける
@@ -444,6 +448,116 @@ module "observability" {
   log_group_names = [
     "/ecs/${var.name}-api",
     "/ecs/${var.name}-worker",
+    "/ecs/${var.name}-frontend",
   ]
   retention_in_days = 30
+}
+
+# ---------- frontend（Next.js SSR。ADR-0011 / Issue #146） ----------
+
+# フロントエンドは backend と別イメージ（frontend/Dockerfile）のため専用リポジトリを持つ。
+module "ecr_frontend" {
+  source = "../../modules/ecr"
+
+  name = "${var.name}-frontend"
+  # destroy 前提運用のためイメージ残存時も削除可にする
+  force_delete = true
+}
+
+locals {
+  app_fqdn = "${var.app_subdomain}.${var.hosted_zone_name}"
+}
+
+# CloudFront viewer certificate 用の ACM 証明書。us-east-1 でしか使えないため provider alias で発行する。
+resource "aws_acm_certificate" "app" {
+  provider = aws.us_east_1
+
+  domain_name       = local.app_fqdn
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_route53_record" "app_cert_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.app.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      type   = dvo.resource_record_type
+      record = dvo.resource_record_value
+    }
+  }
+
+  zone_id         = data.aws_route53_zone.public.zone_id
+  name            = each.value.name
+  type            = each.value.type
+  records         = [each.value.record]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "app" {
+  provider = aws.us_east_1
+
+  certificate_arn         = aws_acm_certificate.app.arn
+  validation_record_fqdns = [for r in aws_route53_record.app_cert_validation : r.fqdn]
+}
+
+# frontend task role: AWS API を呼ばないため権限なしのロールを割り当てる（最小権限）。
+resource "aws_iam_role" "frontend_task" {
+  name               = "${var.name}-frontend-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+}
+
+module "frontend_service" {
+  source = "../../modules/ecs-service"
+
+  name                      = "${var.name}-frontend"
+  region                    = var.region
+  cluster_arn               = aws_ecs_cluster.this.arn
+  cluster_name              = aws_ecs_cluster.this.name
+  image                     = "${module.ecr_frontend.repository_url}:${var.image_tag}"
+  subnet_ids                = module.network.private_subnet_ids
+  security_group_ids        = [aws_security_group.app.id]
+  execution_role_arn        = aws_iam_role.execution.arn
+  task_role_arn             = aws_iam_role.frontend_task.arn
+  container_port            = 3000
+  target_group_arn          = module.alb.frontend_target_group_arn
+  log_group_name            = "/ecs/${var.name}-frontend"
+  desired_count             = 1
+  autoscaling_min_capacity  = local.dev_settings.autoscaling_min
+  autoscaling_max_capacity  = local.dev_settings.autoscaling_max
+  scheduled_scaling_actions = local.dev_settings.scheduled_scaling_actions
+
+  environment = {
+    PORT     = "3000"
+    HOSTNAME = "0.0.0.0"
+    # SSR のサーバー側 fetch は API の公開 FQDN を使う（NAT 経由。ADR-0011）。
+    API_BASE_URL = "https://${local.api_fqdn}"
+  }
+}
+
+# CloudFront 統合オリジン distribution（/api/* → API、その他 → frontend）。
+module "cloudfront" {
+  source = "../../modules/cloudfront"
+
+  name                = "${var.name}-app"
+  aliases             = [local.app_fqdn]
+  acm_certificate_arn = aws_acm_certificate_validation.app.certificate_arn
+  # origin は ALB の生 DNS 名ではなく API の FQDN を使う（ALB 証明書と一致させるため）。
+  origin_domain_name = local.api_fqdn
+}
+
+# フロントエンドの公開 FQDN を CloudFront へ向ける
+resource "aws_route53_record" "app_alias" {
+  zone_id = data.aws_route53_zone.public.zone_id
+  name    = local.app_fqdn
+  type    = "A"
+
+  alias {
+    name                   = module.cloudfront.domain_name
+    zone_id                = module.cloudfront.hosted_zone_id
+    evaluate_target_health = false
+  }
 }
