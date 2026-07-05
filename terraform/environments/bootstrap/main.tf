@@ -40,6 +40,12 @@ module "github_oidc" {
   plan_role_name    = "${var.project}-gha-plan"
   apply_role_name   = "${var.project}-gha-apply"
 
+  # apply ロールの最小権限ポリシーの対象（production-readiness H-1）。
+  # write を許可するリソース名プレフィックスは、bootstrap（ticket-c2c-platform-*）と
+  # dev / staging（ticket-c2c-dev-* / ticket-c2c-staging-*）を共通に覆う "ticket-c2c-" とする。
+  state_bucket_arn             = aws_s3_bucket.tfstate.arn
+  managed_resource_name_prefix = "ticket-c2c-"
+
   # apply ロールを引き受けられる GitHub Environment（staging-environment.md「Environment protection」）。
   # bootstrap は terraform-apply-bootstrap.yml が bootstrap root を自己更新するために追加する。
   apply_environments = [

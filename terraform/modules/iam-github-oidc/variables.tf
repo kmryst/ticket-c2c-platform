@@ -13,6 +13,16 @@ variable "apply_role_name" {
   type        = string
 }
 
+variable "state_bucket_arn" {
+  description = "Terraform state 用 S3 バケットの ARN（apply ロールの backend 操作・バケット管理権限の対象）"
+  type        = string
+}
+
+variable "managed_resource_name_prefix" {
+  description = "apply ロールが write してよいプロジェクトリソース名のプレフィックス（IAM ロール/ポリシー、ECR、SQS、EventBridge、CloudWatch alarm、ECS ロググループ名に適用）"
+  type        = string
+}
+
 variable "apply_environments" {
   description = "apply ロールの引き受けを許可する GitHub Environment 名"
   type        = list(string)
