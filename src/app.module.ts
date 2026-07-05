@@ -15,6 +15,8 @@ import { MessagingModule } from './messaging/messaging.module';
 import { SearchModule } from './search/search.module';
 // EventsModule はイベント登録・一覧・検索 API を提供します。
 import { EventsModule } from './events/events.module';
+// AuthModule はメール+パスワード認証 API と JwtAuthGuard を提供します（ADR-0010）。
+import { AuthModule } from './auth/auth.module';
 // HealthController は /health, /healthz, /readyz の health check endpoint です。
 import { HealthController } from './health.controller';
 // PurchasesController は購入リクエスト用 HTTP endpoint の入口です。
@@ -32,6 +34,7 @@ import { PurchasesService } from './purchases/purchases.service';
     MessagingModule,
     SearchModule,
     EventsModule,
+    AuthModule,
   ],
   // controllers には、HTTP リクエストを受ける入口クラスを登録します。
   controllers: [HealthController, PurchasesController],

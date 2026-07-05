@@ -15,6 +15,44 @@ export function getOptionalEnv(name: string): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
 
+// JWT_ACCESS_TOKEN_TTL_SECONDS はアクセストークンの有効期限（1h）です（ADR-0010）。
+// リフレッシュトークンは未導入のため、漏洩影響と UX の折衷としてこの値に固定します。
+export const JWT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
+
+// JwtConfig は @nestjs/jwt の JwtModule.register にそのまま渡せる設定の部分集合です。
+export interface JwtConfig {
+  // secret は HS256 の署名・検証に使う共有シークレットです。
+  secret: string;
+  // signOptions は発行するトークンのアルゴリズムと有効期限を固定します。
+  signOptions: {
+    // 鍵共有者が API 1 サービスのみのため、対称鍵の HS256 を使います（ADR-0010）。
+    algorithm: 'HS256';
+    // expiresIn は秒数で指定します（JWT_ACCESS_TOKEN_TTL_SECONDS = 1h）。
+    expiresIn: number;
+  };
+}
+
+// getJwtConfig は JWT_SECRET 環境変数から JWT 設定を組み立てます。
+// ローカル PoC では .env の JWT_SECRET、dev / staging では Secrets Manager の値を
+// ECS タスク定義の secrets 経由で注入します（既存の DB_PASSWORD と同じパターン。Issue #134）。
+// 認証を使うプロセスでシークレット未設定のまま起動する事故を防ぐため、未設定は起動時に失敗させます。
+export function getJwtConfig(): JwtConfig {
+  const secret = getOptionalEnv('JWT_SECRET');
+  if (!secret) {
+    throw new Error(
+      'JWT_SECRET is required. Copy .env.example to .env for local PoC runs.',
+    );
+  }
+
+  return {
+    secret,
+    signOptions: {
+      algorithm: 'HS256',
+      expiresIn: JWT_ACCESS_TOKEN_TTL_SECONDS,
+    },
+  };
+}
+
 // buildDatabaseUrl は DATABASE_URL、または DB_* 分解値から接続文字列を組み立てます。
 // dev 環境では Aurora の RDS 管理 secret から DB_PASSWORD だけを注入するため、分解形を受けます。
 export function buildDatabaseUrl(): string {
