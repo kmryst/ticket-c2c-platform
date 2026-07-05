@@ -127,7 +127,8 @@ resource "aws_iam_policy" "apply_infra" {
       {
         # read 系はリソースを絞らず許可する（terraform refresh / destroy 後の残存リソース検査を含む）。
         # ecr:BatchGetImage / BatchCheckLayerAvailability は docker pull に必要な read 系アクション。
-        # secretsmanager は Describe / List のみ（GetSecretValue は含めない）。
+        # secretsmanager は Describe / List のみ（GetSecretValue は含めない。
+        # 例外はプロジェクトプレフィックスのアプリ用シークレットに限定した ProjectAppSecrets 参照）。
         Sid    = "ReadInfraServices"
         Effect = "Allow"
         Action = [
@@ -340,6 +341,26 @@ resource "aws_iam_policy" "apply_infra" {
           "secretsmanager:TagResource",
         ]
         Resource = "arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:rds!*"
+      },
+      {
+        # dev / staging root module が Terraform で管理するアプリ用シークレット
+        # （JWT 署名シークレット等。ADR-0010 / Issue #134）の CRUD。
+        # H-1 の方針どおり、write はプロジェクトプレフィックス（ticket-c2c-）の ARN へ限定する。
+        # GetSecretValue はシークレット version リソースの refresh（値の読み戻し）に必須のため
+        # ここへ含めるが、対象はこのプレフィックスのみで、RDS 管理マスターシークレット（rds!*）へは
+        # 引き続き許可しない。
+        Sid    = "ProjectAppSecrets"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:DeleteSecret",
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:TagResource",
+          "secretsmanager:UntagResource",
+          "secretsmanager:UpdateSecret",
+        ]
+        Resource = "arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:${var.managed_resource_name_prefix}*"
       },
     ]
   })
