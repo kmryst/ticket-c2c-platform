@@ -9,6 +9,10 @@ RUN npm ci
 COPY tsconfig.json next.config.ts postcss.config.mjs ./
 COPY public ./public
 COPY app ./app
+# lib / components は @/* エイリアス（tsconfig.json）経由で app 配下から import されるため必須。
+# e2e / playwright.config.ts はビルド対象外（テスト専用）のため持ち込まない。
+COPY lib ./lib
+COPY components ./components
 RUN npm run build
 
 FROM node:24-slim
