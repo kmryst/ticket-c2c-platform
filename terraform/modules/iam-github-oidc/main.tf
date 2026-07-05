@@ -354,6 +354,10 @@ resource "aws_iam_policy" "apply_infra" {
         Action = [
           "secretsmanager:CreateSecret",
           "secretsmanager:DeleteSecret",
+          # GetResourcePolicy は AWS provider がシークレット作成直後・refresh 時に
+          # リソースポリシーを読み戻すために必須（dev apply の実地検証で権限漏れが判明。
+          # H-1 の PR #127 で Aurora 管理シークレットの CreateSecret が漏れていたのと同型）。
+          "secretsmanager:GetResourcePolicy",
           "secretsmanager:GetSecretValue",
           "secretsmanager:PutSecretValue",
           "secretsmanager:TagResource",
