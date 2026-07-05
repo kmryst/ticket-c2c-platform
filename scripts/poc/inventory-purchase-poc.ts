@@ -113,6 +113,13 @@ async function main() {
     // requestId に含めることで、同じ実行内の購入試行を追いやすくします。
     const runId = randomUUID();
 
+    // 購入 API は認証必須になったため（ADR-0010、Issue #135）、PoC 用の購入者を
+    // signup API 経由で 1 人作成し、その JWT を全購入リクエストで使います。
+    // buyerId のクライアント申告は廃止されており、purchases.buyer_id はこのユーザーの
+    // users.id（トークンの sub claim）になります。requestId は runId+index で一意なので、
+    // 同一 buyer でも idempotency の検証条件は変わりません。
+    const accessToken = await signupPocBuyer(runId);
+
     // runWithConcurrency は purchaseAttempts 件の購入処理を、purchaseConcurrency 件ずつ実行します。
     // API 側 pool を枯らすことではなく在庫正しさの検証が目的なので、同時数は制御します。
     const results = await runWithConcurrency(
@@ -120,8 +127,8 @@ async function main() {
       purchaseAttempts,
       // 1 batch あたりの同時実行数を渡します。
       purchaseConcurrency,
-      // 各 index に対して、同じ eventId / runId で購入リクエストを送ります。
-      (index) => sendPurchase(eventId, runId, index),
+      // 各 index に対して、同じ eventId / runId / トークンで購入リクエストを送ります。
+      (index) => sendPurchase(eventId, runId, index, accessToken),
     );
 
     // Promise.allSettled の結果を、集計しやすい PurchaseAttemptResult の配列へ正規化します。
@@ -263,6 +270,39 @@ async function assertApiIsReady() {
   }
 }
 
+// signupPocBuyer は PoC 用の購入者アカウントを認証 API 経由で作成し、JWT を返す helper です。
+async function signupPocBuyer(runId: string): Promise<string> {
+  // 実際のクライアントと同じ signup endpoint を通すことで、認証フロー込みの購入経路を検証します。
+  const response = await fetch(`${apiBaseUrl}/auth/signup`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      // runId を含めることで、実行のたびに一意な PoC 用メールアドレスになります。
+      email: `poc-${runId}@example.com`,
+      // パスワードも実行ごとにランダムにし、検証用アカウントの使い回しを避けます。
+      password: `poc-pass-${randomUUID()}`,
+    }),
+  });
+
+  // signup が失敗すると購入検証を始められないため、ここで明示的に失敗させます。
+  if (response.status !== 201) {
+    const body = await response.text();
+    throw new Error(
+      `PoC buyer signup failed: ${response.status} ${body.slice(0, 300)}`,
+    );
+  }
+
+  // response からアクセストークンを取り出し、購入リクエストの Bearer トークンに使います。
+  const result = (await response.json()) as { accessToken?: string };
+  if (!result.accessToken) {
+    throw new Error('PoC buyer signup response did not contain accessToken');
+  }
+
+  return result.accessToken;
+}
+
 // seedEvent は検証用イベントと在庫 row を PostgreSQL に直接作る helper です。
 async function seedEvent(pool: Pool): Promise<string> {
   // 売る側の event 作成 API はこの在庫 PoC の範囲外です。
@@ -322,23 +362,25 @@ async function sendPurchase(
   runId: string,
   // index は同じ run の中で何番目の request かを表します。
   index: number,
+  // accessToken は signupPocBuyer が取得した購入者の JWT です。
+  accessToken: string,
 ): Promise<PurchaseAttemptResult> {
   // latency 計測の開始時刻を記録します。
   const startedAt = performance.now();
   // 実際の buyer client が叩くのと同じ HTTP endpoint に POST します。
-  // service を直接呼ばず HTTP を通すことで、controller も含めた流れを検証できます。
+  // service を直接呼ばず HTTP を通すことで、guard / controller も含めた流れを検証できます。
   const response = await fetch(`${apiBaseUrl}/events/${eventId}/purchases`, {
     // 購入 endpoint は POST で呼び出します。
     method: 'POST',
-    // JSON body を送るための content-type header です。
     headers: {
       // NestJS/Fastify が body を JSON として parse できるよう指定します。
       'content-type': 'application/json',
+      // 購入は認証必須（Issue #135）のため、Bearer トークンを付けます。
+      authorization: `Bearer ${accessToken}`,
     },
-    // body には購入者、枚数、idempotency key を入れます。
+    // body には枚数と idempotency key を入れます。
+    // 購入者はトークンの sub claim から決まるため、buyerId は送りません。
     body: JSON.stringify({
-      // buyerId は毎回ランダムにし、通常の別購入者として扱わせます。
-      buyerId: randomUUID(),
       // quantity は環境変数で指定できる 1 request あたりの購入枚数です。
       quantity: purchaseQuantity,
       // requestId は runId + index で一意にし、同じ request の再送と区別できる形にします。

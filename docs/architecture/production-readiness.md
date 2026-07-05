@@ -34,6 +34,7 @@
 | M-5 | Network | ALB が HTTP:80 のみで認証なし。稼働中はインターネット全体から平文で公開 API が叩ける。dev-environment.md のコスト前提（アイドル時 Aurora ≈ $0）が外部トラフィックで崩れ得る。 | 検証時のみ ingress を自分の IP に絞る変数を用意、または HTTPS 化。 | 対応済み（PR #72。HTTPS 化 + `alb_allowed_ingress_cidrs` 変数。判断は [ADR-0007](../adr/0007-alb-https-with-acm-and-ingress-variable.md)） |
 | M-6 | Cost | コスト表に Interface VPC Endpoint（ecr.api / ecr.dkr / logs × 2AZ = 6 ENI）の費用（月額約 $60）が未計上。実際は見積り（~$120/月）より高い。 | コスト表への追記。 | 未着手 |
 | M-7 | CI-CD | `deploy-app.yml` がリソース名（ECR/クラスタ/サービス名）をハードコード。`var.name` を変えると deploy が壊れる。タスク定義が `:latest`（MUTABLE）参照のため、ロールバック手段がコミット再ビルドしかない。 | イメージタグを commit SHA 固定へ移行。 | 対応済み（PR #70。タスク定義の SHA 固定と `image_tag` 入力によるロールバック経路を実装。リソース名のハードコードは deploy が dev 専用 workflow である間は許容） |
+| M-8 | Data-integrity | 購入 API が `buyerId` をクライアント申告の UUID のまま信用して保存しており、購入者のなりすまし・購入履歴の汚染が自由にできる（buyer table も FK も存在しない、M-1 と同時代のパターン）。 | 認証導入と buyer_id のサーバ側決定。 | 対応済み（2026-07-05、ADR-0010、Issue #132〜#135、PR #136〜#139。メール+パスワード認証（bcrypt 12 + JWT HS256 1h + 自作 Guard）を導入し、`POST /events/:eventId/purchases` を認証必須化。`buyer_id` は JWT の sub claim（users.id）由来となり、body の `buyerId` は 400 で拒否。`purchases.buyer_id -> users.id` の FK（NOT VALID）で参照整合性も DB 側で保証。JWT シークレットは Secrets Manager + Terraform で dev / staging へ配備） |
 
 ## Low
 
@@ -47,6 +48,8 @@
 | L-6 | Network | Aurora / Valkey / OpenSearch の各 SG の egress が全開放（`0.0.0.0/0`）。マネージドサービス SG としては定番だが prod では絞る余地がある。 | prod 移行時に見直し。 | 未着手 |
 | L-7 | Reliability | Aurora のバックアップ保持期間・マイナーバージョン方針が未指定（既定 1 日）。staging 用の変数化もまだ。 | staging 用変数の追加。 | 対応済み（Issue #101。aurora モジュールに backup_retention_period / preferred_backup_window / auto_minor_version_upgrade を変数化し、dev / staging root が明示値（retention 1 日・自動マイナー適用）を設定。prod では retention 7 日以上へ引き上げる） |
 | L-8 | Reliability | 2026-07-04 の staging full 負荷検証（Issue #93）で、spike 高負荷（HOT_RATE=200rps）時に k6 のエラー率が約30%まで悪化した。baseline（20rps）では p95=68.7ms・エラー率 0% だが、spike では p50=4.6〜4.7s、p95=7.4〜7.5s、p99=7.6〜7.9s、エラー率約30%。原因は Postgres 接続プール上限（API タスクあたり 10 接続 × 稼働 2 タスク = 合計 20 接続）で、コード側のバグではない。oversold=0（過剰販売なし）はこの負荷条件下でも維持されていた。 | 対応の選択肢: (1) API タスクあたりのプールサイズ増（無料だがタスク数×プールサイズが Aurora の `max_connections` を超えないよう設計が必要）、(2) Aurora Serverless の ACU 上限引き上げ（コスト増）、(3) RDS Proxy 導入（追加の常駐コストが発生）。対応前に想定同時接続数（実トラフィック見込み）を確定させる必要がある。 | 未着手（Issue #113。想定トラフィックが未確定のため意図的に見送り。Issue #108（Aurora failover クラッシュ修正）と同じ検証サイクルで発見） |
+
+| L-9 | Reliability | 認証（ADR-0010）はアクセストークン（1h）のみで、リフレッシュトークン・トークン失効（強制ログアウト）・レート制限・アカウントロックが未実装。トークン漏洩時は最長 1h 有効なまま無効化できない。JWT シークレットのローテーション運用も未整備（Secrets Manager 上の手動更新 + 再デプロイが必要）。 | リフレッシュトークン導入、認証系レート制限、シークレットローテーション手順の整備。 | 未着手（ADR-0010 の再検討トリガーに条件を記載） |
 
 ## 次の優先順位（推奨）
 

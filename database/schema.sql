@@ -95,8 +95,8 @@ CREATE TABLE IF NOT EXISTS purchases (
   -- ON DELETE RESTRICT により、購入履歴がある event をうっかり削除できないようにしています。
   event_id UUID NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
   -- buyer_id は購入者（users.id）を識別する UUID です。
-  -- users table は ADR-0010（Issue #132）で追加済みです。FK 制約の付与は
-  -- 認証 API の購入フロー統合（Issue #135）と同じタイミングで行います。
+  -- 認証 API の統合（ADR-0010、Issue #135）により、値は JWT の sub claim 由来になりました。
+  -- FK 制約は後方互換のため CREATE TABLE 内ではなく、下の DO block で後付けします。
   buyer_id UUID NOT NULL,
   -- request_id はクライアントが任意で送る idempotency key です。
   -- 同じ buyer/event/request_id の再送を、後続の partial unique index で制御します。
@@ -150,6 +150,24 @@ BEGIN
     );
 EXCEPTION
   -- constraint がすでにある場合は、再適用として何もしません。
+  WHEN duplicate_object THEN NULL;
+END
+$$;
+
+-- purchases.buyer_id -> users.id の外部キーです（ADR-0010、Issue #135）。
+-- 認証導入前のローカル DB には users に存在しない buyer_id を持つ row があり得るため、
+-- NOT VALID で「既存 row は検査せず、新規の書き込みだけに強制」します。
+-- DO block により、何度 schema.sql を流しても duplicate_object で止まりません。
+DO $$
+BEGIN
+  ALTER TABLE purchases
+    ADD CONSTRAINT purchases_buyer_id_fkey
+    FOREIGN KEY (buyer_id) REFERENCES users(id)
+    -- 購入履歴がある buyer をうっかり削除できないようにします（event_id の RESTRICT と同じ方針）。
+    ON DELETE RESTRICT
+    NOT VALID;
+EXCEPTION
+  -- すでに FK が存在する場合は、再適用として何もしません。
   WHEN duplicate_object THEN NULL;
 END
 $$;

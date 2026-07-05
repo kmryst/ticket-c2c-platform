@@ -9,8 +9,11 @@ export type PurchaseStatus = 'confirmed' | 'rejected';
 
 // PurchaseRequestBody は HTTP request body の生の形です。
 // 外部入力は信用しないため、各 field は validation 前の unknown として受けます。
+// buyerId は認証統合（ADR-0010、Issue #135）でクライアント申告を廃止しました。
+// JWT の sub claim（users.id）を購入者として使うため、body には含めません。
 export interface PurchaseRequestBody {
-  // buyerId は購入者 ID の候補値ですが、ここではまだ UUID かどうか分かりません。
+  // buyerId は受け付けなくなった旧 field です。移行漏れのクライアントが
+  // 黙って無視されて混乱しないよう、指定された場合は validation で 400 にします。
   buyerId?: unknown;
   // quantity は購入枚数の候補値ですが、ここではまだ正の整数かどうか分かりません。
   quantity?: unknown;
@@ -23,7 +26,8 @@ export interface PurchaseRequestBody {
 export interface ParsedPurchaseInput {
   // eventId は URL path から来た、購入対象イベントの UUID です。
   eventId: string;
-  // buyerId は request body から来た、購入者の UUID です。
+  // buyerId は JwtAuthGuard 検証済みトークンの sub claim（users.id）です。
+  // クライアント申告値ではないため、購入者のなりすましはトークンなしには成立しません。
   buyerId: string;
   // quantity は購入したい枚数で、PostgreSQL INTEGER に収まる正の整数です。
   quantity: number;

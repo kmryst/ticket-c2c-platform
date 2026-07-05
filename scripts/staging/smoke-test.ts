@@ -4,9 +4,11 @@
 //
 // 検証経路:
 // 1. GET /healthz / GET /readyz（ALB -> API -> Aurora）
-// 2. POST /events で capacity 2 の test event を seed（API 経由。DB 直接投入はしない）
-// 3. POST /events/:eventId/purchases x3（#1 / #2 confirmed、#3 は Valkey 前段拒否 sold_out_precheck）
-// 4. GET /events/search に projection が反映される（EventBridge -> SQS -> Worker -> OpenSearch）
+// 2. POST /auth/signup で smoke 用ユーザーを作成し、GET /auth/me でトークンを検証（ADR-0010 / Issue #135）
+// 3. POST /events で capacity 2 の test event を seed（API 経由。DB 直接投入はしない）
+// 4. POST /events/:eventId/purchases x3（#1 / #2 confirmed、#3 は Valkey 前段拒否 sold_out_precheck）
+//    購入は認証必須のため Bearer トークン付きで送り、トークンなしが 401 になることも検証する
+// 5. GET /events/search に projection が反映される（EventBridge -> SQS -> Worker -> OpenSearch）
 //
 // test data は削除しない（失敗時調査用。staging destroy で消える）。
 
@@ -41,6 +43,13 @@ interface SearchedEvent {
   remainingQuantity: number | null;
 }
 
+interface AuthTokenResult {
+  accessToken: string;
+  tokenType: 'Bearer';
+  expiresIn: number;
+  user: { userId: string; email: string };
+}
+
 async function main(): Promise<void> {
   console.log(`smoke test run: ${runLabel}`);
   console.log(`base URL: ${baseUrl}`);
@@ -67,7 +76,33 @@ async function main(): Promise<void> {
     );
   }
 
-  // 2. seed: capacity 2 の test event を API 経由で作成する
+  // 2. auth: smoke 用ユーザーを signup し、me でトークンの有効性を検証する（ADR-0010 / Issue #135）
+  const smokeEmail = `smoke-${runId}@example.com`;
+  const smokePassword = `smoke-pass-${randomUUID()}`;
+  const auth = await requestJson<AuthTokenResult>(
+    'POST /auth/signup',
+    `${baseUrl}/auth/signup`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: smokeEmail, password: smokePassword }),
+      expectedStatus: 201,
+    },
+  );
+  assert(
+    typeof auth.accessToken === 'string' && auth.accessToken.length > 0,
+    'signup returns access token',
+  );
+  const authHeader = { authorization: `Bearer ${auth.accessToken}` };
+
+  const me = await requestJson<{ userId: string }>(
+    'GET /auth/me',
+    `${baseUrl}/auth/me`,
+    { method: 'GET', headers: authHeader, expectedStatus: 200 },
+  );
+  assert(me.userId === auth.user.userId, 'me returns the signed-up user');
+
+  // 3. seed: capacity 2 の test event を API 経由で作成する
   const eventType = `smoke-${runId}`;
   const created = await requestJson<EventSummary>('POST /events', `${baseUrl}/events`, {
     method: 'POST',
@@ -85,13 +120,26 @@ async function main(): Promise<void> {
   assert(typeof created.eventId === 'string' && created.eventId.length > 0, 'event created with id');
   console.log(`seeded event ${created.eventId} (capacity 2, eventType ${eventType})`);
 
-  // 3. purchases: #1 / #2 confirmed、#3 は Valkey 前段拒否（sold_out_precheck）
-  //    requestId を付けると前段フィルタをバイパスするため、あえて付けない。
+  // 4. purchases: #1 / #2 confirmed、#3 は Valkey 前段拒否（sold_out_precheck）
+  //    購入は認証必須（Issue #135）。buyerId は送らず、トークンの sub が購入者になる。
+  //    まず、トークンなしの購入が 401 で拒否されることを検証する。
+  {
+    const res = await fetch(`${baseUrl}/events/${created.eventId}/purchases`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ quantity: 1 }),
+    });
+    assert(
+      res.status === 401,
+      `purchase without token is rejected with 401 (got ${res.status})`,
+    );
+  }
+
   const purchase = (label: string) =>
     requestJson<PurchaseResult>(label, `${baseUrl}/events/${created.eventId}/purchases`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ buyerId: randomUUID(), quantity: 1 }),
+      headers: { 'content-type': 'application/json', ...authHeader },
+      body: JSON.stringify({ quantity: 1 }),
       expectedStatus: 200,
     });
 
@@ -111,7 +159,7 @@ async function main(): Promise<void> {
   );
   assert(p3.purchaseId === null, `purchase #3 has no DB record (purchaseId=${p3.purchaseId})`);
 
-  // 4. projection: EventBridge -> SQS -> Worker -> OpenSearch の非同期反映を待つ。
+  // 5. projection: EventBridge -> SQS -> Worker -> OpenSearch の非同期反映を待つ。
   //    staging は OPENSEARCH_ENDPOINT 設定済みのため /events/search は OpenSearch のみを見る
   //    （DB フォールバックで偽陽性にならない）。remainingQuantity 0 まで確認して
   //    EventListed / InventoryChanged 両方の反映を見る。
@@ -131,6 +179,7 @@ async function main(): Promise<void> {
 
   console.log('');
   console.log('smoke test PASSED');
+  console.log(`- auth: signup ${smokeEmail} / me OK / 未認証購入 401`);
   console.log(`- event: ${created.eventId} (eventType ${eventType})`);
   console.log('- purchases: #1 confirmed / #2 confirmed / #3 rejected (sold_out_precheck)');
   console.log('- search projection: reflected with remainingQuantity 0');
