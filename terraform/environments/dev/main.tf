@@ -143,6 +143,33 @@ module "eventbridge" {
   target_queue_url = module.search_projection_queue.queue_url
 }
 
+# ---------- auth（JWT 署名シークレット。ADR-0010 / Issue #134） ----------
+
+# JWT（HS256）の署名シークレットを Terraform で生成する。
+# 値は tfstate に入るが、state バケットは非公開・SSE 有効（bootstrap 管理）のため許容する。
+# ECS タスクへは既存の DB_PASSWORD と同じく secrets 注入で渡し、
+# タスク定義・environment・リポジトリに平文を置かない。
+resource "random_password" "jwt_secret" {
+  # HS256 の鍵素材として十分な 64 文字（384 bit 超のエントロピー）にする。
+  length = 64
+  # 記号は含めない。長さで強度を確保し、環境変数経由の受け渡しでの引用符事故を避ける。
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "jwt" {
+  name        = "${var.name}-jwt-secret"
+  description = "JWT signing secret for the API (ADR-0010). Injected into ECS tasks as JWT_SECRET."
+
+  # dev はエフェメラル環境（未使用時 destroy）のため、削除保留期間なしで即時削除できるようにする。
+  # 保留中シークレットが残ると、次回 apply の CreateSecret が名前衝突で失敗するため。
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "jwt" {
+  secret_id     = aws_secretsmanager_secret.jwt.id
+  secret_string = random_password.jwt_secret.result
+}
+
 # ---------- app（実行層: ALB / ECS） ----------
 
 # ADR-0007: ALB を HTTPS 化する。証明書はこのリポジトリ専用サブドメインで発行する。
@@ -262,9 +289,13 @@ resource "aws_iam_role_policy" "execution_secrets" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [module.aurora.master_user_secret_arn]
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        # タスク起動時の secrets 注入対象: Aurora 管理シークレットと JWT 署名シークレット（ADR-0010）。
+        Resource = [
+          module.aurora.master_user_secret_arn,
+          aws_secretsmanager_secret.jwt.arn,
+        ]
       }
     ]
   })
@@ -374,6 +405,9 @@ module "api_service" {
   secrets = {
     # migration runner（db-migrate workflow の ECS run-task）用。短命接続のためローテーション影響を受けず、静的注入のままでよい（Issue #92）。
     DB_PASSWORD = "${module.aurora.master_user_secret_arn}:password::"
+    # JWT 署名シークレット（ADR-0010 / Issue #134）。プレーン文字列シークレットのため key 指定は不要。
+    # 自動ローテーションは設定していないため、タスク起動時の静的注入で十分。
+    JWT_SECRET = aws_secretsmanager_secret.jwt.arn
   }
 }
 
