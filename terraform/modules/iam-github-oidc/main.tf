@@ -137,6 +137,8 @@ resource "aws_iam_policy" "apply_infra" {
           "acm:List*",
           "application-autoscaling:Describe*",
           "application-autoscaling:List*",
+          "cloudfront:Get*",
+          "cloudfront:List*",
           "cloudwatch:Describe*",
           "cloudwatch:Get*",
           "cloudwatch:List*",
