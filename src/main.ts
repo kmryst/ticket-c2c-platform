@@ -12,6 +12,11 @@ import { NestFactory } from '@nestjs/core';
 // FastifyAdapter は HTTP サーバーとして Fastify を使うためのアダプターです。
 // NestFastifyApplication は作成したアプリが Fastify ベースであることを型で表します。
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+// fastifyCookie は Cookie の parse（request.cookies）と Set-Cookie（reply.setCookie）を提供する plugin です。
+// httpOnly Cookie でのトークン発行・検証（ADR-0011 決定 3、Issue #142）に使います。
+import fastifyCookie from '@fastify/cookie';
+// stripApiPrefix は CloudFront 経由で届く /api/* パスを既存ルートへ写像します（ADR-0011 決定 2）。
+import { stripApiPrefix } from './api-prefix';
 // AppModule は controller / service / database module を束ねた、この API のルートモジュールです。
 import { AppModule } from './app.module';
 
@@ -27,7 +32,19 @@ async function bootstrap() {
     // アプリ全体の依存関係は AppModule から読み込みます。
     AppModule,
     // HTTP サーバーとして Fastify を使うよう NestJS に指定します。
-    new FastifyAdapter(),
+    // rewriteUrl はルーティング前に呼ばれるため、CloudFront のパスルーティングで
+    // /api/* として届いたリクエストを既存ルート（プレフィックスなし）へ写像できます。
+    new FastifyAdapter({
+      rewriteUrl: (req: { url?: string }) => stripApiPrefix(req.url ?? '/'),
+    }),
+  );
+
+  // Cookie plugin を登録し、request.cookies の parse と reply.setCookie を有効にします。
+  // 署名付き Cookie は使わない（JWT 自体が署名済み）ため secret は渡しません。
+  // cast は @nestjs/platform-fastify が fastify を exact pin（5.8.5）で同梱しており、
+  // root の fastify（^5.9）と型の同一性が取れないための措置です（実行時は互換）。
+  await app.register(
+    fastifyCookie as unknown as Parameters<NestFastifyApplication['register']>[0],
   );
   // PORT 環境変数を API の待受ポートに変換します。
   const port = parsePort(process.env.PORT);

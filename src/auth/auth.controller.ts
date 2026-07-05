@@ -14,8 +14,11 @@ import {
   Get,
   HttpCode,
   Post,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+// FastifyReply は Set-Cookie header を書き込むための response オブジェクトです。
+import { FastifyReply } from 'fastify';
 // AuthService は signup / login / me の認証ロジック本体です。
 import { AuthService } from './auth.service';
 // JwtPayload は Guard 検証済みトークンの claim 型です。
@@ -24,6 +27,8 @@ import { JwtPayload } from './auth.types';
 import { CurrentUser } from './current-user.decorator';
 // JwtAuthGuard は Bearer トークンを検証する自作 Guard です。
 import { JwtAuthGuard } from './jwt-auth.guard';
+// setAuthCookie / clearAuthCookie は httpOnly Cookie の発行・破棄です（ADR-0011、Issue #142）。
+import { clearAuthCookie, setAuthCookie } from './auth-cookie';
 
 // AuthController は認証リクエストを HTTP で受ける境界です。
 // controller は薄く保ち、validation・hash・トークン発行の判断は AuthService に委譲します。
@@ -40,9 +45,16 @@ export class AuthController {
   async signup(
     // body は JSON request body 全体を unknown として受け、service 側で validation します。
     @Body() body: unknown,
+    // passthrough を付けることで、Set-Cookie だけ書き込み、response body は従来どおり
+    // NestJS の戻り値シリアライズに任せられます。
+    @Res({ passthrough: true }) reply: FastifyReply,
   ) {
     // メール重複（409）や入力不正（400）は service が NestJS exception として投げます。
-    return this.authService.signup(body);
+    const result = await this.authService.signup(body);
+    // フロントエンド用に httpOnly Cookie でも同じトークンを発行します（ADR-0011 決定 3）。
+    // JSON body の accessToken は既存クライアント互換のため維持します。
+    setAuthCookie(reply, result.accessToken);
+    return result;
   }
 
   // @Post('login') は POST /auth/login をこの method に対応させます。
@@ -53,9 +65,27 @@ export class AuthController {
   async login(
     // body は unknown のまま service の validation へ渡します。
     @Body() body: unknown,
+    // signup と同じく Set-Cookie の書き込みにだけ reply を使います。
+    @Res({ passthrough: true }) reply: FastifyReply,
   ) {
     // 資格情報不一致は service が 401 として投げます。
-    return this.authService.login(body);
+    const result = await this.authService.login(body);
+    // httpOnly Cookie でも同じトークンを発行します（ADR-0011 決定 3）。
+    setAuthCookie(reply, result.accessToken);
+    return result;
+  }
+
+  // @Post('logout') は POST /auth/logout をこの method に対応させます。
+  // Cookie を破棄するだけの操作のため認証は要求せず、body も返しません。
+  @Post('logout')
+  @HttpCode(204)
+  logout(
+    // Set-Cookie（破棄）だけを書き込みます。
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    // JWT 自体はサーバ側で失効できない（ADR-0010 のトレードオフ）ため、
+    // logout は「ブラウザから Cookie を消す」ことに限定した操作です。
+    clearAuthCookie(reply);
   }
 
   // @Get('me') は GET /auth/me をこの method に対応させます。
