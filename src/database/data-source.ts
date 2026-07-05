@@ -8,6 +8,7 @@ import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { buildDatabaseUrl, getDatabaseSslConfig } from '../config';
 import { Baseline1751594400000 } from './migrations/1751594400000-baseline';
+import { AddUsers1783251707172 } from './migrations/1783251707172-add-users';
 
 // migrations は glob ではなく明示 import で列挙する。
 // ts-node（ローカル）と dist（ECS）のどちらで実行してもパス解決が壊れないようにするため。
@@ -17,7 +18,7 @@ export const dataSource = new DataSource({
   // Aurora では RDS CA バンドルによる証明書検証つき TLS で接続する（production-readiness M-4）。
   ssl: getDatabaseSslConfig(),
   entities: [],
-  migrations: [Baseline1751594400000],
+  migrations: [Baseline1751594400000, AddUsers1783251707172],
   // 適用履歴 table 名。既定の "migrations" は汎用的すぎるため明示する。
   migrationsTableName: 'typeorm_migrations',
 });

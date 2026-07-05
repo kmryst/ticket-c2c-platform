@@ -10,13 +10,28 @@
 
 在庫 PoC では、同時購入リクエストが集中しても在庫数を超えた購入が確定しないことを検証します。
 
-そのため、最初のスキーマは次の 3 テーブルに絞ります。
+そのため、最初のスキーマは次のテーブルに絞ります。
 
 | テーブル | 目的 |
 |---|---|
+| `users` | 購入者アカウント（メール+パスワード認証。ADR-0010） |
 | `events` | イベント本体 |
 | `ticket_inventory` | イベントごとの在庫 |
 | `purchases` | 購入結果 |
+
+## `users`
+
+メール+パスワード認証（ADR-0010、Issue #132）の購入者アカウントを表します。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| `id` | `UUID` | ユーザー ID。JWT の `sub` claim に入る値 |
+| `email` | `TEXT` | ログイン ID。`lower(email)` の unique index で一意 |
+| `password_hash` | `TEXT` | bcrypt（コストファクター 12）のハッシュ。平文は保存しない |
+| `created_at` | `TIMESTAMPTZ` | 作成日時 |
+| `updated_at` | `TIMESTAMPTZ` | 更新日時 |
+
+`purchases.buyer_id -> users.id` の FK は、購入 API の認証必須化（Issue #135）と同じタイミングで追加します。
 
 ## `events`
 
