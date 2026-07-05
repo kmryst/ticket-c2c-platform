@@ -25,7 +25,11 @@ export async function apiFetch<T>(
     credentials: "same-origin",
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      // body なしのリクエスト（logout 等）に Content-Type: application/json を付けると
+      // Fastify が「空の JSON body」として 400 を返すため、body があるときだけ付けます。
+      ...(init?.body !== undefined
+        ? { "Content-Type": "application/json" }
+        : {}),
       ...init?.headers,
     },
   });

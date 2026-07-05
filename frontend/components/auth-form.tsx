@@ -8,6 +8,7 @@
 import { FormEvent, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
+import { useHydrated } from "@/lib/use-hydrated";
 
 export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const router = useRouter();
@@ -16,6 +17,7 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const hydrated = useHydrated();
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -51,6 +53,9 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
 
   return (
     <form
+      // hydration 前のネイティブ submit（資格情報が URL に載る GET）を避けるため method を明示します。
+      method="POST"
+      data-hydrated={hydrated ? "true" : undefined}
       onSubmit={(e) => void onSubmit(e)}
       className="flex w-full max-w-sm flex-col gap-4"
     >
@@ -84,7 +89,7 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
       )}
       <button
         type="submit"
-        disabled={submitting}
+        disabled={submitting || !hydrated}
         className="rounded bg-foreground px-4 py-2 text-background hover:opacity-80 disabled:opacity-50"
       >
         {mode === "login" ? "ログイン" : "登録する"}

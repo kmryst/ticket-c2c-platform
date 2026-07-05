@@ -9,6 +9,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
+import { useHydrated } from "@/lib/use-hydrated";
 
 // PurchaseResult は backend の購入 API 応答です（purchase.types.ts と対応）。
 interface PurchaseResult {
@@ -33,6 +34,7 @@ export default function PurchaseForm({
   const [result, setResult] = useState<PurchaseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const hydrated = useHydrated();
 
   async function purchase() {
     setError(null);
@@ -81,7 +83,8 @@ export default function PurchaseForm({
       <button
         type="button"
         onClick={() => void purchase()}
-        disabled={submitting}
+        disabled={submitting || !hydrated}
+        data-hydrated={hydrated ? "true" : undefined}
         data-testid="purchase-button"
         className="rounded bg-foreground px-4 py-2 text-background hover:opacity-80 disabled:opacity-50"
       >

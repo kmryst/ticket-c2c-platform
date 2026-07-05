@@ -7,15 +7,21 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { apiFetch, AuthenticatedUser } from "@/lib/api";
 
 export default function AuthStatus() {
   const router = useRouter();
+  // login / signup 後のクライアント遷移でヘッダーは再マウントされないため、
+  // パス変更をトリガーに認証状態を取り直します。
+  const pathname = usePathname();
   // undefined は「確認中」、null は「未ログイン」を表します。
   const [user, setUser] = useState<AuthenticatedUser | null | undefined>(
     undefined,
   );
+  // logout 直後に「logout 前に発行された /auth/me」が遅れて解決して表示が戻るのを防ぐため、
+  // logout で version を進めて effect を再実行（進行中 fetch は cleanup で無効化）します。
+  const [version, setVersion] = useState(0);
 
   useEffect(() => {
     // unmount 後の setState を避けるためのフラグです。
@@ -35,11 +41,12 @@ export default function AuthStatus() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [pathname, version]);
 
   async function logout() {
     await apiFetch("/auth/logout", { method: "POST" });
-    setUser(null);
+    // Cookie 破棄後に認証状態を取り直します（effect の cleanup が進行中の古い fetch を無効化）。
+    setVersion((current) => current + 1);
     // SSR ページの認証依存表示も更新されるようルートを再取得します。
     router.refresh();
   }
