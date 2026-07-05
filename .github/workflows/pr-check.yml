@@ -99,6 +99,79 @@ jobs:
             echo "::endgroup::"
           done
 
+  # ユーザーフロー E2E（Issue #148）。実バックエンド + 実 PostgreSQL / Valkey で
+  # signup → login → イベント登録 → 検索（DB フォールバック）→ 購入（confirmed / sold_out）を検証する。
+  playwright-e2e:
+    name: Playwright E2E
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ticket_poc
+          POSTGRES_USER: ticket_poc
+          POSTGRES_PASSWORD: ticket_poc_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ticket_poc -d ticket_poc"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://ticket_poc:ticket_poc_password@127.0.0.1:5432/ticket_poc
+      VALKEY_URL: redis://127.0.0.1:6379
+      JWT_SECRET: e2e-ci-only-secret
+      COOKIE_SECURE: "false"
+      PORT: "3100"
+      API_PROXY_TARGET: http://127.0.0.1:3100
+      API_BASE_URL: http://127.0.0.1:3100
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Apply DB schema (TypeORM migrations)
+        run: npm run migration:run:local
+
+      - name: Run Playwright E2E
+        working-directory: frontend
+        run: npx playwright test
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: frontend/test-results/
+          retention-days: 7
+
   gitleaks:
     name: Gitleaks Secret Scan
     runs-on: ubuntu-latest

@@ -8,11 +8,13 @@ import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
 import { EventSummary } from "@/lib/events";
+import { useHydrated } from "@/lib/use-hydrated";
 
 export default function EventForm() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const hydrated = useHydrated();
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -48,6 +50,8 @@ export default function EventForm() {
 
   return (
     <form
+      method="POST"
+      data-hydrated={hydrated ? "true" : undefined}
       onSubmit={(e) => void onSubmit(e)}
       className="grid w-full max-w-lg grid-cols-2 gap-4"
     >
@@ -88,7 +92,7 @@ export default function EventForm() {
       )}
       <button
         type="submit"
-        disabled={submitting}
+        disabled={submitting || !hydrated}
         className="col-span-2 rounded bg-foreground px-4 py-2 text-background hover:opacity-80 disabled:opacity-50"
       >
         登録する
