@@ -112,14 +112,14 @@ EventBridge / SQS はリージョナルサービスで VPC 外にある。privat
 - DNS / ACM / HTTPS は重要だが、初回構築の失敗要因を増やすため、ネットワーク・データ層の確認と分ける。
 - ALB DNS name に対する HTTP smoke test で、アプリケーション経路の大半は検証できる。
 
-フロントエンドを後で作る場合:
+フロントエンド方式は [ADR-0011](../adr/0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md) で確定した:
 
-| フロント方式 | 配置 | staging 図での位置づけ |
+| フロント方式 | 配置 | 判断 |
 |---|---|---|
-| Static SPA / SSG | S3 + CloudFront | VPC 外。API は ALB を呼ぶ |
-| Next.js SSR / BFF | ECS service または別 compute | VPC 内 private subnet に配置し、ALB / CloudFront から到達させる候補 |
+| Static SPA / SSG | S3 + CloudFront | 不採用（コンテナ運用の学習・実践価値と OGP 用サーバーレンダリングを優先） |
+| **Next.js SSR（採用）** | ECS Fargate（private subnet）+ CloudFront 統合オリジン | `ticket-app-<env>.ticket-c2c.click` → CloudFront →（`/api/*` は API target group、その他は frontend target group）→ 既存 ALB。ALB の default action は API のまま維持し、`ticket-api-<env>` 直アクセスは無変更 |
 
-Next.js SSR が必要な場合は、Node.js runtime がリクエスト時に API / DB / cache と通信するため、単なる静的ホスティングではなく compute として扱う。
+Next.js SSR は Node.js runtime がリクエスト時に API と通信するため、静的ホスティングではなく compute（ecs-service モジュールの `ticket-c2c-<env>-frontend` サービス）として扱う。
 
 ## endpoint mode
 
