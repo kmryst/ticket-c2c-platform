@@ -322,6 +322,25 @@ resource "aws_iam_policy" "apply_infra" {
         Action   = "route53:ChangeResourceRecordSets"
         Resource = "*"
       },
+      {
+        # Aurora の manage_master_user_password（RDS 管理マスターシークレット）が
+        # DB クラスタ作成時に自動生成するシークレットの CRUD。
+        # AWS 公式ドキュメント（Aurora User Guide「Permissions required for Secrets Manager
+        # integration」）が明記する create/modify/restore 時の必須権限は
+        # kms:DescribeKey（ReadInfraServices の kms:Describe* で充足済み）、
+        # secretsmanager:CreateSecret、secretsmanager:TagResource の 3 つ
+        # （カスタム KMS キーを指定していないため kms:Decrypt 等は不要）。
+        # RDS が自動生成するシークレット名は "rds!cluster-<id>" 固定プレフィックスのため、
+        # そのパターンへ限定できる。DB クラスタ削除時のシークレット削除は RDS が
+        # 自身の権限で行うため、このロールに secretsmanager:DeleteSecret は不要。
+        Sid    = "RdsManagedSecret"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:TagResource",
+        ]
+        Resource = "arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:rds!*"
+      },
     ]
   })
 }
