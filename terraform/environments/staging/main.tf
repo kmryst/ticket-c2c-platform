@@ -281,6 +281,10 @@ module "alb" {
   enable_https          = local.https_enabled
   certificate_arn       = local.https_enabled ? aws_acm_certificate_validation.api[0].certificate_arn : null
   allowed_ingress_cidrs = var.alb_allowed_ingress_cidrs
+
+  # フロントエンド（ADR-0011）は CloudFront + 独自ドメインが前提のため https-dns モード限定。
+  # alb-http-only（初回構築 fallback）では frontend の入口ごと作らない。
+  enable_frontend = local.https_enabled
 }
 
 # API の公開 FQDN を ALB へ向ける（https-dns のみ）
@@ -501,6 +505,124 @@ module "observability" {
   log_group_names = [
     "/ecs/${var.name}-api",
     "/ecs/${var.name}-worker",
+    "/ecs/${var.name}-frontend",
   ]
   retention_in_days = 30
+}
+
+# ---------- frontend（Next.js SSR。ADR-0011 / Issue #146） ----------
+# CloudFront + 独自ドメインが前提のため、https-dns モードのときだけ作成する
+# （ECR リポジトリのみ、deploy workflow の push 先として常時作成する）。
+
+module "ecr_frontend" {
+  source = "../../modules/ecr"
+
+  name = "${var.name}-frontend"
+  # destroy 前提運用のためイメージ残存時も削除可にする
+  force_delete = true
+}
+
+locals {
+  app_fqdn = "${var.app_subdomain}.${var.hosted_zone_name}"
+}
+
+# CloudFront viewer certificate 用の ACM 証明書。us-east-1 でしか使えないため provider alias で発行する。
+resource "aws_acm_certificate" "app" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  domain_name       = local.app_fqdn
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_route53_record" "app_cert_validation" {
+  for_each = local.https_enabled ? {
+    for dvo in aws_acm_certificate.app[0].domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      type   = dvo.resource_record_type
+      record = dvo.resource_record_value
+    }
+  } : {}
+
+  zone_id         = data.aws_route53_zone.public[0].zone_id
+  name            = each.value.name
+  type            = each.value.type
+  records         = [each.value.record]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "app" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  certificate_arn         = aws_acm_certificate.app[0].arn
+  validation_record_fqdns = [for r in aws_route53_record.app_cert_validation : r.fqdn]
+}
+
+# frontend task role: AWS API を呼ばないため権限なしのロールを割り当てる（最小権限）。
+resource "aws_iam_role" "frontend_task" {
+  name               = "${var.name}-frontend-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+}
+
+module "frontend_service" {
+  count  = local.https_enabled ? 1 : 0
+  source = "../../modules/ecs-service"
+
+  name               = "${var.name}-frontend"
+  region             = var.region
+  cluster_arn        = aws_ecs_cluster.this.arn
+  cluster_name       = aws_ecs_cluster.this.name
+  image              = "${module.ecr_frontend.repository_url}:${var.image_tag}"
+  subnet_ids         = module.network.private_subnet_ids
+  security_group_ids = [aws_security_group.app.id]
+  execution_role_arn = aws_iam_role.execution.arn
+  task_role_arn      = aws_iam_role.frontend_task.arn
+  container_port     = 3000
+  target_group_arn   = module.alb.frontend_target_group_arn
+  log_group_name     = "/ecs/${var.name}-frontend"
+  # フロントエンドは負荷検証の対象外のため capacity profile に依存させず 1 task 固定にする。
+  desired_count             = 1
+  autoscaling_min_capacity  = null
+  autoscaling_max_capacity  = null
+  scheduled_scaling_actions = []
+
+  environment = {
+    PORT     = "3000"
+    HOSTNAME = "0.0.0.0"
+    # SSR のサーバー側 fetch は API の公開 FQDN を使う（NAT 経由。ADR-0011）。
+    API_BASE_URL = "https://${local.api_fqdn}"
+  }
+}
+
+# CloudFront 統合オリジン distribution（/api/* → API、その他 → frontend）。
+module "cloudfront" {
+  count  = local.https_enabled ? 1 : 0
+  source = "../../modules/cloudfront"
+
+  name                = "${var.name}-app"
+  aliases             = [local.app_fqdn]
+  acm_certificate_arn = aws_acm_certificate_validation.app[0].certificate_arn
+  # origin は ALB の生 DNS 名ではなく API の FQDN を使う（ALB 証明書と一致させるため）。
+  origin_domain_name = local.api_fqdn
+}
+
+# フロントエンドの公開 FQDN を CloudFront へ向ける
+resource "aws_route53_record" "app_alias" {
+  count = local.https_enabled ? 1 : 0
+
+  zone_id = data.aws_route53_zone.public[0].zone_id
+  name    = local.app_fqdn
+  type    = "A"
+
+  alias {
+    name                   = module.cloudfront[0].domain_name
+    zone_id                = module.cloudfront[0].hosted_zone_id
+    evaluate_target_health = false
+  }
 }

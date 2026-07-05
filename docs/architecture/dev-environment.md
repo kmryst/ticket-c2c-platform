@@ -39,6 +39,7 @@
 - 書き込み経路（購入）: API → Valkey 前段フィルタ → Aurora 条件付き更新 → EventBridge 発行。
 - 読み取り経路（検索・一覧）: API → OpenSearch。正本確認が必要な場合のみ Aurora。
 - 人気イベントの影響隔離は、(1) Valkey による売り切れ後の即時拒否、(2) Worker 分離による非同期処理の隔離、(3) API の DB コネクションプール上限、の 3 層で行う。SQS FIFO によるイベント単位直列化は測定データが出るまで導入しない（[ADR-0004](../adr/0004-defer-sqs-fifo.md)）。
+- フロントエンド（[ADR-0011](../adr/0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md)）: `ticket-app-dev.ticket-c2c.click` → CloudFront（us-east-1 ACM 証明書）→ 同一 ALB を 2 origin（api / frontend、custom header で識別）とする統合オリジン。`/api/*` は API target group、その他は frontend target group（ECS Fargate 上の Next.js SSR、専用 ECR イメージ）へ。ALB の default action は API のまま。`/_next/static/*` のみ edge で長期キャッシュ、SSR / API はキャッシュ無効 + Cookie 全転送。
 
 ## 採用 / 不採用 / 後回し
 
@@ -112,6 +113,7 @@ GitHub Environments / Variables:
 ## destroy の安全策
 
 - workflow_dispatch のみ + `confirm` 入力の完全一致 + protected Environment の三重ゲート。
+- CloudFront distribution の削除は無効化 + 削除で 15〜20 分以上かかるため、destroy workflow の所要時間はフロントエンド導入後に伸びている（正常挙動）。
 - Aurora は dev では `deletion_protection = false` / `skip_final_snapshot = true`（変数化し、staging / prod では必ず有効化する）。
 - state バケットは bootstrap state 管理 + `prevent_destroy` で destroy 対象外。
 
@@ -123,9 +125,10 @@ GitHub Environments / Variables:
 | NAT Gateway ×1 | ~$35 + 転送量 |
 | ALB | ~$20 |
 | Valkey cache.t4g.micro | ~$12 |
-| Fargate（API + Worker 各 0.25vCPU/0.5GB） | ~$20 |
+| Fargate（API + Worker + Frontend 各 0.25vCPU/0.5GB） | ~$30 |
 | Aurora Serverless v2（auto-pause） | アイドル時ほぼ $0 |
-| 合計 | **~$120/月** |
+| CloudFront | 従量課金（検証トラフィックのみ、ほぼ $0） |
+| 合計 | **~$130/月** |
 
 常駐コストの主因は OpenSearch / NAT / ALB。検証しない期間は destroy workflow で環境ごと削除する。
 

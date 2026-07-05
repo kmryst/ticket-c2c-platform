@@ -37,3 +37,32 @@ variable "allowed_ingress_cidrs" {
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
+
+variable "enable_frontend" {
+  description = <<-EOT
+    フロントエンド用 target group と listener rule を作るか（ADR-0011）。
+    CloudFront の frontend origin にだけ付く識別ヘッダー（frontend_header_name）を
+    listener rule で判定し、frontend target group へ転送する。
+    default action は API のまま維持されるため、既存の直接アクセス経路は変わらない。
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "frontend_container_port" {
+  description = "フロントエンドコンテナの待受ポート"
+  type        = number
+  default     = 3000
+}
+
+variable "frontend_header_name" {
+  description = "CloudFront frontend origin が付与する識別ヘッダー名（ADR-0011 決定 2）"
+  type        = string
+  default     = "x-ticket-dest"
+}
+
+variable "frontend_header_value" {
+  description = "識別ヘッダーの値。CloudFront module 側と一致させる"
+  type        = string
+  default     = "frontend"
+}

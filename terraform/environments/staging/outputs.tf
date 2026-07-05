@@ -50,3 +50,20 @@ output "api_base_url" {
   description = "smoke test 等が使う API の base URL。https-dns では公開 FQDN、alb-http-only では ALB DNS 名"
   value       = var.public_endpoint_mode == "https-dns" ? "https://${var.api_subdomain}.${var.hosted_zone_name}" : "http://${module.alb.dns_name}"
 }
+
+output "frontend_ecr_repository_url" {
+  value = module.ecr_frontend.repository_url
+}
+
+output "frontend_service_name" {
+  value = local.https_enabled ? module.frontend_service[0].service_name : null
+}
+
+output "cloudfront_distribution_id" {
+  value = local.https_enabled ? module.cloudfront[0].distribution_id : null
+}
+
+output "app_url" {
+  description = "フロントエンドの公開 HTTPS エンドポイント（https-dns のみ。ADR-0011）"
+  value       = local.https_enabled ? "https://${var.app_subdomain}.${var.hosted_zone_name}" : null
+}
