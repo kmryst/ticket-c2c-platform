@@ -19,9 +19,16 @@ import { FastifyRequest } from 'fastify';
 // JwtPayload は検証後に request へ添付する claim の型です。
 import { JwtPayload } from './auth.types';
 
+// AUTH_COOKIE_NAME は httpOnly Cookie でのトークン保持に使う Cookie 名です（ADR-0011、Issue #142）。
+import { AUTH_COOKIE_NAME } from './auth-cookie';
+
 // AuthenticatedRequest は JwtAuthGuard 通過後のリクエスト型です。
 // Fastify の request オブジェクトへ user プロパティを後付けするため、交差型で表現します。
-export type AuthenticatedRequest = FastifyRequest & { user?: JwtPayload };
+// cookies は @fastify/cookie（src/main.ts で登録）が parse した Cookie の map です。
+export type AuthenticatedRequest = FastifyRequest & {
+  user?: JwtPayload;
+  cookies?: Record<string, string | undefined>;
+};
 
 // JwtAuthGuard を NestJS の DI に登録します（handler 単位の @UseGuards で使います）。
 @Injectable()
@@ -37,12 +44,15 @@ export class JwtAuthGuard implements CanActivate {
       .switchToHttp()
       .getRequest<AuthenticatedRequest>();
 
-    // Authorization header から Bearer トークン部分だけを取り出します。
-    const token = extractBearerToken(request.headers.authorization);
+    // Authorization header の Bearer トークンを優先し、無ければ httpOnly Cookie（ADR-0011 決定 3）を見ます。
+    // Bearer 優先なのは、既存クライアント（k6 / smoke script）の明示的な指定を Cookie より尊重するためです。
+    const token =
+      extractBearerToken(request.headers.authorization) ??
+      request.cookies?.[AUTH_COOKIE_NAME];
 
-    // トークンがそもそも無い場合は 401 です。
+    // header にも Cookie にもトークンが無い場合は 401 です。
     if (!token) {
-      throw new UnauthorizedException('missing bearer token');
+      throw new UnauthorizedException('missing bearer token or auth cookie');
     }
 
     try {

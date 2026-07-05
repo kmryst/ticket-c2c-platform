@@ -19,14 +19,18 @@ function createJwtService(secret: string = TEST_SECRET): JwtService {
   });
 }
 
-// createContext は Authorization header だけを持つ最小の ExecutionContext を作ります。
+// createContext は Authorization header と Cookie だけを持つ最小の ExecutionContext を作ります。
 // Guard が触るのは switchToHttp().getRequest() だけなので、それ以外は実装しません。
-function createContext(authorization?: string): {
+function createContext(
+  authorization?: string,
+  cookies?: Record<string, string | undefined>,
+): {
   context: ExecutionContext;
   request: AuthenticatedRequest;
 } {
   const request = {
     headers: authorization ? { authorization } : {},
+    cookies,
   } as AuthenticatedRequest;
 
   const context = {
@@ -89,6 +93,46 @@ describe('JwtAuthGuard', () => {
     );
     // 検証に失敗したリクエストへ user が添付されないことも確認する。
     expect(request.user).toBeUndefined();
+  });
+
+  it('access_token Cookie の有効なトークンを通し、payload を request.user へ添付する', async () => {
+    const jwtService = createJwtService();
+    const guard = new JwtAuthGuard(jwtService);
+    const token = await jwtService.signAsync({ sub: USER_ID, email: EMAIL });
+    // Authorization header なし・Cookie のみ（フロントエンドの経路。ADR-0011 決定 3）。
+    const { context, request } = createContext(undefined, {
+      access_token: token,
+    });
+
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+    expect(request.user).toMatchObject({ sub: USER_ID, email: EMAIL });
+  });
+
+  it('Authorization header と Cookie が両方ある場合は Bearer を優先する', async () => {
+    const jwtService = createJwtService();
+    const guard = new JwtAuthGuard(jwtService);
+    const bearerToken = await jwtService.signAsync({
+      sub: USER_ID,
+      email: EMAIL,
+    });
+    // Cookie 側には不正なトークンを置き、Bearer が優先されることで通過するのを確認する。
+    const { context, request } = createContext(`Bearer ${bearerToken}`, {
+      access_token: 'not-a-jwt',
+    });
+
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+    expect(request.user).toMatchObject({ sub: USER_ID });
+  });
+
+  it('Cookie の不正なトークンは 401 を投げる', async () => {
+    const guard = new JwtAuthGuard(createJwtService());
+    const { context } = createContext(undefined, {
+      access_token: 'not-a-jwt',
+    });
+
+    await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
   });
 
   it('期限切れトークンは 401 を投げる', async () => {
