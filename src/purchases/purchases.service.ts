@@ -112,26 +112,57 @@ export class PurchasesService {
 
     // Valkey 前段フィルタです（technical-validation-plan の初期アーキテクチャ仮説）。
     // カウンタ上で売り切れなら PostgreSQL に到達させず即時拒否します。
-    // requestId 付きは idempotent replay の可能性があるため DB 判定へ流します。
-    const gate = input.requestId
-      ? ('unknown' as const)
-      : await this.inventoryCache.reserve(input.eventId, input.quantity);
+    // requestId の有無にかかわらず必ず前段フィルタを通します（production-readiness M-1）。
+    // かつては requestId 付きを無条件に DB 判定へ流していましたが、それでは
+    // ランダムな requestId を付けるだけで売り切れ後も Aurora へ到達できてしまうためです。
+    const reserveOutcome = await this.inventoryCache.reserve(
+      input.eventId,
+      input.quantity,
+    );
 
-    if (gate === 'sold_out') {
-      // 前段拒否は DB に履歴を残さない設計です（DB 保護がこのフィルタの目的のため）。
-      return {
-        purchaseId: null,
-        eventId: input.eventId,
-        buyerId: input.buyerId,
-        quantity: input.quantity,
-        status: 'rejected',
-        rejectionReason: 'sold_out_precheck',
-        remainingQuantity: null,
-      };
+    if (reserveOutcome === 'sold_out') {
+      // 売り切れ後の requestId 付きリクエストは、「DB へ確定済みの requestId」マーカーが
+      // Valkey にある場合だけ idempotent replay 候補として DB 判定へ流します。
+      // マーカーのない未知の requestId は売り切れ後の新規リクエストなので前段で拒否します。
+      const isReplayCandidate = input.requestId
+        ? await this.inventoryCache.wasRequestSeen(
+            input.buyerId,
+            input.eventId,
+            input.requestId,
+          )
+        : false;
+
+      if (!isReplayCandidate) {
+        // 前段拒否は DB に履歴を残さない設計です（DB 保護がこのフィルタの目的のため）。
+        return {
+          purchaseId: null,
+          eventId: input.eventId,
+          buyerId: input.buyerId,
+          quantity: input.quantity,
+          status: 'rejected',
+          rejectionReason: 'sold_out_precheck',
+          remainingQuantity: null,
+        };
+      }
     }
 
+    // sold_out から replay 候補として通過した場合は、在庫を新たに消費しない読み取り目的なので
+    // 'unknown' として DB 判定へ流します（既存 row の再読込で完結する想定）。
+    const gate: 'reserved' | 'unknown' =
+      reserveOutcome === 'reserved' ? 'reserved' : 'unknown';
+
+    // syncCounter の CAS ガード用に、DB 判定前のカウンタ version を控えます（M-2）。
+    // これ以降に並行リクエストがカウンタを変更した場合、古い DB 値での上書きは行われません。
+    const counterVersion = await this.inventoryCache.getCounterVersion(
+      input.eventId,
+    );
+
     try {
-      const result = await this.executePurchaseTransaction(input, gate);
+      const result = await this.executePurchaseTransaction(
+        input,
+        gate,
+        counterVersion,
+      );
 
       // 確定購入は EventBridge へ伝搬し、Worker が検索プロジェクションを更新します。
       if (result.status === 'confirmed') {
@@ -162,6 +193,9 @@ export class PurchasesService {
     input: ParsedPurchaseInput,
     // gate は前段フィルタの結果で、DB 判定後のカウンタ補正に使います。
     gate: 'reserved' | 'unknown',
+    // counterVersion は DB 判定前に控えたカウンタ version です（syncCounter の CAS ガード用）。
+    // null は Valkey 無効・エラーで、syncCounter による補正は行えないことを表します。
+    counterVersion: string | null,
   ): Promise<PurchaseResult> {
     // DB transaction を張るため、pool から専用 client を 1 つ借ります。
     const client = await this.database.connect();
@@ -200,6 +234,11 @@ export class PurchasesService {
       if (existingConfirmed?.rowCount) {
         // 読み取りだけで結果が確定したので transaction を正常終了します。
         await client.query('COMMIT');
+
+        // replay は在庫を新たに消費しないため、前段で reserve していた場合はカウンタを戻します。
+        if (gate === 'reserved') {
+          await this.inventoryCache.release(input.eventId, input.quantity);
+        }
 
         // 既存 row を API response の形に変換して返します。
         return toPurchaseResult(existingConfirmed.rows[0]);
@@ -275,6 +314,11 @@ export class PurchasesService {
             // 読み取りだけで結果が確定したので transaction を正常終了します。
             await client.query('COMMIT');
 
+            // replay は在庫を消費しないため、前段で reserve していた場合はカウンタを戻します。
+            if (gate === 'reserved') {
+              await this.inventoryCache.release(input.eventId, input.quantity);
+            }
+
             // 既存 rejected row を API response の形に変換して返します。
             return toPurchaseResult(existingRejected.rows[0]);
           }
@@ -328,19 +372,43 @@ export class PurchasesService {
       // 在庫更新と購入履歴 INSERT が両方成功したので transaction を確定します。
       await client.query('COMMIT');
 
-      // COMMIT 後に前段カウンタを DB の残在庫と揃えます（Valkey は正本ではないため上書きでよい）。
+      // COMMIT 後、requestId 付きの確定結果（confirmed / rejected）を Valkey に記録します（M-1）。
+      // 売り切れ後の再送は、このマーカーの有無で idempotent replay かどうかを前段で判別します。
+      if (input.requestId) {
+        await this.inventoryCache.markRequestSeen(
+          input.buyerId,
+          input.eventId,
+          input.requestId,
+        );
+      }
+
+      // COMMIT 後に前段カウンタを DB の残在庫と揃えます。
+      // 無条件の上書きは並行する reserve / release の効果を消すため（M-2）、
+      // DB 判定前に控えた version からカウンタが変わっていない場合だけ上書きします（CAS）。
       if (confirmed && gate === 'unknown' && remainingQuantityAfter !== null) {
         // 前段を通らず confirmed した場合、カウンタを DB 基準へ同期します。
-        await this.inventoryCache.syncCounter(
-          input.eventId,
-          remainingQuantityAfter,
-        );
+        // CAS が見送られた場合は、並行リクエスト側の変更を優先してそのままにします。
+        if (counterVersion !== null) {
+          await this.inventoryCache.syncCounter(
+            input.eventId,
+            remainingQuantityAfter,
+            counterVersion,
+          );
+        }
       } else if (!confirmed && gate === 'reserved') {
-        // 前段は在庫ありと判定したが DB は在庫不足だった場合、カウンタを DB 残在庫へ補正します。
-        await this.inventoryCache.syncCounter(
-          input.eventId,
-          rejectedRemaining ?? 0,
-        );
+        // 前段は在庫ありと判定したが DB は在庫不足だった場合の補正です。
+        // まず DB 残在庫での CAS 同期（カウンタと DB のずれも直せる）を試み、
+        // 並行変更で見送られた場合は、少なくとも自分の reserve 分をカウンタへ戻します。
+        const synced =
+          counterVersion !== null &&
+          (await this.inventoryCache.syncCounter(
+            input.eventId,
+            rejectedRemaining ?? 0,
+            counterVersion,
+          ));
+        if (!synced) {
+          await this.inventoryCache.release(input.eventId, input.quantity);
+        }
       }
 
       // 新規に作った purchase row を API response として返します。
@@ -392,6 +460,11 @@ export class PurchasesService {
 
           // 既存 confirmed row が読めたら、それを成功応答として返します。
           if (existingConfirmed.rowCount) {
+            // 自分の transaction は rollback 済みで在庫を消費していないため、
+            // 前段で reserve していた場合はカウンタを戻します。
+            if (gate === 'reserved') {
+              await this.inventoryCache.release(input.eventId, input.quantity);
+            }
             // 在庫を再更新せず、既存 row の内容だけを返します。
             return toPurchaseResult(existingConfirmed.rows[0]);
           }
@@ -409,6 +482,11 @@ export class PurchasesService {
 
           // 既存 rejected row が読めたら、それを rejected 応答として返します。
           if (existingRejected.rowCount) {
+            // 自分の transaction は rollback 済みで在庫を消費していないため、
+            // 前段で reserve していた場合はカウンタを戻します。
+            if (gate === 'reserved') {
+              await this.inventoryCache.release(input.eventId, input.quantity);
+            }
             // 新しい rejected row を作らず、既存 row の内容だけを返します。
             return toPurchaseResult(existingRejected.rows[0]);
           }

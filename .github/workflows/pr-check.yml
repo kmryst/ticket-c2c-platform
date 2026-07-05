@@ -21,6 +21,18 @@ jobs:
   backend-build:
     name: Backend Build
     runs-on: ubuntu-latest
+    # InventoryCacheService の単体テストは Lua script の実挙動を検証するため、
+    # ローカルの docker compose と同じ Valkey を service container として起動する（Issue #129）。
+    services:
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7
 
@@ -34,6 +46,11 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Unit tests
+        run: npm test
+        env:
+          TEST_VALKEY_URL: redis://127.0.0.1:6379
 
   terraform-validate:
     name: Terraform Format & Validate
