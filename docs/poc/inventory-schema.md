@@ -31,7 +31,7 @@
 | `created_at` | `TIMESTAMPTZ` | 作成日時 |
 | `updated_at` | `TIMESTAMPTZ` | 更新日時 |
 
-`purchases.buyer_id -> users.id` の FK は、購入 API の認証必須化（Issue #135）と同じタイミングで追加します。
+`purchases.buyer_id -> users.id` の FK は、購入 API の認証必須化（Issue #135）で追加済みです。認証導入前のローカル DB に残る過去データを壊さないよう、FK は `NOT VALID`（既存 row は未検査、新規書き込みには強制）で付与しています。
 
 ## `events`
 
@@ -77,7 +77,7 @@
 |---|---|---|
 | `id` | `UUID` | 購入 ID |
 | `event_id` | `UUID` | イベント ID |
-| `buyer_id` | `UUID` | 購入者 ID |
+| `buyer_id` | `UUID` | 購入者 ID。`users.id` への FK（`NOT VALID`）。JWT の `sub` claim 由来 |
 | `request_id` | `TEXT` | リクエスト ID。冪等性検証用 |
 | `quantity` | `INTEGER` | 購入枚数 |
 | `status` | `purchase_status` | `confirmed` または `rejected` |

@@ -111,7 +111,7 @@ export const options = {
 
 // ---------- リクエスト実装 ----------
 
-// uuid は buyerId 用の UUID v4 を生成します（外部 jslib に依存しないための簡易実装）。
+// uuid はメールアドレスの一意化用の UUID v4 を生成します（外部 jslib に依存しないための簡易実装）。
 function uuid() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
@@ -120,14 +120,44 @@ function uuid() {
   });
 }
 
+// setup は負荷試験の開始前に 1 回だけ実行され、返り値が各 VU の exec 関数へ渡されます。
+// 購入 API は認証必須になったため（ADR-0010 / Issue #135）、ここで負荷試験用の購入者を
+// signup し、全リクエストで使い回す JWT を取得します。トークンの有効期限は 1h で、
+// 各シナリオの DURATION（既定 60s）より十分長いため、試験中の再ログインは不要です。
+export function setup() {
+  const res = http.post(
+    `${BASE_URL}/auth/signup`,
+    JSON.stringify({
+      email: `load-${uuid()}@example.com`,
+      password: `load-pass-${uuid()}`,
+    }),
+    { headers: { 'Content-Type': 'application/json' } },
+  );
+
+  if (res.status !== 201) {
+    throw new Error(`load-test buyer signup failed: ${res.status} ${res.body}`);
+  }
+
+  const token = res.json('accessToken');
+  if (!token) {
+    throw new Error('signup response did not contain accessToken');
+  }
+
+  return { token };
+}
+
 // purchase は POST /events/:eventId/purchases を 1 回呼び、業務結果を集計します。
 // requestId は付けません（Valkey 前段フィルタを通る本番のホットパスを測るため）。
-function purchase(eventId, traffic) {
+// 購入者はトークンの sub claim から決まるため、buyerId は送りません。
+function purchase(eventId, traffic, token) {
   const res = http.post(
     `${BASE_URL}/events/${eventId}/purchases`,
-    JSON.stringify({ buyerId: uuid(), quantity: 1 }),
+    JSON.stringify({ quantity: 1 }),
     {
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
       tags: { traffic },
       timeout: '30s',
     },
@@ -160,12 +190,13 @@ function purchase(eventId, traffic) {
 }
 
 // backgroundPurchase は分散負荷用で、毎回ランダムな background イベントを選びます。
-export function backgroundPurchase() {
+// data は setup() の返り値（認証トークン）です。
+export function backgroundPurchase(data) {
   const eventId = BG_EVENT_IDS[Math.floor(Math.random() * BG_EVENT_IDS.length)];
-  purchase(eventId, 'background');
+  purchase(eventId, 'background', data.token);
 }
 
 // hotPurchase は集中負荷用で、常に同一の人気イベントを対象にします。
-export function hotPurchase() {
-  purchase(HOT_EVENT_ID, 'hot');
+export function hotPurchase(data) {
+  purchase(HOT_EVENT_ID, 'hot', data.token);
 }

@@ -104,11 +104,14 @@ export class PurchasesService {
   async createPurchase(
     // eventId は URL path parameter から渡された購入対象 event id です。
     eventId: string,
+    // buyerId は JwtAuthGuard 検証済みトークンの sub claim（users.id）です（ADR-0010、Issue #135）。
+    // クライアント申告の body 値ではなく、controller が認証済みユーザーから渡します。
+    buyerId: string,
     // body は HTTP request body です。controller では検証せず service でまとめて検証します。
     body: unknown,
   ): Promise<PurchaseResult> {
     // 入力を検証し、以降の処理で信用できる ParsedPurchaseInput に変換します。
-    const input = parsePurchaseInput(eventId, body);
+    const input = parsePurchaseInput(eventId, buyerId, body);
 
     // Valkey 前段フィルタです（technical-validation-plan の初期アーキテクチャ仮説）。
     // カウンタ上で売り切れなら PostgreSQL に到達させず即時拒否します。
@@ -625,6 +628,9 @@ function isConstraintViolation(error: unknown, constraint: string): boolean {
 function parsePurchaseInput(
   // eventId は URL path parameter 由来の外部入力です。
   eventId: string,
+  // buyerId は JWT の sub claim 由来です。自前発行トークンなので信頼度は高いものの、
+  // DB query に使う値なので防御的に UUID 形式だけは確認します。
+  buyerId: string,
   // body は HTTP request body 由来の外部入力です。
   body: unknown,
 ): ParsedPurchaseInput {
@@ -636,6 +642,12 @@ function parsePurchaseInput(
     throw new BadRequestException('eventId must be a UUID');
   }
 
+  // buyerId は自前トークンの sub なので通常 UUID ですが、DB query 前の防御として形式を確認します。
+  if (!UUID_PATTERN.test(buyerId)) {
+    // トークン payload の想定崩れはクライアント入力に起因するため 400 として返します。
+    throw new BadRequestException('authenticated user id must be a UUID');
+  }
+
   // body は null ではなく、配列でもなく、通常の object である必要があります。
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     // JSON object 以外は購入 request として扱えないため 400 を返します。
@@ -645,15 +657,12 @@ function parsePurchaseInput(
   // ここまでで body は object なので、PurchaseRequestBody として field を検証します。
   const requestBody = body as PurchaseRequestBody;
 
-  // buyerId は必須で、UUID 文字列である必要があります。
-  if (
-    // buyerId が string でなければ UUID として扱えません。
-    typeof requestBody.buyerId !== 'string' ||
-    // string でも UUID 形式でなければ拒否します。
-    !UUID_PATTERN.test(requestBody.buyerId)
-  ) {
-    // buyerId 不正はクライアント入力の問題なので 400 を返します。
-    throw new BadRequestException('buyerId must be a UUID');
+  // buyerId のクライアント申告は認証統合（Issue #135）で廃止しました。
+  // 黙って無視すると「指定した buyerId で買えたつもり」の誤解を生むため、明示的に 400 で知らせます。
+  if (requestBody.buyerId !== undefined) {
+    throw new BadRequestException(
+      'buyerId is no longer accepted: it is derived from the authenticated user',
+    );
   }
 
   // quantity は必須で、PostgreSQL INTEGER に収まる正の整数である必要があります。
@@ -691,8 +700,8 @@ function parsePurchaseInput(
   return {
     // eventId は UUID 検証済みです。
     eventId,
-    // buyerId は UUID 検証済みです。
-    buyerId: requestBody.buyerId,
+    // buyerId は認証済みユーザー（JWT sub）由来で、UUID 検証済みです。
+    buyerId,
     // quantity は正の整数かつ PostgreSQL INTEGER 範囲内です。
     quantity: requestBody.quantity,
     // requestId は undefined または空でない string です。

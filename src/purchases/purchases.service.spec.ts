@@ -1,6 +1,8 @@
 // ファイル概要:
 // このファイルは PurchasesService の requestId 分岐（production-readiness M-1）と
 // カウンタ補正の呼び分け（M-2）の単体テストです（Issue #129）。
+// 認証統合（ADR-0010、Issue #135）により buyerId は body ではなく
+// createPurchase の第 2 引数（JWT sub 由来）として渡します。
 // DB / Valkey / EventBridge はモックし、購入判定フローの分岐だけを検証します。
 // Lua script の実挙動は inventory-cache.service.spec.ts（実 Valkey）で検証します。
 
@@ -114,8 +116,7 @@ describe('PurchasesService の前段フィルタ分岐（M-1）', () => {
       reserveOutcome: 'sold_out',
     });
 
-    const result = await service.createPurchase(EVENT_ID, {
-      buyerId: BUYER_ID,
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
       quantity: 2,
     });
 
@@ -131,8 +132,7 @@ describe('PurchasesService の前段フィルタ分岐（M-1）', () => {
     });
 
     // 旧実装では requestId を付けるだけで前段フィルタを素通りして DB へ到達できた。
-    const result = await service.createPurchase(EVENT_ID, {
-      buyerId: BUYER_ID,
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
       quantity: 2,
       requestId: 'random-flood-request-id',
     });
@@ -155,8 +155,7 @@ describe('PurchasesService の前段フィルタ分岐（M-1）', () => {
       db: { existingConfirmed: true },
     });
 
-    const result = await service.createPurchase(EVENT_ID, {
-      buyerId: BUYER_ID,
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
       quantity: 2,
       requestId: 'original-request-id',
     });
@@ -182,8 +181,7 @@ describe('PurchasesService の前段フィルタ分岐（M-1）', () => {
       db: { existingConfirmed: true },
     });
 
-    const result = await service.createPurchase(EVENT_ID, {
-      buyerId: BUYER_ID,
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
       quantity: 2,
       requestId: 'original-request-id',
     });
@@ -199,8 +197,7 @@ describe('PurchasesService の前段フィルタ分岐（M-1）', () => {
       db: { inventoryUpdated: true, remainingAfterUpdate: 8 },
     });
 
-    const result = await service.createPurchase(EVENT_ID, {
-      buyerId: BUYER_ID,
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
       quantity: 2,
       requestId: 'first-request-id',
     });
@@ -221,8 +218,7 @@ describe('PurchasesService のカウンタ補正（M-2）', () => {
       db: { inventoryUpdated: true, remainingAfterUpdate: 9 },
     });
 
-    const result = await service.createPurchase(EVENT_ID, {
-      buyerId: BUYER_ID,
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
       quantity: 1,
     });
 
@@ -238,8 +234,7 @@ describe('PurchasesService のカウンタ補正（M-2）', () => {
       db: { inventoryUpdated: false, remainingOnReject: 1 },
     });
 
-    const result = await service.createPurchase(EVENT_ID, {
-      buyerId: BUYER_ID,
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
       quantity: 3,
     });
 
@@ -256,8 +251,7 @@ describe('PurchasesService のカウンタ補正（M-2）', () => {
       db: { inventoryUpdated: false, remainingOnReject: 1 },
     });
 
-    const result = await service.createPurchase(EVENT_ID, {
-      buyerId: BUYER_ID,
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
       quantity: 3,
     });
 
@@ -272,12 +266,39 @@ describe('PurchasesService のカウンタ補正（M-2）', () => {
     dbClient.query.mockRejectedValueOnce(new Error('connection lost'));
 
     await expect(
-      service.createPurchase(EVENT_ID, {
-        buyerId: BUYER_ID,
+      service.createPurchase(EVENT_ID, BUYER_ID, {
         quantity: 2,
       }),
     ).rejects.toThrow('connection lost');
 
     expect(inventoryCache.release).toHaveBeenCalledWith(EVENT_ID, 2);
+  });
+});
+
+describe('PurchasesService の認証統合（Issue #135）', () => {
+  it('body にクライアント申告の buyerId が含まれる場合は 400 を返す', async () => {
+    const { service, database } = createService({
+      reserveOutcome: 'reserved',
+    });
+
+    await expect(
+      service.createPurchase(EVENT_ID, BUYER_ID, {
+        buyerId: '99999999-9999-4999-8999-999999999999',
+        quantity: 1,
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    // validation で弾かれるため、前段フィルタにも DB にも到達しない。
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it('認証済みユーザー ID が UUID でない場合は 400 を返す', async () => {
+    const { service, database } = createService({
+      reserveOutcome: 'reserved',
+    });
+
+    await expect(
+      service.createPurchase(EVENT_ID, 'not-a-uuid', { quantity: 1 }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(database.connect).not.toHaveBeenCalled();
   });
 });
