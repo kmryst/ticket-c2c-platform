@@ -25,6 +25,25 @@ EXCEPTION
 END
 $$;
 
+-- users はメール+パスワード認証のアカウントを表す table です（ADR-0010、Issue #132）。
+-- purchases.buyer_id が指す「購入者の正本」をここに置きます。
+CREATE TABLE IF NOT EXISTS users (
+  -- id はユーザーを一意に識別する UUID 主キーです。JWT の sub claim にもこの値を入れます。
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- email はログイン ID です。大文字小文字の揺れは下の functional unique index で吸収します。
+  email TEXT NOT NULL,
+  -- password_hash は bcrypt（コストファクター 12）のハッシュ文字列です。平文は保存しません。
+  password_hash TEXT NOT NULL,
+  -- created_at はアカウント作成日時です。
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- updated_at はパスワード変更など row 更新時に上書きする日時です。
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- email の一意性は lower(email) の functional unique index で保証します。
+-- Foo@example.com と foo@example.com を別アカウントとして登録できてしまう事故を DB 側で防ぎます。
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_uq ON users (lower(email));
+
 -- events は販売対象になるイベントを表す table です。
 -- この PoC では購入対象としての event_id が主役ですが、後続の検索 PoC でも使えるよう最低限の属性を持ちます。
 CREATE TABLE IF NOT EXISTS events (
@@ -75,8 +94,9 @@ CREATE TABLE IF NOT EXISTS purchases (
   -- event_id は購入対象イベントです。
   -- ON DELETE RESTRICT により、購入履歴がある event をうっかり削除できないようにしています。
   event_id UUID NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
-  -- buyer_id は購入者を識別する UUID です。
-  -- buyer table はまだないため、この PoC では UUID 値だけを保存します。
+  -- buyer_id は購入者（users.id）を識別する UUID です。
+  -- users table は ADR-0010（Issue #132）で追加済みです。FK 制約の付与は
+  -- 認証 API の購入フロー統合（Issue #135）と同じタイミングで行います。
   buyer_id UUID NOT NULL,
   -- request_id はクライアントが任意で送る idempotency key です。
   -- 同じ buyer/event/request_id の再送を、後続の partial unique index で制御します。
