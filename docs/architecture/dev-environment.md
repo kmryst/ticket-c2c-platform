@@ -98,7 +98,10 @@ terraform/
 | `terraform-plan.yml` | PR（`terraform/**`） | fmt / validate / plan。plan 専用ロール |
 | `terraform-apply-dev.yml` | workflow_dispatch | plan → Environment `dev` の承認 → apply |
 | `terraform-destroy-dev.yml` | workflow_dispatch | `confirm` 入力（`destroy-dev` 完全一致）+ Environment `dev-destroy` の承認 |
-| `deploy-app-dev.yml` | workflow_dispatch | Docker build → ECR push → ECS 2 サービス更新 |
+| `deploy-backend-dev.yml` | workflow_dispatch | backend（api + worker）の Docker build → ECR push → ECS サービス更新。`run_migrations` 入力あり（L-11 / Issue #182 で `deploy-app-dev.yml` から分離） |
+| `deploy-frontend-dev.yml` | workflow_dispatch | frontend（Next.js SSR）の Docker build → ECR push → ECS サービス更新 |
+
+backend / frontend のデプロイは L-11（Issue #182）で分離した。イメージタグは各 workflow が自分のビルド時点のコミット short SHA を独立して使い、backend / frontend でタグを意図的に同期しない。ロールバック（`image_tag` 入力）も workflow 単位で独立して行う。デプロイ手順本体は reusable workflow `deploy-service.yml`（Issue #180）に共通化されている。
 
 GitHub Environments / Variables:
 

@@ -2,7 +2,7 @@
 # API サービスの現行タスク定義を ECS run-task + command override で流用し、
 # TypeORM versioned migrations（node dist/src/database/run-migrations.js）を適用する。
 # 新イメージの migration を「デプロイ前」に流したい場合は
-# deploy-app-dev.yml の run_migrations 入力を使う（migration 成功後にサービス更新される）。
+# deploy-backend-dev.yml の run_migrations 入力を使う（migration 成功後にサービス更新される）。
 name: db-migrate-dev
 
 on:
