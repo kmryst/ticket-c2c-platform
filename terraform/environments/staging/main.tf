@@ -628,7 +628,7 @@ resource "aws_wafv2_web_acl" "app" {
   provider = aws.us_east_1
 
   name        = "${var.name}-app-waf"
-  description = "CloudFront WebACL for ${var.name}-app (AWS managed rule groups, block mode)"
+  description = "CloudFront WebACL for ${var.name}-app - AWS managed rule groups in block mode"
   scope       = "CLOUDFRONT"
 
   default_action {
