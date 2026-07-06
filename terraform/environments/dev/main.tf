@@ -404,6 +404,10 @@ module "api_service" {
     # 長寿命 DB 接続 pool がローテーション後も追従できるよう、secret の ARN 自体を渡す。
     # ARN は機密情報ではないため environment（非 secret）でよい。
     DB_PASSWORD_SECRET_ARN = module.aurora.master_user_secret_arn
+    # 認証系レート制限のクライアント IP 解決（ADR-0012 / Issue #167）。
+    # CloudFront → ALB 構成のため、X-Forwarded-For の末尾 1 段（ALB が追記した CloudFront edge IP）を
+    # 飛ばした位置＝CloudFront が観測した viewer IP を採用する。
+    RATE_LIMIT_TRUSTED_PROXY_HOPS = "1"
   }
 
   secrets = {

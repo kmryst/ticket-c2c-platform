@@ -42,6 +42,14 @@ import {
 import { resolveClientIp } from './client-ip';
 // TokenClientMeta はリフレッシュトークン発行時に記録する調査用のクライアント情報です。
 import { TokenClientMeta } from './refresh-tokens.service';
+// AuthRateLimitService は signup / login / refresh の固定ウィンドウレート制限です（ADR-0012、Issue #167）。
+import {
+  AuthRateLimitService,
+  RateLimitedEndpoint,
+  RateLimitSubject,
+} from './rate-limit.service';
+// createHash は refresh のレート制限キー（トークンの SHA-256）を作るために使います。
+import { createHash } from 'node:crypto';
 
 // CookieRequest は @fastify/cookie が parse した Cookie map つきの request 型です。
 type CookieRequest = FastifyRequest & {
@@ -52,8 +60,11 @@ type CookieRequest = FastifyRequest & {
 // controller は薄く保ち、validation・hash・トークン発行・rotate の判断は AuthService に委譲します。
 @Controller('auth')
 export class AuthController {
-  // constructor injection で AuthService を受け取り、handler から呼び出します。
-  constructor(private readonly authService: AuthService) {}
+  // constructor injection で AuthService とレート制限 service を受け取り、handler から呼び出します。
+  constructor(
+    private readonly authService: AuthService,
+    private readonly rateLimit: AuthRateLimitService,
+  ) {}
 
   // @Post('signup') は POST /auth/signup をこの method に対応させます。
   @Post('signup')
@@ -69,6 +80,12 @@ export class AuthController {
     // NestJS の戻り値シリアライズに任せられます。
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
+    // レート制限（IP + メール単位）を最初に判定します。超過は 429 + Retry-After です（Issue #167）。
+    await this.enforceRateLimit(
+      'signup',
+      { ip: resolveClientIp(request), secondary: extractBodyEmail(body) },
+      reply,
+    );
     // メール重複（409）や入力不正（400）は service が NestJS exception として投げます。
     const result = await this.authService.signup(body, clientMeta(request));
     // フロントエンド用に httpOnly Cookie でも同じトークンを発行します（ADR-0011 決定 3、ADR-0012）。
@@ -91,6 +108,12 @@ export class AuthController {
     // signup と同じく Set-Cookie の書き込みにだけ reply を使います。
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
+    // レート制限（IP + メール単位）を最初に判定します。credential stuffing / 総当たりの緩和です（Issue #167）。
+    await this.enforceRateLimit(
+      'login',
+      { ip: resolveClientIp(request), secondary: extractBodyEmail(body) },
+      reply,
+    );
     // 資格情報不一致は service が 401 として投げます。
     const result = await this.authService.login(body, clientMeta(request));
     // httpOnly Cookie でも両トークンを発行します（ADR-0011 決定 3、ADR-0012）。
@@ -113,6 +136,20 @@ export class AuthController {
     // （JwtAuthGuard の Bearer 優先と同じ方針）。
     const rawToken =
       extractBodyRefreshToken(body) ?? request.cookies?.[REFRESH_COOKIE_NAME];
+
+    // レート制限（IP + トークン単位）を最初に判定します（Issue #167）。
+    // refresh の request にはメールが含まれないため、第 2 系統はトークンの SHA-256 を使います。
+    // 生トークンをキーに載せない（Valkey の SCAN 等から漏れない）ためのハッシュ化です。
+    await this.enforceRateLimit(
+      'refresh',
+      {
+        ip: resolveClientIp(request),
+        secondary: rawToken
+          ? createHash('sha256').update(rawToken).digest('hex')
+          : undefined,
+      },
+      reply,
+    );
 
     try {
       // rotate-on-use と reuse detection は service / RefreshTokensService が行います。
@@ -167,6 +204,59 @@ export class AuthController {
     // トークン発行後のユーザー削除に備え、DB を正として最新情報を返します。
     return this.authService.getMe(user);
   }
+
+  // enforceRateLimit はレート制限を判定し、超過時は Retry-After header を付けて 429 を投げます。
+  private async enforceRateLimit(
+    endpoint: RateLimitedEndpoint,
+    subject: RateLimitSubject,
+    reply: FastifyReply,
+  ): Promise<void> {
+    try {
+      await this.rateLimit.enforce(endpoint, subject);
+    } catch (error) {
+      // 429 の場合、service が body に入れた retryAfterSeconds を標準の Retry-After header にも反映します。
+      const retryAfter = extractRetryAfterSeconds(error);
+      if (retryAfter !== undefined) {
+        reply.header('Retry-After', String(retryAfter));
+      }
+      throw error;
+    }
+  }
+}
+
+// extractRetryAfterSeconds は AuthRateLimitService の 429 例外から待機秒数を取り出します。
+function extractRetryAfterSeconds(error: unknown): number | undefined {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'getResponse' in error &&
+    typeof (error as { getResponse: unknown }).getResponse === 'function'
+  ) {
+    const response = (error as { getResponse: () => unknown }).getResponse();
+    if (
+      typeof response === 'object' &&
+      response !== null &&
+      'retryAfterSeconds' in response &&
+      typeof (response as { retryAfterSeconds: unknown }).retryAfterSeconds ===
+        'number'
+    ) {
+      return (response as { retryAfterSeconds: number }).retryAfterSeconds;
+    }
+  }
+  return undefined;
+}
+
+// extractBodyEmail はレート制限のメール系統キー用に body から email を安全に取り出します。
+// validation 前の値なので string 以外は「無し」として扱い、大文字小文字の揺れは lower で吸収します。
+function extractBodyEmail(body: unknown): string | undefined {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    return undefined;
+  }
+
+  const email = (body as { email?: unknown }).email;
+  return typeof email === 'string' && email.length > 0
+    ? email.toLowerCase()
+    : undefined;
 }
 
 // clientMeta は request からリフレッシュトークン監査用のクライアント情報を取り出します。
