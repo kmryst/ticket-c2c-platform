@@ -19,6 +19,10 @@ export function getOptionalEnv(name: string): string | undefined {
 // リフレッシュトークンは未導入のため、漏洩影響と UX の折衷としてこの値に固定します。
 export const JWT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 
+// REFRESH_TOKEN_TTL_SECONDS はリフレッシュトークンの絶対寿命（14 日）です（ADR-0012）。
+// rotate-on-use で世代が進んでも、各トークンの expires_at は発行時点から 14 日で固定されます。
+export const REFRESH_TOKEN_TTL_SECONDS = 14 * 24 * 60 * 60;
+
 // JwtConfig は @nestjs/jwt の JwtModule.register にそのまま渡せる設定の部分集合です。
 export interface JwtConfig {
   // secret は HS256 の署名・検証に使う共有シークレットです。

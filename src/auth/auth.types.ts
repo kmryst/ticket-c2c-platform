@@ -46,14 +46,26 @@ export interface AuthenticatedUser {
   createdAt: string;
 }
 
-// AuthTokenResult は signup / login 成功時にクライアントへ返す形です。
+// AuthTokenResult は signup / login / refresh 成功時にクライアントへ返す形です。
 export interface AuthTokenResult {
   // accessToken は Authorization: Bearer <token> として送る JWT です。
   accessToken: string;
   // tokenType は OAuth2 の慣例に合わせた固定値です。
   tokenType: 'Bearer';
-  // expiresIn はトークンの有効期間（秒）です。クライアントの再ログイン判断に使えます。
+  // expiresIn はアクセストークンの有効期間（秒）です。クライアントの再ログイン判断に使えます。
   expiresIn: number;
+  // refreshToken は opaque なリフレッシュトークンです（ADR-0012、Issue #165）。
+  // ブラウザは httpOnly Cookie（refresh_token）を使うため、この field は非ブラウザクライアント向けです。
+  refreshToken: string;
+  // refreshExpiresIn はリフレッシュトークンの有効期間（秒）です。
+  refreshExpiresIn: number;
   // user は発行対象ユーザーの公開情報です。
   user: AuthenticatedUser;
+}
+
+// RefreshRequestBody は POST /auth/refresh の HTTP request body の生の形です。
+// ブラウザは Cookie を使うため body は空で、非ブラウザクライアントだけが refreshToken を送ります。
+export interface RefreshRequestBody {
+  // refreshToken はリフレッシュトークンの候補値です。validation 前なので unknown で受けます。
+  refreshToken?: unknown;
 }
