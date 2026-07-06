@@ -215,8 +215,20 @@ resource "aws_secretsmanager_secret" "jwt" {
 }
 
 resource "aws_secretsmanager_secret_version" "jwt" {
-  secret_id     = aws_secretsmanager_secret.jwt.id
-  secret_string = random_password.jwt_secret.result
+  secret_id = aws_secretsmanager_secret.jwt.id
+  # current/previous の JSON 構造（ADR-0012 / Issue #168）。
+  # 署名は常に current、検証は current → previous の順でフォールバックする。
+  # previous は初期状態では空（コード側は空文字を「無し」として扱う）。
+  secret_string = jsonencode({
+    current  = random_password.jwt_secret.result
+    previous = ""
+  })
+
+  # ローテーション（docs/runbooks/jwt-secret-rotation.md）は Secrets Manager 上の値を
+  # CLI で直接更新するため、Terraform が手動ローテーション後の値を初期値へ巻き戻さないようにする。
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
 }
 
 # ---------- app（実行層: ALB / ECS） ----------

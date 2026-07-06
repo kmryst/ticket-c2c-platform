@@ -18,6 +18,8 @@ import { JwtService } from '@nestjs/jwt';
 import { FastifyRequest } from 'fastify';
 // JwtPayload は検証後に request へ添付する claim の型です。
 import { JwtPayload } from './auth.types';
+// getJwtSecrets は current / previous のシークレット組を読みます（ADR-0012、Issue #168）。
+import { getJwtSecrets } from '../config';
 
 // AUTH_COOKIE_NAME は httpOnly Cookie でのトークン保持に使う Cookie 名です（ADR-0011、Issue #142）。
 import { AUTH_COOKIE_NAME } from './auth-cookie';
@@ -56,14 +58,51 @@ export class JwtAuthGuard implements CanActivate {
     }
 
     try {
-      // 署名（HS256 / JWT_SECRET）と exp をまとめて検証します。
+      // 署名（HS256 / current シークレット）と exp をまとめて検証します。
       const payload = await this.jwtService.verifyAsync<JwtPayload>(token);
       // 検証済み payload を request へ添付し、@CurrentUser() から参照できるようにします。
       request.user = payload;
       return true;
     } catch {
+      // current で失敗した場合、ローテーション移行期間中は previous シークレットでフォールバック検証します
+      // （ADR-0012、Issue #168）。previous 未設定なら従来どおり即 401 です。
+      const previousPayload = await this.verifyWithPreviousSecret(token);
+      if (previousPayload) {
+        request.user = previousPayload;
+        return true;
+      }
+
       // 署名不正・期限切れ・形式不正の詳細は攻撃者へのヒントになるため、同じ 401 に丸めます。
       throw new UnauthorizedException('invalid or expired token');
+    }
+  }
+
+  // verifyWithPreviousSecret は previous シークレットでの検証を試み、失敗時は null を返します。
+  // これによりシークレットローテーション直後（最大アクセストークン TTL の間）も、
+  // 旧シークレットで署名された発行済みトークンが即時無効にならず、無停止で切り替えられます。
+  private async verifyWithPreviousSecret(
+    token: string,
+  ): Promise<JwtPayload | null> {
+    let previous: string | undefined;
+    try {
+      previous = getJwtSecrets().previous;
+    } catch {
+      // JWT_SECRET の設定不備は起動時（getJwtConfig）に検出済みのはずなので、
+      // 検証時の読み取り失敗は「previous なし」として current のみの判定に倒します。
+      return null;
+    }
+    if (!previous) {
+      return null;
+    }
+
+    try {
+      // algorithms を HS256 に固定し、alg 混同（none / RS256 化）を防ぎます。
+      return await this.jwtService.verifyAsync<JwtPayload>(token, {
+        secret: previous,
+        algorithms: ['HS256'],
+      });
+    } catch {
+      return null;
     }
   }
 }
