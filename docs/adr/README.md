@@ -77,3 +77,5 @@ YYYY-MM-DD
 | [0009](./0009-migrate-to-project-domain.md) | プロジェクト専用ドメイン ticket-c2c.click へ移行する | Accepted |
 | [0010](./0010-email-password-jwt-auth.md) | メール+パスワード認証を自前実装（bcrypt + JWT + 自作 Guard）で行う | Accepted |
 | [0011](./0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md) | フロントエンドを Next.js SSR コンテナとして ECS でホスティングし、CloudFront 統合オリジン + httpOnly Cookie 認証を採用する | Accepted |
+| [0012](./0012-refresh-token-rotation-and-auth-hardening.md) | リフレッシュトークンのローテーションと認証の堅牢化（reuse detection・レート制限・シークレットローテーション） | Accepted |
+| [0013](./0013-restrict-alb-ingress-to-cloudfront-prefix-list.md) | ALB の ingress を CloudFront managed prefix list に限定し、直叩きを遮断する | Accepted |

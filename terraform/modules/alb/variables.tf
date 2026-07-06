@@ -33,9 +33,22 @@ variable "certificate_arn" {
 }
 
 variable "allowed_ingress_cidrs" {
-  description = "ALB への ingress を許可する CIDR（長時間の負荷検証時などに自分の IP へ絞る。ADR-0007）"
+  description = <<-EOT
+    ALB への ingress を許可する CIDR（ADR-0007）。空リストにすると CIDR ベースの ingress を作らず、
+    ingress_prefix_list_ids のみを送信元にする（ADR-0013 の CloudFront 限定構成）。
+  EOT
   type        = list(string)
   default     = ["0.0.0.0/0"]
+}
+
+variable "ingress_prefix_list_ids" {
+  description = <<-EOT
+    ALB への ingress を許可する managed prefix list ID（ADR-0013）。
+    CloudFront の origin-facing prefix list を渡すと、ALB へは CloudFront 経由でのみ到達でき、
+    直叩き（WAF 迂回・レート制限 IP バイパス）を遮断できる。空なら CIDR ベースのみを使う。
+  EOT
+  type        = list(string)
+  default     = []
 }
 
 variable "enable_frontend" {

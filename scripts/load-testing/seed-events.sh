@@ -5,7 +5,7 @@
 # k6 実行に必要な環境変数（HOT_EVENT_ID / BG_EVENT_IDS）を標準出力へ export 形式で出します。
 #
 # 使い方:
-#   ./scripts/load-testing/seed-events.sh https://ticket-api-dev.ticket-c2c.click
+#   ./scripts/load-testing/seed-events.sh https://ticket-app-dev.ticket-c2c.click/api
 #   （出力された export 行を eval するか、コピーして環境変数に設定する）
 
 set -euo pipefail

@@ -40,6 +40,7 @@
 - 読み取り経路（検索・一覧）: API → OpenSearch。正本確認が必要な場合のみ Aurora。
 - 人気イベントの影響隔離は、(1) Valkey による売り切れ後の即時拒否、(2) Worker 分離による非同期処理の隔離、(3) API の DB コネクションプール上限、の 3 層で行う。SQS FIFO によるイベント単位直列化は測定データが出るまで導入しない（[ADR-0004](../adr/0004-defer-sqs-fifo.md)）。
 - フロントエンド（[ADR-0011](../adr/0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md)）: `ticket-app-dev.ticket-c2c.click` → CloudFront（us-east-1 ACM 証明書）→ 同一 ALB を 2 origin（api / frontend、custom header で識別）とする統合オリジン。`/api/*` は API target group、その他は frontend target group（ECS Fargate 上の Next.js SSR、専用 ECR イメージ）へ。ALB の default action は API のまま。`/_next/static/*` のみ edge で長期キャッシュ、SSR / API はキャッシュ無効 + Cookie 全転送。
+- ALB 直叩き遮断（[ADR-0013](../adr/0013-restrict-alb-ingress-to-cloudfront-prefix-list.md)）: ALB セキュリティグループの ingress を CloudFront origin-facing managed prefix list に限定し、CloudFront を経由しない直接アクセスを遮断する。これにより WAF（L-12）の迂回経路と、認証レート制限の IP 判定バイパス（ADR-0012）を同時に塞ぐ。SSR のサーバー側 API fetch も ALB 直参照をやめ、CloudFront 経由（`ticket-app-dev.ticket-c2c.click/api`）にする。
 
 ## 採用 / 不採用 / 後回し
 

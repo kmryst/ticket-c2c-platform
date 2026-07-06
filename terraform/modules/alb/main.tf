@@ -3,14 +3,20 @@ resource "aws_security_group" "alb" {
   vpc_id      = var.vpc_id
 
   # HTTPS 有効時は 80（リダイレクト用）と 443 を開ける（ADR-0007）。
-  # allowed_ingress_cidrs で検証時に自分の IP へ絞れる。
+  # ingress の送信元は 2 系統をサポートする（ADR-0013）:
+  # - allowed_ingress_cidrs: CIDR ベース（検証時に自分の IP へ絞る等。alb-http-only の既定）
+  # - ingress_prefix_list_ids: managed prefix list ベース（CloudFront origin-facing に限定して
+  #   ALB 直叩きを遮断する。https-dns / dev の既定）
+  # 空リストの側は SG ルールに含めない（両方空だと SG ルールが送信元なしで invalid になるため、
+  # 呼び出し側で少なくとも一方を必ず渡す）。
   dynamic "ingress" {
     for_each = var.enable_https ? [80, 443] : [80]
     content {
-      from_port   = ingress.value
-      to_port     = ingress.value
-      protocol    = "tcp"
-      cidr_blocks = var.allowed_ingress_cidrs
+      from_port       = ingress.value
+      to_port         = ingress.value
+      protocol        = "tcp"
+      cidr_blocks     = length(var.allowed_ingress_cidrs) > 0 ? var.allowed_ingress_cidrs : null
+      prefix_list_ids = length(var.ingress_prefix_list_ids) > 0 ? var.ingress_prefix_list_ids : null
     }
   }
 

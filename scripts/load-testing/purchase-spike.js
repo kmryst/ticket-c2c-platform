@@ -17,7 +17,7 @@ import { Counter } from 'k6/metrics';
 
 // ---------- 設定（すべて環境変数で上書き可能） ----------
 
-// BASE_URL は対象 API のオリジンです（例: https://ticket-api-dev.ticket-c2c.click）。
+// BASE_URL は対象 API のオリジンです（例: https://ticket-app-dev.ticket-c2c.click/api）。
 const BASE_URL = __ENV.BASE_URL;
 // HOT_EVENT_ID は集中負荷をかける人気イベントの UUID です（spike モードで必須）。
 const HOT_EVENT_ID = __ENV.HOT_EVENT_ID || '';

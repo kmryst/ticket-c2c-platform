@@ -226,6 +226,13 @@ resource "aws_acm_certificate_validation" "api" {
   validation_record_fqdns = [for r in aws_route53_record.api_cert_validation : r.fqdn]
 }
 
+# CloudFront origin-facing の managed prefix list（ADR-0013）。
+# ALB の ingress をこの prefix list に限定し、CloudFront 経由以外の直叩きを遮断する。
+# prefix list ID はリージョンごとに異なり AWS が値を維持するため、名前引き data source で参照する。
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
 module "alb" {
   source = "../../modules/alb"
 
@@ -235,12 +242,17 @@ module "alb" {
 
   # 検証済み証明書の ARN を渡す（validation リソース経由にして、検証完了前にリスナーが作られないようにする）。
   # リスナー等の有無は plan 時に確定する enable_https で切り替える（unknown 値を count に使わない）。
-  enable_https          = true
-  certificate_arn       = aws_acm_certificate_validation.api.certificate_arn
-  allowed_ingress_cidrs = var.alb_allowed_ingress_cidrs
+  enable_https    = true
+  certificate_arn = aws_acm_certificate_validation.api.certificate_arn
+
+  # ADR-0013: ALB 直叩きを遮断し CloudFront 経由のみに限定する。
+  # CIDR ベースの ingress（既定は空）は使わず、CloudFront prefix list のみを送信元にする。
+  # var.alb_allowed_ingress_cidrs へ明示的に CIDR を渡した場合のみ、それも追加で許可する
+  #（一時的なデバッグ用の escape hatch）。
+  allowed_ingress_cidrs   = var.alb_allowed_ingress_cidrs
+  ingress_prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
 
   # フロントエンド用 target group と CloudFront 識別ヘッダーの listener rule（ADR-0011）。
-  # default action は API のまま維持され、ticket-api-dev への直接アクセスは変わらない。
   enable_frontend = true
 }
 
@@ -549,8 +561,9 @@ module "frontend_service" {
   environment = {
     PORT     = "3000"
     HOSTNAME = "0.0.0.0"
-    # SSR のサーバー側 fetch は API の公開 FQDN を使う（NAT 経由。ADR-0011）。
-    API_BASE_URL = "https://${local.api_fqdn}"
+    # SSR のサーバー側 fetch は CloudFront 経由の /api を使う（ADR-0013）。
+    # ALB 直叩きは prefix list 制限で遮断されるため、SSR も CloudFront + WAF を通す。
+    API_BASE_URL = "https://${local.app_fqdn}/api"
   }
 }
 
