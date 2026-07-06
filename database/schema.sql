@@ -101,9 +101,34 @@ CREATE TABLE IF NOT EXISTS events (
   location_latitude NUMERIC(9, 6),
   -- location_longitude は経度です。位置検索 PoC で使えるよう残しています。
   location_longitude NUMERIC(9, 6),
+  -- created_by はイベント作成者（users.id）です（L-10、Issue #194）。
+  -- 認証必須化後は JWT の sub claim から入ります。認証導入前の row は NULL のままです。
+  created_by UUID,
   -- created_at は DB に登録された日時です。履歴確認や並び替えに使えます。
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 認証導入前に作られた既存ローカル DB の events には created_by が無いため、後付けします。
+-- IF NOT EXISTS により、何度 schema.sql を流しても止まりません。
+ALTER TABLE events ADD COLUMN IF NOT EXISTS created_by UUID;
+
+-- events.created_by -> users.id の外部キーです（L-10、Issue #194）。
+-- 認証導入前のローカル DB には created_by が NULL の row があり得るため、
+-- NOT VALID で「既存 row は検査せず、新規の書き込みだけに強制」します。
+-- DO block により、何度 schema.sql を流しても duplicate_object で止まりません。
+DO $$
+BEGIN
+  ALTER TABLE events
+    ADD CONSTRAINT events_created_by_fkey
+    FOREIGN KEY (created_by) REFERENCES users(id)
+    -- イベントを登録した作成者をうっかり削除できないようにします（purchases.buyer_id の RESTRICT と同じ方針）。
+    ON DELETE RESTRICT
+    NOT VALID;
+EXCEPTION
+  -- すでに FK が存在する場合は、再適用として何もしません。
+  WHEN duplicate_object THEN NULL;
+END
+$$;
 
 -- ticket_inventory はイベントごとの在庫を表す table です。
 -- この table の remaining_quantity が、PoC における在庫の正本です。

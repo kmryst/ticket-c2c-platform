@@ -10,7 +10,14 @@ import {
   HttpCode,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
+// JwtPayload は JwtAuthGuard 検証済みトークンの claim 型です。
+import { JwtPayload } from '../auth/auth.types';
+// CurrentUser は request.user（検証済み payload）を handler 引数として受け取るデコレータです。
+import { CurrentUser } from '../auth/current-user.decorator';
+// JwtAuthGuard は Bearer トークン（または httpOnly Cookie）を検証する自作 Guard です（ADR-0010）。
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { EventsService } from './events.service';
 import { SearchParams } from '../search/search.service';
 
@@ -19,9 +26,16 @@ export class EventsController {
   constructor(private readonly eventsService: EventsService) {}
 
   @Post()
+  // イベント登録は認証必須です（production-readiness L-10、Issue #194）。
+  // C2C のため主催者ロールのような特別な権限は作らず、購入 API（Issue #135）と同じ
+  // 「JWT 認証済みの一般ユーザーなら誰でも」の認可レベルにします。
+  // 有効なトークンがないリクエストは handler 到達前に 401 になります。
+  @UseGuards(JwtAuthGuard)
   @HttpCode(201)
-  createEvent(@Body() body: unknown) {
-    return this.eventsService.createEvent(body);
+  createEvent(@CurrentUser() user: JwtPayload, @Body() body: unknown) {
+    // 作成者はクライアント申告ではなく、トークンの sub claim（users.id）を使います。
+    // body に作成者 ID 系のフィールドが混ざっていても無視されます（購入 API の buyer_id と同じ方針）。
+    return this.eventsService.createEvent(body, user.sub);
   }
 
   @Get()
