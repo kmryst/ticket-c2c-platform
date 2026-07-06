@@ -524,6 +524,23 @@ module "worker_service" {
   }
 }
 
+# refresh_tokens 期限切れクリーンアップの日次バッチ（L-9 残課題 / Issue #195）。
+# EventBridge Scheduler が API タスク定義（最新 ACTIVE リビジョン）を command override で
+# RunTask し、猶予（30 日）超過ファミリーの row を削除する。ログは API のロググループへ出る。
+module "refresh_token_cleanup" {
+  source = "../../modules/scheduled-task"
+
+  name                = "${var.name}-refresh-token-cleanup"
+  cluster_arn         = aws_ecs_cluster.this.arn
+  task_definition_arn = module.api_service.task_definition_arn
+  container_name      = "${var.name}-api"
+  command             = ["node", "dist/src/database/cleanup-refresh-tokens.js"]
+  subnet_ids          = module.network.private_subnet_ids
+  security_group_ids  = [aws_security_group.app.id]
+  execution_role_arn  = aws_iam_role.execution.arn
+  task_role_arn       = aws_iam_role.api_task.arn
+}
+
 # ---------- observability ----------
 
 module "observability" {
