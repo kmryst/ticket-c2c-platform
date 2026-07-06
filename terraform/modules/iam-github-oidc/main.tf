@@ -416,6 +416,17 @@ resource "aws_iam_policy" "apply_state_iam" {
         Resource = "*"
       },
       {
+        # CloudFront 用 WAFv2 WebACL（L-12 / Issue #184）の CRUD とログ設定。
+        # scope=CLOUDFRONT の WebACL は us-east-1 でのみ操作できる。WebACL ARN はランダム ID を
+        # 含むため名前プレフィックスで絞れない（CloudFrontWrite と同じ扱い）。
+        # 対象リソースは WebACL / マネージドルールグループ参照 / logging configuration に限られるため
+        # wafv2 全アクションを許可する。
+        Sid      = "Wafv2Write"
+        Effect   = "Allow"
+        Action   = "wafv2:*"
+        Resource = "*"
+      },
+      {
         # backend の state / lock オブジェクト操作（use_lockfile = true）と、bootstrap が管理する
         # バケット設定（versioning / SSE / public access block）の write。read は ReadStateBucket 参照。
         # バケット削除系は含めない（bootstrap root は prevent_destroy で保護しており destroy しない）。

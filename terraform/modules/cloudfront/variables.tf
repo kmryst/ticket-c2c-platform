@@ -18,6 +18,12 @@ variable "origin_domain_name" {
   type        = string
 }
 
+variable "web_acl_id" {
+  description = "distribution に関連付ける WAFv2 WebACL の ARN（scope=CLOUDFRONT、us-east-1。L-12）。null なら関連付けない"
+  type        = string
+  default     = null
+}
+
 variable "frontend_header_name" {
   description = "frontend origin に付与する識別ヘッダー名（alb モジュールの listener rule と一致させる）"
   type        = string

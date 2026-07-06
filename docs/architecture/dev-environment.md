@@ -128,7 +128,8 @@ GitHub Environments / Variables:
 | Fargate（API + Worker + Frontend 各 0.25vCPU/0.5GB） | ~$30 |
 | Aurora Serverless v2（auto-pause） | アイドル時ほぼ $0 |
 | CloudFront | 従量課金（検証トラフィックのみ、ほぼ $0） |
-| 合計 | **~$130/月** |
+| WAFv2 WebACL（L-12。マネージドルール 3 種） | ~$8（WebACL $5 + ルール 3 本 $3 + リクエスト従量） |
+| 合計 | **~$140/月** |
 
 常駐コストの主因は OpenSearch / NAT / ALB。検証しない期間は destroy workflow で環境ごと削除する。
 

@@ -554,6 +554,99 @@ module "frontend_service" {
   }
 }
 
+# ---------- WAF（L-12 / Issue #184） ----------
+
+# CloudFront distribution に関連付ける WAFv2 WebACL。
+# scope=CLOUDFRONT の WebACL は us-east-1 でのみ作成できるため、
+# CloudFront 用 ACM 証明書と同じく provider alias で作成する。
+# 無料の AWS マネージドルールグループ 3 種のみ使う（有料アドオンは使わない）。
+# rate-based rule は導入しない（IP レート制限はアプリ層 Valkey で担保する方針。ADR-0012）。
+resource "aws_wafv2_web_acl" "app" {
+  provider = aws.us_east_1
+
+  name        = "${var.name}-app-waf"
+  description = "CloudFront WebACL for ${var.name}-app (AWS managed rule groups, block mode)"
+  scope       = "CLOUDFRONT"
+
+  default_action {
+    allow {}
+  }
+
+  # マネージドルールグループはグループ内ルールのアクション（block）をそのまま使う
+  # （override_action = none。count に落とすと検知のみになりブロックされない）。
+  rule {
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 10
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.name}-waf-common"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "AWSManagedRulesKnownBadInputsRuleSet"
+    priority = 20
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.name}-waf-known-bad-inputs"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "AWSManagedRulesAmazonIpReputationList"
+    priority = 30
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesAmazonIpReputationList"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.name}-waf-ip-reputation"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${var.name}-app-waf"
+    sampled_requests_enabled   = true
+  }
+}
+
 # CloudFront 統合オリジン distribution（/api/* → API、その他 → frontend）。
 module "cloudfront" {
   source = "../../modules/cloudfront"
@@ -563,6 +656,8 @@ module "cloudfront" {
   acm_certificate_arn = aws_acm_certificate_validation.app.certificate_arn
   # origin は ALB の生 DNS 名ではなく API の FQDN を使う（ALB 証明書と一致させるため）。
   origin_domain_name = local.api_fqdn
+  # WAFv2 WebACL の関連付け（L-12 / Issue #184）。
+  web_acl_id = aws_wafv2_web_acl.app.arn
 }
 
 # フロントエンドの公開 FQDN を CloudFront へ向ける
