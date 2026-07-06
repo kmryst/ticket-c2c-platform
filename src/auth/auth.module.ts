@@ -19,6 +19,8 @@ import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 // RefreshTokensService はリフレッシュトークンの発行・rotate・失効の正本です（ADR-0012、Issue #165）。
 import { RefreshTokensService } from './refresh-tokens.service';
+// AuthRateLimitService は signup / login / refresh の固定ウィンドウレート制限です（ADR-0012、Issue #167）。
+import { AuthRateLimitService } from './rate-limit.service';
 
 // AuthModule は認証機能一式を AppModule へ提供します。
 // DatabaseService は DatabaseModule が @Global() で公開しているため、ここでの import は不要です。
@@ -33,7 +35,13 @@ import { RefreshTokensService } from './refresh-tokens.service';
   // controllers には、HTTP リクエストを受ける入口クラスを登録します。
   controllers: [AuthController],
   // providers には、DI で注入される service / guard クラスを登録します。
-  providers: [AuthService, UsersService, JwtAuthGuard, RefreshTokensService],
+  providers: [
+    AuthService,
+    UsersService,
+    JwtAuthGuard,
+    RefreshTokensService,
+    AuthRateLimitService,
+  ],
   // JwtAuthGuard と JwtService（JwtModule）を export し、
   // 他 module の controller（購入 API の認証必須化。Issue #135）からも同じ検証設定を使えるようにします。
   exports: [JwtAuthGuard, JwtModule],

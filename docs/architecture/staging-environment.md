@@ -398,7 +398,7 @@ staging normal を初回 apply する前に、少なくとも次を満たす。
 
 - **apply / deploy**: `terraform-apply-staging`（`capacity_profile=normal` / `public_endpoint_mode=https-dns`）成功 → `deploy-app-staging`（`run_migrations=true`）成功。frontend ECR push + SHA 固定タスク定義 + `services-stable` 待ちも成功。
 - **CloudFront ルーティング分割**: `https://ticket-app-staging.ticket-c2c.click/` が SSR トップ（`イベント一覧` を含む HTML）、`https://ticket-app-staging.ticket-c2c.click/api/events` が JSON（`[]`）、`.../events/new` が SSR HTML を返すことを確認。既存 `https://ticket-api-staging.ticket-c2c.click` への直接アクセスは無変更。
-- **認証（httpOnly Cookie）**: `POST /api/auth/signup` が 201 + `Set-Cookie: access_token=...; Max-Age=3600; Path=/; HttpOnly; Secure; SameSite=Lax`（dev/staging とも `Secure` 付与を確認。ローカルは `COOKIE_SECURE=false` で無効化）。
+- **認証（httpOnly Cookie）**: `POST /api/auth/signup` が 201 + `Set-Cookie: access_token=...; Max-Age=3600; Path=/; HttpOnly; Secure; SameSite=Lax`（dev/staging とも `Secure` 付与を確認。ローカルは `COOKIE_SECURE=false` で無効化）。※ Max-Age=3600 は本検証時点（2026-07-06、ADR-0011）の観測値。現行仕様はアクセストークン 15 分（Max-Age=900。ADR-0012、Issue #166）。
 - **購入フロー**: 在庫 2 に対し `quantity=2` の購入が `status: confirmed`（`remainingQuantity: 0`）、続く `quantity=1` が `status: rejected` / `rejectionReason: sold_out_precheck`。トークンなし購入は 401。
 - **Playwright E2E**（`E2E_BASE_URL=https://ticket-app-staging.ticket-c2c.click npx playwright test`）: signup→login→イベント登録→検索→購入 confirmed/sold_out→未ログイン誘導の 6 テストが **6/6 pass（11.3秒）**。
 - dev（`https://ticket-app-dev.ticket-c2c.click`）でも同一検証を実施し、6/6 pass（16.4秒）。スクリーンショットは `docs/architecture/screenshots/frontend-dev/`（トップ / signup / login / 検索結果 / 購入確定 / 売り切れ）。

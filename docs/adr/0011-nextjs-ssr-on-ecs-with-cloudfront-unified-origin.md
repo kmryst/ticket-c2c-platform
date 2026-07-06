@@ -20,7 +20,7 @@ Accepted
 
 1. **Next.js（App Router / TypeScript / Tailwind CSS）を SSR モードのコンテナとして ECS Fargate でホスティングする。** static export / S3+CloudFront 静的 SPA は採用しない。イメージは standalone output の multi-stage ビルドとし、既存の ecs-service モジュールを再利用して `ticket-c2c-<env>-frontend` サービスとして稼働させる。
 2. **CloudFront を前段に置き、統合オリジンのパスルーティングにする。** 公開名は `ticket-app-<env>.ticket-c2c.click`（ADR-0009 の `ticket-api-<env>` と対になる命名）。CloudFront は同一 ALB を 2 つの origin（api / frontend。frontend origin にのみ識別用 custom header を付与）として登録し、`/api/*` behavior → api origin、default behavior → frontend origin に振り分ける。ALB 側は custom header の listener rule で frontend target group へ転送し、**default action は従来どおり API target group のまま**にする（既存の `https://ticket-api-<env>` 直アクセス・smoke test・k6 は無変更で動く）。API は `/api` プレフィックス付きパスも受理する（起動時の Fastify hook でプレフィックスを除去）。第二 ALB は作らず、既存 ALB に target group と listener rule を追加する。
-3. **JWT は httpOnly Cookie（`access_token`、Secure / SameSite=Lax / Path=/ / Max-Age=3600）で保持する。** `POST /auth/login` / `POST /auth/signup` が `Set-Cookie` で発行し、`JwtAuthGuard` は Authorization: Bearer（優先）と Cookie の両方を受け付ける。JSON body の `accessToken` は既存クライアント（k6 / smoke script）互換のため維持する。
+3. **JWT は httpOnly Cookie（`access_token`、Secure / SameSite=Lax / Path=/ / Max-Age=3600）で保持する。**（注: Max-Age はその後 [ADR-0012](./0012-refresh-token-rotation-and-auth-hardening.md) のアクセストークン 15 分化により 900 へ変更。現行仕様は ADR-0012 を参照。） `POST /auth/login` / `POST /auth/signup` が `Set-Cookie` で発行し、`JwtAuthGuard` は Authorization: Bearer（優先）と Cookie の両方を受け付ける。JSON body の `accessToken` は既存クライアント（k6 / smoke script）互換のため維持する。
 
 ## 根拠
 
