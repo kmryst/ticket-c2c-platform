@@ -11,11 +11,11 @@ const TEST_SECRET = 'unit-test-jwt-secret';
 const USER_ID = '44444444-4444-4444-8444-444444444444';
 const EMAIL = 'buyer@example.com';
 
-// createJwtService は本番と同じ HS256 / 1h の署名設定でテスト用 JwtService を作ります。
+// createJwtService は本番と同じ HS256 / 15 分の署名設定でテスト用 JwtService を作ります。
 function createJwtService(secret: string = TEST_SECRET): JwtService {
   return new JwtService({
     secret,
-    signOptions: { algorithm: 'HS256', expiresIn: 3600 },
+    signOptions: { algorithm: 'HS256', expiresIn: 900 },
   });
 }
 
@@ -49,7 +49,7 @@ describe('JwtAuthGuard', () => {
 
     await expect(guard.canActivate(context)).resolves.toBe(true);
     expect(request.user).toMatchObject({ sub: USER_ID, email: EMAIL });
-    // exp が付与されている（expiresIn 1h 設定が効いている）ことも確認する。
+    // exp が付与されている（expiresIn 15 分設定が効いている）ことも確認する。
     expect(typeof request.user?.exp).toBe('number');
   });
 

@@ -108,7 +108,7 @@ describe('AuthService.signup', () => {
     // response にはトークンと公開ユーザー情報だけが含まれる（password_hash は返さない）。
     expect(result.accessToken).toBe(SIGNED_TOKEN);
     expect(result.tokenType).toBe('Bearer');
-    expect(result.expiresIn).toBe(3600);
+    expect(result.expiresIn).toBe(900);
     expect(result.refreshToken).toBe(REFRESH_TOKEN);
     expect(result.refreshExpiresIn).toBe(REFRESH_EXPIRES_IN);
     expect(result.user).toEqual({
