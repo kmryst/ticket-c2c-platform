@@ -37,20 +37,73 @@ export interface JwtConfig {
   };
 }
 
-// getJwtConfig は JWT_SECRET 環境変数から JWT 設定を組み立てます。
-// ローカル PoC では .env の JWT_SECRET、dev / staging では Secrets Manager の値を
-// ECS タスク定義の secrets 経由で注入します（既存の DB_PASSWORD と同じパターン。Issue #134）。
-// 認証を使うプロセスでシークレット未設定のまま起動する事故を防ぐため、未設定は起動時に失敗させます。
-export function getJwtConfig(): JwtConfig {
-  const secret = getOptionalEnv('JWT_SECRET');
-  if (!secret) {
+// JwtSecrets はローテーション対応の署名シークレットの組です（ADR-0012、Issue #168）。
+export interface JwtSecrets {
+  // current は署名（発行）と検証の第一候補に使う現行シークレットです。
+  current: string;
+  // previous はローテーション直後の移行期間だけ検証のフォールバックに使う旧シークレットです。
+  // 「previous を外せるのは、切替から最大アクセストークン TTL（15 分）経過後」が運用ルールです
+  // （docs/runbooks/jwt-secret-rotation.md）。
+  previous?: string;
+}
+
+// getJwtSecrets は JWT_SECRET 環境変数からシークレットの組を読みます。
+// 値は 2 形式を受け付けます:
+// - JSON: {"current": "...", "previous": "..."}（dev / staging の Secrets Manager。previous は空文字なら無し扱い）
+// - プレーン文字列（ローカル PoC の .env。後方互換）
+// JSON として始まる（{ で始まる）のに parse できない・current が無い値は、
+// 「壊れた設定で誤って全トークンを無効化した状態」で稼働しないよう起動時に失敗させます（fail fast）。
+export function getJwtSecrets(): JwtSecrets {
+  const raw = getOptionalEnv('JWT_SECRET');
+  if (!raw) {
     throw new Error(
       'JWT_SECRET is required. Copy .env.example to .env for local PoC runs.',
     );
   }
 
+  // { で始まらない値はプレーン文字列シークレット（後方互換）として扱います。
+  if (!raw.trimStart().startsWith('{')) {
+    return { current: raw };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      'JWT_SECRET looks like JSON but could not be parsed. Expected {"current": "...", "previous": "..."}.',
+    );
+  }
+
+  if (
+    parsed === null ||
+    typeof parsed !== 'object' ||
+    typeof (parsed as { current?: unknown }).current !== 'string' ||
+    ((parsed as { current: string }).current.length === 0)
+  ) {
+    throw new Error(
+      'JWT_SECRET JSON must contain a non-empty "current" string.',
+    );
+  }
+
+  const current = (parsed as { current: string }).current;
+  const previousRaw = (parsed as { previous?: unknown }).previous;
+  // previous は省略・空文字を「無し」として扱います（初期状態の Terraform 値は空文字）。
+  const previous =
+    typeof previousRaw === 'string' && previousRaw.length > 0
+      ? previousRaw
+      : undefined;
+
+  return { current, previous };
+}
+
+// getJwtConfig は JWT_SECRET 環境変数から JWT 設定を組み立てます。
+// ローカル PoC では .env の JWT_SECRET、dev / staging では Secrets Manager の値を
+// ECS タスク定義の secrets 経由で注入します（既存の DB_PASSWORD と同じパターン。Issue #134）。
+// 署名（発行）は常に current のみを使います。previous での検証フォールバックは JwtAuthGuard が行います。
+export function getJwtConfig(): JwtConfig {
   return {
-    secret,
+    secret: getJwtSecrets().current,
     signOptions: {
       algorithm: 'HS256',
       expiresIn: JWT_ACCESS_TOKEN_TTL_SECONDS,

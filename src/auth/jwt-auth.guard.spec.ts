@@ -135,6 +135,94 @@ describe('JwtAuthGuard', () => {
     );
   });
 
+  describe('シークレットローテーション（current/previous フォールバック。ADR-0012 / Issue #168）', () => {
+    const ORIGINAL_JWT_SECRET = process.env.JWT_SECRET;
+    const NEW_SECRET = 'rotated-new-secret';
+    const OLD_SECRET = 'rotated-old-secret';
+
+    afterEach(() => {
+      if (ORIGINAL_JWT_SECRET === undefined) {
+        delete process.env.JWT_SECRET;
+      } else {
+        process.env.JWT_SECRET = ORIGINAL_JWT_SECRET;
+      }
+    });
+
+    it('previous で署名された（ローテーション前の）トークンはフォールバック検証で通る', async () => {
+      // 環境は current=NEW / previous=OLD の移行期間状態。
+      process.env.JWT_SECRET = JSON.stringify({
+        current: NEW_SECRET,
+        previous: OLD_SECRET,
+      });
+      // Guard の JwtService は current で構成される（AuthModule の getJwtConfig 相当）。
+      const guard = new JwtAuthGuard(createJwtService(NEW_SECRET));
+
+      // 旧シークレットで署名済みの発行済みトークン。
+      const oldToken = await createJwtService(OLD_SECRET).signAsync({
+        sub: USER_ID,
+        email: EMAIL,
+      });
+      const { context, request } = createContext(`Bearer ${oldToken}`);
+
+      await expect(guard.canActivate(context)).resolves.toBe(true);
+      expect(request.user).toMatchObject({ sub: USER_ID, email: EMAIL });
+    });
+
+    it('previous 破棄後（ローテーション完了後）は旧シークレット署名トークンが 401 になる', async () => {
+      process.env.JWT_SECRET = JSON.stringify({
+        current: NEW_SECRET,
+        previous: '',
+      });
+      const guard = new JwtAuthGuard(createJwtService(NEW_SECRET));
+
+      const oldToken = await createJwtService(OLD_SECRET).signAsync({
+        sub: USER_ID,
+        email: EMAIL,
+      });
+      const { context } = createContext(`Bearer ${oldToken}`);
+
+      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+
+    it('current でも previous でもないシークレットの偽造トークンは 401 のまま', async () => {
+      process.env.JWT_SECRET = JSON.stringify({
+        current: NEW_SECRET,
+        previous: OLD_SECRET,
+      });
+      const guard = new JwtAuthGuard(createJwtService(NEW_SECRET));
+
+      const forged = await createJwtService('attacker-secret').signAsync({
+        sub: USER_ID,
+        email: EMAIL,
+      });
+      const { context } = createContext(`Bearer ${forged}`);
+
+      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+
+    it('previous で署名されていても期限切れなら 401（exp 検証はフォールバックでも有効）', async () => {
+      process.env.JWT_SECRET = JSON.stringify({
+        current: NEW_SECRET,
+        previous: OLD_SECRET,
+      });
+      const guard = new JwtAuthGuard(createJwtService(NEW_SECRET));
+
+      const expiredOldToken = await createJwtService(OLD_SECRET).signAsync(
+        { sub: USER_ID, email: EMAIL },
+        { expiresIn: -10 },
+      );
+      const { context } = createContext(`Bearer ${expiredOldToken}`);
+
+      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+  });
+
   it('期限切れトークンは 401 を投げる', async () => {
     const jwtService = createJwtService();
     const guard = new JwtAuthGuard(jwtService);
