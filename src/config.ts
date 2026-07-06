@@ -15,9 +15,10 @@ export function getOptionalEnv(name: string): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
 
-// JWT_ACCESS_TOKEN_TTL_SECONDS はアクセストークンの有効期限（1h）です（ADR-0010）。
-// リフレッシュトークンは未導入のため、漏洩影響と UX の折衷としてこの値に固定します。
-export const JWT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
+// JWT_ACCESS_TOKEN_TTL_SECONDS はアクセストークンの有効期限（15 分）です（ADR-0012、Issue #166）。
+// リフレッシュトークン導入（Issue #165）に伴い、漏洩時の有効窓を 1h から 1/4 に短縮しました。
+// UX はフロントエンドの silent refresh（期限切れ時に自動で /auth/refresh を呼ぶ）が維持します。
+export const JWT_ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 
 // REFRESH_TOKEN_TTL_SECONDS はリフレッシュトークンの絶対寿命（14 日）です（ADR-0012）。
 // rotate-on-use で世代が進んでも、各トークンの expires_at は発行時点から 14 日で固定されます。
@@ -31,7 +32,7 @@ export interface JwtConfig {
   signOptions: {
     // 鍵共有者が API 1 サービスのみのため、対称鍵の HS256 を使います（ADR-0010）。
     algorithm: 'HS256';
-    // expiresIn は秒数で指定します（JWT_ACCESS_TOKEN_TTL_SECONDS = 1h）。
+    // expiresIn は秒数で指定します（JWT_ACCESS_TOKEN_TTL_SECONDS = 15 分）。
     expiresIn: number;
   };
 }

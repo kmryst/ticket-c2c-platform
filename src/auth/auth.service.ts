@@ -17,7 +17,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 // bcrypt はパスワードの hash 化（コストファクター 12）と照合に使います。
 import { compare, hash } from 'bcrypt';
-// JWT_ACCESS_TOKEN_TTL_SECONDS は response の expiresIn に返す有効期限（1h）です。
+// JWT_ACCESS_TOKEN_TTL_SECONDS は response の expiresIn に返す有効期限（15 分）です。
 import { JWT_ACCESS_TOKEN_TTL_SECONDS } from '../config';
 // UsersService は users テーブルへの raw SQL アクセス層です。
 import { UserRow, UsersService } from '../users/users.service';
