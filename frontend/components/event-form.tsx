@@ -39,6 +39,12 @@ export default function EventForm() {
       router.push(`/events/${created!.eventId}`);
       router.refresh();
     } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        // イベント登録は認証必須です（L-10、Issue #194）。
+        // 未ログインはログインページへ誘導し、戻り先として現在のページを渡します（purchase-form と同じ方針）。
+        router.push("/login?next=/events/new");
+        return;
+      }
       setError(e instanceof ApiError ? e.message : "通信に失敗しました");
     } finally {
       setSubmitting(false);

@@ -46,7 +46,10 @@ export class EventsService {
   ) {}
 
   // createEvent はイベントと初期在庫を 1 transaction で作成します。
-  async createEvent(body: unknown): Promise<EventSummary> {
+  // createdBy は JwtAuthGuard 検証済みトークンの sub claim（users.id）です（L-10、Issue #194）。
+  // body 由来の値は parseCreateEventInput が定義済みフィールドだけを取り出すため、
+  // クライアントが作成者 ID 系のフィールドを body に混ぜても created_by には影響しません。
+  async createEvent(body: unknown, createdBy: string): Promise<EventSummary> {
     const input = parseCreateEventInput(body);
     const client = await this.database.connect();
 
@@ -56,8 +59,8 @@ export class EventsService {
 
       const inserted = await client.query<EventInsertRow>(
         `
-          INSERT INTO events (title, event_type, starts_at, location_latitude, location_longitude)
-          VALUES ($1, $2, $3, $4, $5)
+          INSERT INTO events (title, event_type, starts_at, location_latitude, location_longitude, created_by)
+          VALUES ($1, $2, $3, $4, $5, $6)
           RETURNING id, created_at
         `,
         [
@@ -66,6 +69,7 @@ export class EventsService {
           input.startsAt,
           input.latitude,
           input.longitude,
+          createdBy,
         ],
       );
       eventId = inserted.rows[0].id;
