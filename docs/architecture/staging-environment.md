@@ -404,6 +404,22 @@ staging normal を初回 apply する前に、少なくとも次を満たす。
 - dev（`https://ticket-app-dev.ticket-c2c.click`）でも同一検証を実施し、6/6 pass（16.4秒）。スクリーンショットは `docs/architecture/screenshots/frontend-dev/`（トップ / signup / login / 検索結果 / 購入確定 / 売り切れ）。
 - 検証後、dev / staging とも destroy 済み（下記コスト表・destroy 手順は ADR-0008 のエフェメラル運用を継続）。
 
+## L-9 staging 実地検証（ADR-0012、Issue #178、2026-07-06）
+
+dev で実装・検証済みの L-9（リフレッシュトークン rotation / reuse detection / レート制限 / JWT シークレット current/previous、Issue #163〜#171、PR #164〜#176）を staging 環境の実体（terraform state・稼働中 ECS タスク）へ反映し、dev と同水準の実地検証を行った。
+
+- **apply / deploy**: `terraform-apply-staging`（`capacity_profile=normal` / `public_endpoint_mode=https-dns`）成功 → `deploy-app-staging`（`run_migrations=true`）成功。migration ログで `AddRefreshTokens1783307740648` の適用を確認。
+- **rotate-on-use**: `POST /auth/refresh` を実行するたびにリフレッシュトークンが新しい値へローテーションすることを確認（旧トークンと新トークンが異なる）。
+- **reuse detection**: 使用済み（ローテーション済み）リフレッシュトークンを再提示すると 401 になり、同一トークンファミリーの他の（まだ有効なはずだった）ローテーション後トークンでの refresh も以降すべて 401 になることを確認（ファミリー全失効）。
+- **logout 失効**: signup 直後のリフレッシュトークンで logout し、同トークンでの refresh が 401 になることを確認。
+- **レート制限**: signup/login/refresh のレート制限を実測した。
+  - login は同一メールへの誤パスワードログインを 11 回送ると 11 回目が 429（メール単位の第 2 系統が機能）。
+  - signup の IP 単位レート制限は、CloudFront 経由の実トラフィック経路（`https://ticket-app-staging.ticket-c2c.click/api/auth/signup`）に対しては 11 回目で 429 + `Retry-After` header を確認できたが、API ドメイン直叩き（`https://ticket-api-staging.ticket-c2c.click/auth/signup`、CloudFront を経ない）では 11 回連続 201 となり IP 判定が効かなかった。これは `RATE_LIMIT_TRUSTED_PROXY_HOPS=1` が CloudFront → ALB の 1 hop を前提にしているためで、ADR-0012 に記載済みの既知の制約どおりであり dev の実測結果とも一致する。
+- **JWT シークレット current/previous ローテーション**: `docs/runbooks/jwt-secret-rotation.md` の手順で Secrets Manager 上の `ticket-c2c-staging-jwt-secret` を実際にローテーションした（値は asm-exec 経由で agent に露出させずに操作）。ローテーション直後（`force-new-deployment` で API 再起動後）は、旧シークレット署名のアクセストークンが `previous` フォールバックで `GET /auth/me` 200、新規ログインのトークンも `current` 署名で 200。続けて `previous` を破棄して再起動すると、旧トークンは 401、新トークンは 200 のままとなり、無停止ローテーションの想定どおりの挙動を確認した。
+- **Playwright E2E**（`E2E_BASE_URL=https://ticket-app-staging.ticket-c2c.click npx playwright test e2e/user-flow.spec.ts`）: signup→logout/login→イベント登録→検索→購入 confirmed/sold_out→silent refresh→未ログイン誘導の 7 テストが **7/7 pass（11.7秒）**。
+- **staging-smoke-test.yml**: `deploy-app-staging` のローリング更新が steady state に達する前に実行した初回は、`GET /events/search` の projection 反映待ちがタイムアウトして失敗した。worker ログを確認したところ、新旧 worker タスクが一時的に併存し、同一イベントへの購入プロジェクション更新の処理順が入れ替わったことが原因（DB 側の在庫・oversold 防止は正常。他の smoke test アサーションは全部 PASS）。これは ADR-0004（SQS Standard を採用し順序を保証しない設計判断）で許容しているトレードオフの顕在化であり、L-9 のリグレッションではない。ECS サービスが steady state に達したことを確認してから再実行し、成功した。**今後の運用上の教訓**: デプロイ直後にテストを実行する場合は `aws ecs describe-services` で `running == desired` かつ最新イベントが `has reached a steady state` になっていることを確認してから smoke test / E2E を実行する。将来的に worker 側でイベント単位の処理順序を保証すべきかは、現時点では新規課題化せず記録に留める。
+- 検証後、staging は destroy 済み（destroy 後確認は「destroy 後確認」節のとおり実施）。
+
 ## production-readiness.md との関係
 
 このドキュメントは staging 自体の設計正本です。
