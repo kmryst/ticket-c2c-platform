@@ -53,6 +53,11 @@ report "ElastiCache replication group" "$(aws elasticache describe-replication-g
 report "OpenSearch domain" "$(aws opensearch list-domain-names --region "$region" \
 	--query "DomainNames[?starts_with(DomainName, '${prefix}')].DomainName" --output text)"
 
+# EventBridge Scheduler schedule（L-9 残課題 / Issue #195。課金は起動時のみだが、
+# destroy 漏れがあれば孤立した ECS RunTask 定期実行が残り続けるため検出対象にする）。
+report "EventBridge Scheduler schedule" "$(aws scheduler list-schedules --region "$region" \
+	--query "Schedules[?starts_with(Name, '${prefix}')].Name" --output text)"
+
 # ECS cluster / service（cluster 名一致で判定）
 ecs_clusters="$(aws ecs list-clusters --region "$region" --query 'clusterArns' --output text |
 	tr '\t' '\n' | awk -F'/' -v p="$prefix" '$NF ~ "^"p {print $NF}' | tr '\n' ' ')"

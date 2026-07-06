@@ -170,6 +170,9 @@ resource "aws_iam_policy" "apply_infra" {
           "rds:List*",
           "route53:Get*",
           "route53:List*",
+          "scheduler:Describe*",
+          "scheduler:Get*",
+          "scheduler:List*",
           "secretsmanager:Describe*",
           "secretsmanager:List*",
           "sqs:Get*",
@@ -293,6 +296,11 @@ resource "aws_iam_policy" "apply_infra" {
           "logs:Put*",
           "logs:Tag*",
           "logs:Untag*",
+          "scheduler:CreateSchedule",
+          "scheduler:DeleteSchedule",
+          "scheduler:TagResource",
+          "scheduler:UntagResource",
+          "scheduler:UpdateSchedule",
           "sqs:Add*",
           "sqs:Create*",
           "sqs:Delete*",
@@ -307,6 +315,9 @@ resource "aws_iam_policy" "apply_infra" {
           "arn:aws:events:${local.region}:${local.account_id}:event-bus/${var.managed_resource_name_prefix}*",
           "arn:aws:events:${local.region}:${local.account_id}:rule/${var.managed_resource_name_prefix}*",
           "arn:aws:logs:${local.region}:${local.account_id}:log-group:/ecs/${var.managed_resource_name_prefix}*",
+          # EventBridge Scheduler のスケジュール（L-9 残課題 / Issue #195）。schedule group 未指定時は
+          # "default" group に作られる（terraform/modules/scheduled-task）。
+          "arn:aws:scheduler:${local.region}:${local.account_id}:schedule/default/${var.managed_resource_name_prefix}*",
           "arn:aws:sqs:${local.region}:${local.account_id}:${var.managed_resource_name_prefix}*",
         ]
       },
@@ -567,6 +578,20 @@ resource "aws_iam_policy" "apply_state_iam" {
         Condition = {
           StringEquals = {
             "iam:PassedToService" = "ecs-tasks.amazonaws.com"
+          }
+        }
+      },
+      {
+        # aws_scheduler_schedule 作成時、EventBridge Scheduler が引き受ける実行ロール
+        # （terraform/modules/scheduled-task の aws_iam_role.scheduler）の受け渡し
+        # （L-9 残課題 / Issue #195）。呼び出し元（Terraform apply role）に PassRole が必要。
+        Sid      = "PassRolesToScheduler"
+        Effect   = "Allow"
+        Action   = "iam:PassRole"
+        Resource = local.managed_role_arn
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "scheduler.amazonaws.com"
           }
         }
       },
