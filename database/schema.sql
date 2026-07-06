@@ -44,6 +44,48 @@ CREATE TABLE IF NOT EXISTS users (
 -- Foo@example.com と foo@example.com を別アカウントとして登録できてしまう事故を DB 側で防ぎます。
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_uq ON users (lower(email));
 
+-- refresh_tokens はリフレッシュトークン（opaque、ADR-0012、Issue #163）の失効状態の正本です。
+-- 生トークンは保存せず SHA-256 hash のみ保存するため、DB が漏洩しても元トークンは復元できません。
+-- rotate-on-use と reuse detection（ファミリー失効）に必要な系譜情報をこのテーブルで追跡します。
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  -- id はトークン row を一意に識別する UUID 主キーです。系譜（parent / replaced_by）の参照にも使います。
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- user_id はトークンの持ち主です。ユーザー削除時はトークンも一括で消えます。
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  -- family_id は login / signup ごとに採番するトークンファミリーの識別子です。
+  -- rotate で世代が進んでも family_id は引き継がれ、reuse detection の失効単位になります。
+  family_id UUID NOT NULL,
+  -- token_hash は opaque トークン（256bit ランダム値）の SHA-256 hash（hex 64 文字）です。
+  token_hash TEXT NOT NULL,
+  -- parent_token_id は rotate 元のトークンです。初回発行（login / signup）では NULL です。
+  parent_token_id UUID REFERENCES refresh_tokens(id),
+  -- replaced_by_token_id は rotate でこのトークンを置き換えた新トークンです。未使用なら NULL です。
+  replaced_by_token_id UUID REFERENCES refresh_tokens(id),
+  -- issued_at はトークン発行日時です。
+  issued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- expires_at はトークンの絶対期限（発行から 14 日。ADR-0012）です。超過は reuse とは扱いません。
+  expires_at TIMESTAMPTZ NOT NULL,
+  -- used_at は rotate-on-use でこのトークンが消費された日時です。消費済みトークンの再提示は盗用兆候です。
+  used_at TIMESTAMPTZ,
+  -- revoked_at はこのトークンが無効化された日時です（logout / reuse 検知によるファミリー失効）。
+  revoked_at TIMESTAMPTZ,
+  -- revoked_reason は無効化の理由（'logout' / 'reuse_detected' など）です。監査・調査用に残します。
+  revoked_reason TEXT,
+  -- created_ip はトークン発行時のクライアント IP（trusted-hops 解決後）です。盗用調査の手がかりに使います。
+  created_ip TEXT,
+  -- created_user_agent はトークン発行時の User-Agent です。同じく調査用の補助情報です。
+  created_user_agent TEXT
+);
+
+-- token_hash は提示されたトークンの照合キーであり、一意である必要があります。
+CREATE UNIQUE INDEX IF NOT EXISTS refresh_tokens_token_hash_uq ON refresh_tokens (token_hash);
+
+-- family_id はファミリー失効（reuse detection / logout）の UPDATE 条件に使います。
+CREATE INDEX IF NOT EXISTS refresh_tokens_family_idx ON refresh_tokens (family_id);
+
+-- user_id はユーザー単位の調査・将来の「ログイン中セッション一覧」に使います。
+CREATE INDEX IF NOT EXISTS refresh_tokens_user_idx ON refresh_tokens (user_id);
+
 -- events は販売対象になるイベントを表す table です。
 -- この PoC では購入対象としての event_id が主役ですが、後続の検索 PoC でも使えるよう最低限の属性を持ちます。
 CREATE TABLE IF NOT EXISTS events (
