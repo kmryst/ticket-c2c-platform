@@ -47,8 +47,13 @@ output "worker_service_name" {
 }
 
 output "api_base_url" {
-  description = "smoke test 等が使う API の base URL。https-dns では公開 FQDN、alb-http-only では ALB DNS 名"
-  value       = var.public_endpoint_mode == "https-dns" ? "https://${var.api_subdomain}.${var.hosted_zone_name}" : "http://${module.alb.dns_name}"
+  description = <<-EOT
+    smoke test 等が使う API の base URL。
+    https-dns では CloudFront 経由の app FQDN + /api（ADR-0013 で ALB 直叩きを遮断したため、
+    外部からの API アクセスは CloudFront の /api/* 経路に限られる）。
+    alb-http-only では従来どおり ALB DNS 名（CloudFront なし）。
+  EOT
+  value       = var.public_endpoint_mode == "https-dns" ? "https://${var.app_subdomain}.${var.hosted_zone_name}/api" : "http://${module.alb.dns_name}"
 }
 
 output "frontend_ecr_repository_url" {

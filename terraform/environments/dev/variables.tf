@@ -47,9 +47,13 @@ variable "api_subdomain" {
 }
 
 variable "alb_allowed_ingress_cidrs" {
-  description = "ALB への ingress を許可する CIDR。長時間の負荷検証時などに自分の IP へ絞る（ADR-0007）"
+  description = <<-EOT
+    ALB への ingress を CIDR ベースで追加許可する（ADR-0007）。
+    ADR-0013 で ALB は CloudFront origin-facing prefix list に限定したため、既定は空にする。
+    一時的なデバッグで自分の IP を直接許可したい場合のみ CIDR を渡す（escape hatch）。
+  EOT
   type        = list(string)
-  default     = ["0.0.0.0/0"]
+  default     = []
 }
 
 variable "app_subdomain" {

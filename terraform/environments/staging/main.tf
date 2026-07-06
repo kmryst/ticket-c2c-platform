@@ -281,6 +281,13 @@ resource "aws_acm_certificate_validation" "api" {
   validation_record_fqdns = [for r in aws_route53_record.api_cert_validation : r.fqdn]
 }
 
+# CloudFront origin-facing の managed prefix list（ADR-0013）。
+# https-dns モードで ALB の ingress をこの prefix list に限定し、直叩きを遮断する。
+# data source は常に読めるが（コスト無し）、実際に使うのは https_enabled のときだけ。
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
 module "alb" {
   source = "../../modules/alb"
 
@@ -290,9 +297,13 @@ module "alb" {
 
   # 検証済み証明書の ARN を渡す（validation リソース経由にして、検証完了前にリスナーが作られないようにする）。
   # リスナー等の有無は plan 時に確定する enable_https で切り替える（unknown 値を count に使わない）。
-  enable_https          = local.https_enabled
-  certificate_arn       = local.https_enabled ? aws_acm_certificate_validation.api[0].certificate_arn : null
-  allowed_ingress_cidrs = var.alb_allowed_ingress_cidrs
+  enable_https    = local.https_enabled
+  certificate_arn = local.https_enabled ? aws_acm_certificate_validation.api[0].certificate_arn : null
+
+  # ADR-0013: https-dns（CloudFront あり）では ALB 直叩きを CloudFront prefix list で遮断する。
+  # alb-http-only（CloudFront なし・保護対象なし。初回構築 fallback）では従来どおり CIDR で開ける。
+  allowed_ingress_cidrs   = local.https_enabled ? var.alb_allowed_ingress_cidrs : ["0.0.0.0/0"]
+  ingress_prefix_list_ids = local.https_enabled ? [data.aws_ec2_managed_prefix_list.cloudfront.id] : []
 
   # フロントエンド（ADR-0011）は CloudFront + 独自ドメインが前提のため https-dns モード限定。
   # alb-http-only（初回構築 fallback）では frontend の入口ごと作らない。
@@ -611,8 +622,9 @@ module "frontend_service" {
   environment = {
     PORT     = "3000"
     HOSTNAME = "0.0.0.0"
-    # SSR のサーバー側 fetch は API の公開 FQDN を使う（NAT 経由。ADR-0011）。
-    API_BASE_URL = "https://${local.api_fqdn}"
+    # SSR のサーバー側 fetch は CloudFront 経由の /api を使う（ADR-0013）。
+    # ALB 直叩きは prefix list 制限で遮断されるため、SSR も CloudFront + WAF を通す。
+    API_BASE_URL = "https://${local.app_fqdn}/api"
   }
 }
 

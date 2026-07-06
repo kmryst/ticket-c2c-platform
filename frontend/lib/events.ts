@@ -1,7 +1,8 @@
 // ファイル概要:
 // このファイルはイベント関連の型と、サーバーコンポーネント用の API fetch です（Issue #145）。
-// SSR のサーバー側 fetch は API_BASE_URL（AWS では API の公開 FQDN、ローカルでは
-// http://localhost:<port>）を直接呼びます。ブラウザ側の呼び出しは lib/api.ts を使います。
+// SSR のサーバー側 fetch は API_BASE_URL を使います。AWS では CloudFront 経由の app FQDN + /api
+//（ADR-0013 で ALB 直叩きを遮断したため、SSR も CloudFront + WAF を通す）、ローカルでは
+// http://localhost:<port> を呼びます。ブラウザ側の呼び出しは lib/api.ts を使います。
 
 // EventSummary は backend の GET /events / /events/search が返すイベント概要です。
 export interface EventSummary {
