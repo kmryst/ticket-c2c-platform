@@ -21,6 +21,12 @@ import { compare, hash } from 'bcrypt';
 import { JWT_ACCESS_TOKEN_TTL_SECONDS } from '../config';
 // UsersService は users テーブルへの raw SQL アクセス層です。
 import { UserRow, UsersService } from '../users/users.service';
+// RefreshTokensService はリフレッシュトークンの発行・rotate・失効の正本です（ADR-0012、Issue #165）。
+import {
+  RefreshTokensService,
+  REVOKE_REASON_LOGOUT,
+  TokenClientMeta,
+} from './refresh-tokens.service';
 // auth.types は controller と service の間で共有する入力・出力の型です。
 import {
   AuthenticatedUser,
@@ -59,14 +65,16 @@ const DUMMY_PASSWORD_HASH =
 @Injectable()
 // AuthService は signup / login / me の認証フロー本体を担当します。
 export class AuthService {
-  // constructor injection でユーザーデータアクセスと JWT 署名の各 service を受け取ります。
+  // constructor injection でユーザーデータアクセス・JWT 署名・リフレッシュトークンの各 service を受け取ります。
   constructor(
     private readonly users: UsersService,
     private readonly jwtService: JwtService,
+    private readonly refreshTokens: RefreshTokensService,
   ) {}
 
   // signup は新規ユーザーを作成し、そのままログイン済みとしてトークンを返します。
-  async signup(body: unknown): Promise<AuthTokenResult> {
+  // meta はリフレッシュトークン発行時に記録する調査用のクライアント情報（IP / User-Agent）です。
+  async signup(body: unknown, meta: TokenClientMeta): Promise<AuthTokenResult> {
     // 入力を検証し、以降の処理で信用できる ParsedCredentials に変換します。
     const credentials = parseCredentials(body);
 
@@ -77,7 +85,7 @@ export class AuthService {
       // users テーブルへ INSERT します。email 重複は DB の unique index が最終防衛線です。
       const user = await this.users.createUser(credentials.email, passwordHash);
       // 作成できたユーザーに対して即座にトークンを発行します。
-      return this.issueToken(user);
+      return this.issueTokens(user, meta);
     } catch (error) {
       // 事前 SELECT での存在確認はレース（同時 signup）に負けるため行わず、
       // unique violation を 409 に変換する方式で一意性を守ります。
@@ -91,7 +99,7 @@ export class AuthService {
   }
 
   // login はメール+パスワードを照合し、一致すればトークンを返します。
-  async login(body: unknown): Promise<AuthTokenResult> {
+  async login(body: unknown, meta: TokenClientMeta): Promise<AuthTokenResult> {
     // signup と同じ validation を通し、形式不正は 400 として先に返します。
     const credentials = parseCredentials(body);
 
@@ -110,7 +118,44 @@ export class AuthService {
     }
 
     // 資格情報が一致したのでトークンを発行します。
-    return this.issueToken(user);
+    return this.issueTokens(user, meta);
+  }
+
+  // refresh はリフレッシュトークンを rotate し、新しいアクセストークン + リフレッシュトークンを返します（ADR-0012）。
+  async refresh(
+    rawRefreshToken: string | undefined,
+    meta: TokenClientMeta,
+  ): Promise<AuthTokenResult> {
+    // Cookie にも body にもトークンが無ければ 401 です。エラー文言は他の失敗理由と同じに丸めます。
+    if (!rawRefreshToken) {
+      throw new UnauthorizedException('invalid or expired refresh token');
+    }
+
+    // rotate は行ロック付き transaction で旧トークンを消費し、新トークンを発行します。
+    // 使用済みトークンの再提示（reuse）はこの中でファミリー失効まで行われます。
+    const rotated = await this.refreshTokens.rotate(rawRefreshToken, meta);
+
+    // トークンは有効でも、rotate 後にユーザーが削除されている可能性があるため DB を正とします。
+    const user = await this.users.findById(rotated.userId);
+    if (!user) {
+      throw new UnauthorizedException('invalid or expired refresh token');
+    }
+
+    // 新しいアクセストークンを発行し、rotate 済みの新リフレッシュトークンと合わせて返します。
+    return this.buildTokenResult(user, rotated.token, rotated.expiresIn);
+  }
+
+  // logout は提示されたリフレッシュトークンのファミリーを失効させます。
+  // トークンが無い・不明な場合も成功として扱います（Cookie 破棄は controller が常に行うため）。
+  async logout(rawRefreshToken: string | undefined): Promise<void> {
+    if (!rawRefreshToken) {
+      return;
+    }
+
+    await this.refreshTokens.revokeFamilyByToken(
+      rawRefreshToken,
+      REVOKE_REASON_LOGOUT,
+    );
   }
 
   // getMe は JwtAuthGuard 検証済みの payload から現在のユーザー情報を返します。
@@ -127,18 +172,34 @@ export class AuthService {
     return toAuthenticatedUser(user);
   }
 
-  // issueToken はユーザー row から JWT と API response を組み立てる共通処理です。
-  private async issueToken(user: UserRow): Promise<AuthTokenResult> {
+  // issueTokens はユーザー row からアクセストークン + 新規ファミリーのリフレッシュトークンを発行します。
+  private async issueTokens(
+    user: UserRow,
+    meta: TokenClientMeta,
+  ): Promise<AuthTokenResult> {
+    // login / signup では新しいトークンファミリーを開始します（ADR-0012）。
+    const issued = await this.refreshTokens.issue(user.id, meta);
+    return this.buildTokenResult(user, issued.token, issued.expiresIn);
+  }
+
+  // buildTokenResult はアクセストークンを署名し、API response の形へ組み立てる共通処理です。
+  private async buildTokenResult(
+    user: UserRow,
+    refreshToken: string,
+    refreshExpiresIn: number,
+  ): Promise<AuthTokenResult> {
     // payload は認可判定に使う sub（users.id）と、補助情報の email だけに絞ります。
     const payload: JwtPayload = { sub: user.id, email: user.email };
 
-    // 署名アルゴリズム（HS256）と有効期限（1h）は JwtModule の登録時設定で固定されています。
+    // 署名アルゴリズム（HS256）と有効期限は JwtModule の登録時設定で固定されています。
     const accessToken = await this.jwtService.signAsync({ ...payload });
 
     return {
       accessToken,
       tokenType: 'Bearer',
       expiresIn: JWT_ACCESS_TOKEN_TTL_SECONDS,
+      refreshToken,
+      refreshExpiresIn,
       user: toAuthenticatedUser(user),
     };
   }
