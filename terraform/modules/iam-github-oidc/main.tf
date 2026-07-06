@@ -416,6 +416,58 @@ resource "aws_iam_policy" "apply_state_iam" {
         Resource = "*"
       },
       {
+        # CloudFront アクセスログ / WAF ログ用の S3 バケット（L-12 / Issue #185）の管理。
+        # dev / staging root が作成するログバケットは
+        # ticket-c2c-<env>-cf-logs / aws-waf-logs-ticket-c2c-<env> の 2 系統。
+        # H-1 の方針どおり名前プレフィックスの ARN へ限定する（バケット本体とオブジェクト両方）。
+        # DeleteBucket / DeleteObject* は ephemeral destroy 運用（force_destroy = true）に必要。
+        # 注意: ticket-c2c-* は tfstate バケットも覆うが、tfstate バケットは bootstrap root の
+        # prevent_destroy で Terraform 経由の削除から保護されている。
+        Sid    = "ProjectLogBucketsWrite"
+        Effect = "Allow"
+        Action = [
+          "s3:CreateBucket",
+          "s3:DeleteBucket",
+          "s3:DeleteBucketPolicy",
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion",
+          "s3:Get*",
+          "s3:List*",
+          "s3:Put*",
+        ]
+        Resource = [
+          "arn:aws:s3:::ticket-c2c-*",
+          "arn:aws:s3:::ticket-c2c-*/*",
+          "arn:aws:s3:::aws-waf-logs-ticket-c2c-*",
+          "arn:aws:s3:::aws-waf-logs-ticket-c2c-*/*",
+        ]
+      },
+      {
+        # CloudFront standard logging v2（L-12 / Issue #185）の vended log delivery
+        # （delivery source / destination / delivery）の CRUD。
+        # delivery 系リソースの ARN はランダム ID のため名前プレフィックスで絞れない。
+        # PrefixedResourceWrite の logs:* は /ecs/ ロググループ ARN 限定のため、ここで別途許可する。
+        # cloudfront:AllowVendedLogDeliveryForResource は distribution を delivery source に
+        # 登録するときに必要な権限。
+        Sid    = "VendedLogDeliveryWrite"
+        Effect = "Allow"
+        Action = [
+          "cloudfront:AllowVendedLogDeliveryForResource",
+          "logs:CreateDelivery",
+          "logs:DeleteDelivery",
+          "logs:DeleteDeliveryDestination",
+          "logs:DeleteDeliveryDestinationPolicy",
+          "logs:DeleteDeliverySource",
+          "logs:PutDeliveryDestination",
+          "logs:PutDeliveryDestinationPolicy",
+          "logs:PutDeliverySource",
+          "logs:TagResource",
+          "logs:UntagResource",
+          "logs:UpdateDeliveryConfiguration",
+        ]
+        Resource = "*"
+      },
+      {
         # CloudFront 用 WAFv2 WebACL（L-12 / Issue #184）の CRUD とログ設定。
         # scope=CLOUDFRONT の WebACL は us-east-1 でのみ操作できる。WebACL ARN はランダム ID を
         # 含むため名前プレフィックスで絞れない（CloudFrontWrite と同じ扱い）。

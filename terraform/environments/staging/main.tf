@@ -724,6 +724,286 @@ module "cloudfront" {
   web_acl_id = aws_wafv2_web_acl.app[0].arn
 }
 
+# ---------- アクセスログ / WAF ログの S3 配信（L-12 / Issue #185） ----------
+# CloudFront / WAF が https-dns モード限定のため、ログ配信一式も同じゲートで作成する。
+
+data "aws_caller_identity" "current" {}
+
+# CloudFront アクセスログ（standard logging v2）の配信先バケット。
+# legacy logging_config（S3 ACL 必須）は使わず、CloudWatch Logs の vended log delivery を使う。
+# アクセスログ用バケットは通常リージョンでよい（WAF ログ用バケットは us-east-1 必須。下記）。
+# 両バケットとも ephemeral destroy 運用のため force_destroy = true
+# （ECR の force_delete = true と同じ流儀。ログ残存で destroy が失敗しないようにする）。
+resource "aws_s3_bucket" "cf_logs" {
+  count = local.https_enabled ? 1 : 0
+
+  bucket        = "${var.name}-cf-logs"
+  force_destroy = true
+}
+
+resource "aws_s3_bucket_public_access_block" "cf_logs" {
+  count = local.https_enabled ? 1 : 0
+
+  bucket = aws_s3_bucket.cf_logs[0].id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "cf_logs" {
+  count = local.https_enabled ? 1 : 0
+
+  bucket = aws_s3_bucket.cf_logs[0].id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+# 調査用途のログのため 30 日で自動削除する（CloudWatch Logs の保持 30 日と同じ方針）。
+resource "aws_s3_bucket_lifecycle_configuration" "cf_logs" {
+  count = local.https_enabled ? 1 : 0
+
+  bucket = aws_s3_bucket.cf_logs[0].id
+
+  rule {
+    id     = "expire-30d"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = 30
+    }
+  }
+}
+
+# vended log delivery（delivery.logs.amazonaws.com）からの書き込みを許可する。
+# CloudFront の delivery source は us-east-1 に定義されるため、SourceArn は us-east-1 の
+# delivery-source に限定する。
+data "aws_iam_policy_document" "cf_logs_delivery" {
+  count = local.https_enabled ? 1 : 0
+
+  statement {
+    sid       = "AWSLogDeliveryWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.cf_logs[0].arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:aws:logs:us-east-1:${data.aws_caller_identity.current.account_id}:delivery-source:*"]
+    }
+  }
+
+  statement {
+    sid       = "AWSLogDeliveryAclCheck"
+    effect    = "Allow"
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.cf_logs[0].arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "cf_logs" {
+  count = local.https_enabled ? 1 : 0
+
+  bucket = aws_s3_bucket.cf_logs[0].id
+  policy = data.aws_iam_policy_document.cf_logs_delivery[0].json
+}
+
+# CloudFront 用の delivery source / destination / delivery は us-east-1 で定義する必要がある
+# （配信先の S3 バケット自体は通常リージョンでよい）。
+resource "aws_cloudwatch_log_delivery_source" "cf_access" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  name         = "${var.name}-cf-access"
+  log_type     = "ACCESS_LOGS"
+  resource_arn = module.cloudfront[0].arn
+}
+
+resource "aws_cloudwatch_log_delivery_destination" "cf_logs_s3" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  name          = "${var.name}-cf-logs-s3"
+  output_format = "json"
+
+  delivery_destination_configuration {
+    destination_resource_arn = aws_s3_bucket.cf_logs[0].arn
+  }
+}
+
+resource "aws_cloudwatch_log_delivery" "cf_access" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  delivery_source_name     = aws_cloudwatch_log_delivery_source.cf_access[0].name
+  delivery_destination_arn = aws_cloudwatch_log_delivery_destination.cf_logs_s3[0].arn
+
+  # バケットポリシーが先に無いと delivery 作成時の配信検証で失敗する。
+  depends_on = [aws_s3_bucket_policy.cf_logs]
+}
+
+# WAF ログの配信先バケット。WAFv2 の S3 直接配信は
+# 「aws-waf-logs- プレフィックス必須」「WebACL と同リージョン（CLOUDFRONT scope は us-east-1）」
+# の 2 制約があるため、cf_logs バケットとは別に us-east-1 へ作成する。
+resource "aws_s3_bucket" "waf_logs" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  bucket        = "aws-waf-logs-${var.name}"
+  force_destroy = true
+}
+
+resource "aws_s3_bucket_public_access_block" "waf_logs" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  bucket = aws_s3_bucket.waf_logs[0].id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "waf_logs" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  bucket = aws_s3_bucket.waf_logs[0].id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "waf_logs" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  bucket = aws_s3_bucket.waf_logs[0].id
+
+  rule {
+    id     = "expire-30d"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = 30
+    }
+  }
+}
+
+# WAF の S3 配信も delivery.logs.amazonaws.com 経由（vended logs）のため同型のポリシーを付ける。
+data "aws_iam_policy_document" "waf_logs_delivery" {
+  count = local.https_enabled ? 1 : 0
+
+  statement {
+    sid       = "AWSLogDeliveryWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.waf_logs[0].arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:aws:logs:us-east-1:${data.aws_caller_identity.current.account_id}:*"]
+    }
+  }
+
+  statement {
+    sid       = "AWSLogDeliveryAclCheck"
+    effect    = "Allow"
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.waf_logs[0].arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "waf_logs" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  bucket = aws_s3_bucket.waf_logs[0].id
+  policy = data.aws_iam_policy_document.waf_logs_delivery[0].json
+}
+
+resource "aws_wafv2_web_acl_logging_configuration" "app" {
+  count    = local.https_enabled ? 1 : 0
+  provider = aws.us_east_1
+
+  log_destination_configs = [aws_s3_bucket.waf_logs[0].arn]
+  resource_arn            = aws_wafv2_web_acl.app[0].arn
+
+  # バケットポリシーが先に無いと logging configuration 作成時の配信検証で失敗する。
+  depends_on = [aws_s3_bucket_policy.waf_logs]
+}
+
 # フロントエンドの公開 FQDN を CloudFront へ向ける
 resource "aws_route53_record" "app_alias" {
   count = local.https_enabled ? 1 : 0
