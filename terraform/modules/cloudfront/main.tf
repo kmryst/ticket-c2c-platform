@@ -27,6 +27,9 @@ resource "aws_cloudfront_distribution" "this" {
   price_class = "PriceClass_200"
   aliases     = var.aliases
 
+  # WAFv2 WebACL の関連付け（L-12 / Issue #184）。scope=CLOUDFRONT の WebACL は ARN を渡す。
+  web_acl_id = var.web_acl_id
+
   # api origin: 識別ヘッダーを付けない → ALB default action（API target group）に落ちる。
   origin {
     origin_id   = local.api_origin_id
