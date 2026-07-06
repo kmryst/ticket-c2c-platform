@@ -1,5 +1,7 @@
 # dev 専用のアプリデプロイ workflow（staging-environment.md「GitHub Actions」）。
 # 環境選択入力は持たない。承認は GitHub Environment `dev` の protection で行う。
+# デプロイ手順本体は deploy-service.yml（reusable workflow。Issue #180）に共通化し、
+# このファイルは dev 固有値（ECR / クラスタ / サービス名）を渡すだけにする。
 name: deploy-app-dev
 
 on:
@@ -22,160 +24,16 @@ permissions:
 concurrency:
   group: deploy-dev
 
-env:
-  ECR_REPOSITORY: ticket-c2c-dev
-  ECR_REPOSITORY_FRONTEND: ticket-c2c-dev-frontend
-  ECS_CLUSTER: ticket-c2c-dev
-  ECS_SERVICES: "ticket-c2c-dev-api ticket-c2c-dev-worker"
-  ECS_SERVICE_FRONTEND: ticket-c2c-dev-frontend
-
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-    environment: dev
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Configure AWS credentials (apply role)
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Login to ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # デプロイするタグを決める（production-readiness M-7: タスク定義は commit SHA 固定で参照する）。
-      # image_tag 入力があればビルドせず既存タグを使う（ロールバック経路）。存在しないタグは即失敗させる。
-      - name: Resolve image tag
-        id: tag
-        run: |
-          if [ -n "${{ inputs.image_tag }}" ]; then
-            TAG="${{ inputs.image_tag }}"
-            aws ecr describe-images \
-              --repository-name "$ECR_REPOSITORY" \
-              --image-ids imageTag="$TAG" \
-              --query 'imageDetails[0].imagePushedAt' --output text
-            aws ecr describe-images \
-              --repository-name "$ECR_REPOSITORY_FRONTEND" \
-              --image-ids imageTag="$TAG" \
-              --query 'imageDetails[0].imagePushedAt' --output text
-            echo "rollback to existing tag $TAG" >> "$GITHUB_STEP_SUMMARY"
-          else
-            TAG="${GITHUB_SHA::7}"
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      # :latest も併せて push する。これはデプロイには使わず、Terraform 初回 apply 時の
-      # タスク定義（image_tag 変数の既定値 latest）が参照できるイメージを残すブートストラップ用。
-      - name: Build and push image
-        if: inputs.image_tag == ''
-        run: |
-          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}"
-          TAG="${{ steps.tag.outputs.tag }}"
-          docker build -t "$IMAGE:latest" -t "$IMAGE:$TAG" .
-          docker push "$IMAGE:latest"
-          docker push "$IMAGE:$TAG"
-          echo "pushed $IMAGE:$TAG" >> "$GITHUB_STEP_SUMMARY"
-
-      # frontend は別イメージ（frontend/Dockerfile。ADR-0011）のため専用リポジトリへ push する。
-      - name: Build and push frontend image
-        if: inputs.image_tag == ''
-        run: |
-          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY_FRONTEND}"
-          TAG="${{ steps.tag.outputs.tag }}"
-          docker build -t "$IMAGE:latest" -t "$IMAGE:$TAG" frontend
-          docker push "$IMAGE:latest"
-          docker push "$IMAGE:$TAG"
-          echo "pushed $IMAGE:$TAG" >> "$GITHUB_STEP_SUMMARY"
-
-      # 現行タスク定義のイメージだけを commit SHA タグへ差し替えた新リビジョンを register する。
-      # これによりタスク定義から稼働コミットを特定でき、ロールバックは過去タグの再指定だけで済む
-      # （再ビルド不要）。サービス更新は migration（任意）の後に行う。
-      - name: Register SHA-pinned task definitions
-        id: td
-        run: |
-          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${{ steps.tag.outputs.tag }}"
-          for SVC in $ECS_SERVICES; do
-            CURRENT_TD=$(aws ecs describe-services \
-              --cluster "$ECS_CLUSTER" --services "$SVC" \
-              --query 'services[0].taskDefinition' --output text)
-            aws ecs describe-task-definition \
-              --task-definition "$CURRENT_TD" \
-              --query 'taskDefinition' > td.json
-            jq --arg image "$IMAGE" '
-              del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
-                  .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
-              | .containerDefinitions[0].image = $image
-            ' td.json > td-new.json
-            NEW_TD=$(aws ecs register-task-definition \
-              --cli-input-json file://td-new.json \
-              --query 'taskDefinition.taskDefinitionArn' --output text)
-            echo "registered $SVC -> ${NEW_TD##*/} ($IMAGE)" >> "$GITHUB_STEP_SUMMARY"
-            echo "td_${SVC##*-}=$NEW_TD" >> "$GITHUB_OUTPUT"
-          done
-
-      # スキーマ変更を含むリリースでは、migration 成功後にサービス更新へ進む（Issue #92）。
-      # 新イメージのタスク定義（command override）で migration を実行するため、
-      # 旧タスクは旧スキーマのまま動き続け、失敗時はデプロイ自体が中断される。
-      - name: Run DB migration (before service update)
-        if: inputs.run_migrations
-        # 明示的な shell: bash で pipefail を有効化し、tee が migration 失敗の exit code を隠さないようにする
-        shell: bash
-        run: |
-          ./scripts/deployment/run-db-migration.sh "$ECS_CLUSTER" ticket-c2c-dev-api \
-            "${{ steps.td.outputs.td_api }}" | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Update services
-        run: |
-          for SVC in $ECS_SERVICES; do
-            TD_VAR="td_${SVC##*-}"
-            NEW_TD=$([ "$TD_VAR" = "td_api" ] && echo "${{ steps.td.outputs.td_api }}" || echo "${{ steps.td.outputs.td_worker }}")
-            aws ecs update-service \
-              --cluster "$ECS_CLUSTER" --service "$SVC" \
-              --task-definition "$NEW_TD" \
-              --query 'service.serviceName' --output text
-            echo "updated $SVC -> ${NEW_TD##*/}" >> "$GITHUB_STEP_SUMMARY"
-          done
-
-      - name: Wait for services stable
-        run: |
-          aws ecs wait services-stable \
-            --cluster "$ECS_CLUSTER" \
-            --services $ECS_SERVICES
-          echo "services stable" >> "$GITHUB_STEP_SUMMARY"
-
-      # frontend service の更新。staging の alb-http-only モードでは frontend service が
-      # 存在しないため（ADR-0011）、ACTIVE でない場合はスキップする。
-      - name: Deploy frontend service
-        run: |
-          STATUS=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE_FRONTEND" \
-            --query 'services[0].status' --output text 2>/dev/null || echo "MISSING")
-          if [ "$STATUS" != "ACTIVE" ]; then
-            echo "frontend service not active ($STATUS), skipped" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY_FRONTEND}:${{ steps.tag.outputs.tag }}"
-          CURRENT_TD=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE_FRONTEND" \
-            --query 'services[0].taskDefinition' --output text)
-          aws ecs describe-task-definition \
-            --task-definition "$CURRENT_TD" \
-            --query 'taskDefinition' > td-frontend.json
-          jq --arg image "$IMAGE" '
-            del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
-                .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
-            | .containerDefinitions[0].image = $image
-          ' td-frontend.json > td-frontend-new.json
-          NEW_TD=$(aws ecs register-task-definition \
-            --cli-input-json file://td-frontend-new.json \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
-          aws ecs update-service \
-            --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE_FRONTEND" \
-            --task-definition "$NEW_TD" \
-            --query 'service.serviceName' --output text
-          aws ecs wait services-stable \
-            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE_FRONTEND"
-          echo "updated $ECS_SERVICE_FRONTEND -> ${NEW_TD##*/} ($IMAGE)" >> "$GITHUB_STEP_SUMMARY"
+    uses: ./.github/workflows/deploy-service.yml
+    with:
+      environment: dev
+      ecr_repository: ticket-c2c-dev
+      ecr_repository_frontend: ticket-c2c-dev-frontend
+      ecs_cluster: ticket-c2c-dev
+      ecs_services: "ticket-c2c-dev-api ticket-c2c-dev-worker"
+      ecs_service_frontend: ticket-c2c-dev-frontend
+      api_service: ticket-c2c-dev-api
+      image_tag: ${{ inputs.image_tag }}
+      run_migrations: ${{ inputs.run_migrations }}
