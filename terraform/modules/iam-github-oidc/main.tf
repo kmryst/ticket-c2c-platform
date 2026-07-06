@@ -449,21 +449,35 @@ resource "aws_iam_policy" "apply_state_iam" {
         # PrefixedResourceWrite の logs:* は /ecs/ ロググループ ARN 限定のため、ここで別途許可する。
         # cloudfront:AllowVendedLogDeliveryForResource は distribution を delivery source に
         # 登録するときに必要な権限。
+        #
+        # ログ配信には 2 系統の vended-logs API があり、両方の権限が必要:
+        # 1. delivery source / destination / delivery（logs:*Delivery* かつ末尾が Source/Destination/
+        #    Delivery）: CloudFront standard logging v2 が使う新 API。
+        # 2. log-delivery（logs:CreateLogDelivery 等）+ logs:PutResourcePolicy: WAFv2 の
+        #    PutLoggingConfiguration が内部で使う旧 API。これが無いと WAF ログ設定が
+        #    AccessDenied で失敗する（Issue #185 の dev 実地 apply で判明）。
         Sid    = "VendedLogDeliveryWrite"
         Effect = "Allow"
         Action = [
           "cloudfront:AllowVendedLogDeliveryForResource",
           "logs:CreateDelivery",
+          "logs:CreateLogDelivery",
           "logs:DeleteDelivery",
           "logs:DeleteDeliveryDestination",
           "logs:DeleteDeliveryDestinationPolicy",
           "logs:DeleteDeliverySource",
+          "logs:DeleteLogDelivery",
+          "logs:DescribeResourcePolicies",
+          "logs:GetLogDelivery",
+          "logs:ListLogDeliveries",
           "logs:PutDeliveryDestination",
           "logs:PutDeliveryDestinationPolicy",
           "logs:PutDeliverySource",
+          "logs:PutResourcePolicy",
           "logs:TagResource",
           "logs:UntagResource",
           "logs:UpdateDeliveryConfiguration",
+          "logs:UpdateLogDelivery",
         ]
         Resource = "*"
       },
