@@ -2,21 +2,32 @@ resource "aws_security_group" "alb" {
   name_prefix = "${var.name}-alb-"
   vpc_id      = var.vpc_id
 
-  # HTTPS 有効時は 80（リダイレクト用）と 443 を開ける（ADR-0007）。
-  # ingress の送信元は 2 系統をサポートする（ADR-0013）:
-  # - allowed_ingress_cidrs: CIDR ベース（検証時に自分の IP へ絞る等。alb-http-only の既定）
-  # - ingress_prefix_list_ids: managed prefix list ベース（CloudFront origin-facing に限定して
-  #   ALB 直叩きを遮断する。https-dns / dev の既定）
-  # 空リストの側は SG ルールに含めない（両方空だと SG ルールが送信元なしで invalid になるため、
-  # 呼び出し側で少なくとも一方を必ず渡す）。
+  # ingress の送信元は 2 系統をサポートする（ADR-0007 / ADR-0013）。
+  #
+  # 1. CIDR ベース（allowed_ingress_cidrs）: 検証時に自分の IP へ絞る等。alb-http-only の既定。
+  #    HTTPS 有効時は 80（リダイレクト用）と 443 の両方を開ける。
   dynamic "ingress" {
-    for_each = var.enable_https ? [80, 443] : [80]
+    for_each = length(var.allowed_ingress_cidrs) > 0 ? (var.enable_https ? [80, 443] : [80]) : []
+    content {
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "tcp"
+      cidr_blocks = var.allowed_ingress_cidrs
+    }
+  }
+
+  # 2. managed prefix list ベース（ingress_prefix_list_ids）: CloudFront origin-facing に限定し
+  #    ALB 直叩きを遮断する（ADR-0013）。CloudFront の origin 接続は https-only（cloudfront モジュール
+  #    の origin_protocol_policy）のため 443 のみ開ければよく、80 は開けない。
+  #    prefix list 参照はその max-entries 分だけ SG のルール上限（既定 60）を消費するため、
+  #    80/443 の両方に付けると上限超過（RulesPerSecurityGroupLimitExceeded）になる。443 のみに絞る。
+  dynamic "ingress" {
+    for_each = length(var.ingress_prefix_list_ids) > 0 ? [443] : []
     content {
       from_port       = ingress.value
       to_port         = ingress.value
       protocol        = "tcp"
-      cidr_blocks     = length(var.allowed_ingress_cidrs) > 0 ? var.allowed_ingress_cidrs : null
-      prefix_list_ids = length(var.ingress_prefix_list_ids) > 0 ? var.ingress_prefix_list_ids : null
+      prefix_list_ids = var.ingress_prefix_list_ids
     }
   }
 
