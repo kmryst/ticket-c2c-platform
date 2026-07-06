@@ -160,7 +160,7 @@ AWS 環境（dev / staging）の DDL は起動時適用ではなく TypeORM vers
 2. 作成した migration class を `src/database/data-source.ts` の `migrations` 配列へ追加する。
 3. ローカル PoC の正本 `database/schema.sql` も同じ PR で同期更新する。
 4. ローカル検証: `npm run migration:run:local`（Docker Compose の PostgreSQL に適用）。
-5. AWS への適用: スキーマ変更を含むリリースは `deploy-app-<env>.yml` の `run_migrations=true` で実行する（migration 成功後にサービス更新）。単発適用は `db-migrate-<env>.yml`。
+5. AWS への適用: スキーマ変更を含むリリースは `deploy-backend-<env>.yml` の `run_migrations=true` で実行する（migration 成功後にサービス更新）。単発適用は `db-migrate-<env>.yml`。
 6. migration は後方互換（expand-contract）で書く。旧タスクが新スキーマ上で動く時間帯があるため。
 7. baseline（`1751594400000-baseline.ts`）は凍結されており編集しない。
 

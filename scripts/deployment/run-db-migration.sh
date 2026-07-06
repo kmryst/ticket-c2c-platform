@@ -5,7 +5,7 @@
 #
 # Usage: run-db-migration.sh <cluster> <api-service> [task-definition-arn]
 #   task-definition-arn 省略時は API サービスの現行タスク定義を使う。
-#   deploy-app workflow は「新イメージのタスク定義を register した直後・サービス更新前」に
+#   deploy-backend workflow は「新イメージのタスク定義を register した直後・サービス更新前」に
 #   新タスク定義 ARN を渡して呼ぶ（migration 成功後にデプロイする運用）。
 
 set -euo pipefail

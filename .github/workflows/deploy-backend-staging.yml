@@ -1,8 +1,9 @@
-# dev 専用のアプリデプロイ workflow（staging-environment.md「GitHub Actions」）。
-# 環境選択入力は持たない。承認は GitHub Environment `dev` の protection で行う。
+# staging 専用の backend（api + worker）デプロイ workflow（L-11 / Issue #182）。
+# 環境選択入力は持たない。承認は GitHub Environment `staging` の protection で行う。
 # デプロイ手順本体は deploy-service.yml（reusable workflow。Issue #180）に共通化し、
-# このファイルは dev 固有値（ECR / クラスタ / サービス名）を渡すだけにする。
-name: deploy-app-dev
+# このファイルは staging の backend 固有値を渡すだけにする。
+# frontend のデプロイは deploy-frontend-staging.yml（タグ・ロールバックは互いに独立）。
+name: deploy-backend-staging
 
 on:
   workflow_dispatch:
@@ -22,18 +23,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-dev
+  group: deploy-backend-staging
 
 jobs:
   deploy:
     uses: ./.github/workflows/deploy-service.yml
     with:
-      environment: dev
-      ecr_repository: ticket-c2c-dev
-      ecr_repository_frontend: ticket-c2c-dev-frontend
-      ecs_cluster: ticket-c2c-dev
-      ecs_services: "ticket-c2c-dev-api ticket-c2c-dev-worker"
-      ecs_service_frontend: ticket-c2c-dev-frontend
-      api_service: ticket-c2c-dev-api
+      environment: staging
+      ecr_repository: ticket-c2c-staging
+      ecs_cluster: ticket-c2c-staging
+      ecs_services: "ticket-c2c-staging-api ticket-c2c-staging-worker"
+      docker_context: "."
+      api_service: ticket-c2c-staging-api
       image_tag: ${{ inputs.image_tag }}
       run_migrations: ${{ inputs.run_migrations }}
