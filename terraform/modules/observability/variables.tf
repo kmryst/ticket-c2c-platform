@@ -8,3 +8,14 @@ variable "retention_in_days" {
   type        = number
   default     = 30
 }
+
+variable "name" {
+  description = "リソース名プレフィックス（SNS アラートトピック名 <name>-alerts に使う）"
+  type        = string
+}
+
+variable "alert_email" {
+  description = "CloudWatch アラーム通知（SNS email subscription）の宛先メールアドレス（production-readiness L-5 / Issue #200）。空文字の場合は SNS トピックを作成しない"
+  type        = string
+  default     = ""
+}
