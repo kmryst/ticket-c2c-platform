@@ -44,7 +44,8 @@ import { AuthRateLimitService } from './rate-limit.service';
   ],
   // JwtAuthGuard と JwtService（JwtModule）を export し、
   // 他 module の controller（購入 API の認証必須化。Issue #135）からも同じ検証設定を使えるようにします。
-  exports: [JwtAuthGuard, JwtModule],
+  // AuthRateLimitService は購入エンドポイントのレート制限（ADR-0015 / Issue #205）でも使うため export します。
+  exports: [JwtAuthGuard, JwtModule, AuthRateLimitService],
 })
 // module クラス自体は設定の入れ物なので、メソッドや状態は持ちません。
 export class AuthModule {}

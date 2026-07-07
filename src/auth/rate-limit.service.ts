@@ -1,7 +1,7 @@
 // ファイル概要:
-// このファイルは認証系エンドポイント（signup / login / refresh）のレート制限 service です
-// （ADR-0012、Issue #167、production-readiness L-9）。
-// Valkey 上の固定ウィンドウカウンタで「IP 単位」と「メール（または refresh はトークン）単位」の
+// このファイルは認証系エンドポイント（signup / login / refresh）と購入エンドポイント（purchase）の
+// レート制限 service です（ADR-0012 / ADR-0015、Issue #167 / #205、production-readiness L-9）。
+// Valkey 上の固定ウィンドウカウンタで「IP 単位」と「第 2 系統（メール / トークン / user_id）単位」の
 // 2 系統を数え、どちらかが閾値を超えたら 429 を返します。
 //
 // 設計方針（ADR-0012）:
@@ -22,7 +22,7 @@ import Redis from 'ioredis';
 import { getOptionalEnv } from '../config';
 
 // RateLimitedEndpoint はレート制限の対象エンドポイント名です。カウンタのキー名にも使います。
-export type RateLimitedEndpoint = 'signup' | 'login' | 'refresh';
+export type RateLimitedEndpoint = 'signup' | 'login' | 'refresh' | 'purchase';
 
 // RateLimitSubject は 1 リクエストの制限判定に使う主体情報です。
 export interface RateLimitSubject {
@@ -51,11 +51,16 @@ const DEFAULT_WINDOW_SECONDS = 15 * 60;
 // - signup: アカウント大量作成の抑止。正規ユーザーが 15 分に 10 回超 signup することはない。
 // - login IP 20 / メール 10: credential stuffing（多メール×1IP）と総当たり（1メール集中）の両方を抑える。
 // - refresh IP 60 / トークン 30: silent refresh は 15 分に 1 回程度なので、正規利用の 2 桁上を許容しつつ乱打を止める。
+// - purchase（ADR-0015 / Issue #205）: dual-key 方式。secondary（user_id）10 がプライマリゲート
+//   （正規ユーザーが 15 分に 10 回超の購入試行をすることはない。認証必須のためキーは常にある）。
+//   IP 300 は緩いバックストップ（学校・オフィス NAT / 大手キャリアの相乗り正規ユーザーを
+//   誤ブロックせず、単一 IP からのボット群れの物量だけを止める）。
 // 環境変数（AUTH_RATE_LIMIT_<ENDPOINT>_<SCOPE>）で個別に上書きできます。
 const DEFAULT_LIMITS: Record<RateLimitedEndpoint, { ip: number; secondary: number }> = {
   signup: { ip: 10, secondary: 10 },
   login: { ip: 20, secondary: 10 },
   refresh: { ip: 60, secondary: 30 },
+  purchase: { ip: 300, secondary: 10 },
 };
 
 // AuthRateLimitService を NestJS の DI に登録します。
@@ -164,6 +169,29 @@ export class AuthRateLimitService implements OnModuleDestroy {
       await this.client.quit().catch(() => undefined);
     }
   }
+}
+
+// extractRetryAfterSeconds は enforce が投げた 429 例外から待機秒数を取り出します。
+// controller 側で標準の Retry-After header を設定するために使います（auth / purchases 共用）。
+export function extractRetryAfterSeconds(error: unknown): number | undefined {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'getResponse' in error &&
+    typeof (error as { getResponse: unknown }).getResponse === 'function'
+  ) {
+    const response = (error as { getResponse: () => unknown }).getResponse();
+    if (
+      typeof response === 'object' &&
+      response !== null &&
+      'retryAfterSeconds' in response &&
+      typeof (response as { retryAfterSeconds: unknown }).retryAfterSeconds ===
+        'number'
+    ) {
+      return (response as { retryAfterSeconds: number }).retryAfterSeconds;
+    }
+  }
+  return undefined;
 }
 
 // readPositiveIntEnv は環境変数を正の整数として読み、不正・未設定なら fallback を返します。

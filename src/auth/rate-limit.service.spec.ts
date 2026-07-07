@@ -51,6 +51,8 @@ describe('AuthRateLimitService (実 Valkey / Lua script)', () => {
     // 各テストが設定した上書き閾値を掃除します。
     delete process.env.AUTH_RATE_LIMIT_LOGIN_IP;
     delete process.env.AUTH_RATE_LIMIT_LOGIN_SECONDARY;
+    delete process.env.AUTH_RATE_LIMIT_PURCHASE_IP;
+    delete process.env.AUTH_RATE_LIMIT_PURCHASE_SECONDARY;
     delete process.env.AUTH_RATE_LIMIT_WINDOW_SECONDS;
   });
 
@@ -140,6 +142,58 @@ describe('AuthRateLimitService (実 Valkey / Lua script)', () => {
     const ttl = await inspector.ttl(`ratelimit:signup:ip:${ip}`);
     expect(ttl).toBeGreaterThan(0);
     expect(ttl).toBeLessThanOrEqual(15 * 60);
+  });
+
+  // 購入エンドポイント（dual-key 方式。ADR-0015 / Issue #205）:
+  // user_id（secondary）がプライマリゲート、IP は緩いバックストップ。
+  it('purchase: user_id 単位の閾値超過で 429 になり、同一 IP の別ユーザーは通る（NAT 相乗り想定）', async () => {
+    process.env.AUTH_RATE_LIMIT_PURCHASE_SECONDARY = '2';
+    const sharedIp = `test-ip-${randomUUID()}`;
+    const userA = `user-${randomUUID()}`;
+    const userB = `user-${randomUUID()}`;
+    usedKeys.push(
+      `ratelimit:purchase:ip:${sharedIp}`,
+      `ratelimit:purchase:sub:${userA}`,
+      `ratelimit:purchase:sub:${userB}`,
+    );
+
+    // userA は閾値ちょうどまで通り、超過で 429。
+    await expect(
+      service.enforce('purchase', { ip: sharedIp, secondary: userA }),
+    ).resolves.toBeUndefined();
+    await expect(
+      service.enforce('purchase', { ip: sharedIp, secondary: userA }),
+    ).resolves.toBeUndefined();
+    await expect(
+      service.enforce('purchase', { ip: sharedIp, secondary: userA }),
+    ).rejects.toMatchObject({ status: 429 });
+
+    // 同じ IP（学校・オフィス NAT 相乗り）の別ユーザーは巻き込まれない。
+    // IP バックストップ既定 300 は緩いため、userA の超過後も userB は通る。
+    await expect(
+      service.enforce('purchase', { ip: sharedIp, secondary: userB }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('purchase: IP バックストップの閾値超過で、別ユーザーでも 429 になる（ボット群れ想定）', async () => {
+    process.env.AUTH_RATE_LIMIT_PURCHASE_IP = '3';
+    const botIp = `test-ip-${randomUUID()}`;
+    usedKeys.push(`ratelimit:purchase:ip:${botIp}`);
+
+    // 毎回異なる user_id（アカウントを使い捨てるボット群れ）でも、IP 系統で止まる。
+    for (let i = 0; i < 3; i += 1) {
+      const user = `user-${randomUUID()}`;
+      usedKeys.push(`ratelimit:purchase:sub:${user}`);
+      await expect(
+        service.enforce('purchase', { ip: botIp, secondary: user }),
+      ).resolves.toBeUndefined();
+    }
+
+    const lastUser = `user-${randomUUID()}`;
+    usedKeys.push(`ratelimit:purchase:sub:${lastUser}`);
+    await expect(
+      service.enforce('purchase', { ip: botIp, secondary: lastUser }),
+    ).rejects.toMatchObject({ status: 429 });
   });
 
   it('VALKEY_URL 未設定では fail-open（制限なし）で通る', async () => {
