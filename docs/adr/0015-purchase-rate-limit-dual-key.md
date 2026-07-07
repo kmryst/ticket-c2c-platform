@@ -24,6 +24,7 @@ Accepted
    - **user_id: 10 回 / 15 分** — 正規ユーザーが 15 分に 10 回超の購入試行をすることはない（購入は 1 イベントにつき高々数回。冪等リトライは requestId 再送で別途吸収される）。
    - **IP: 300 回 / 15 分** — 単一 IP からの物量（アカウント使い捨てボット群れ）だけを止める天井。
 4. 超過時は 429 + `Retry-After`（既存パターンと同一）。判定は `JwtAuthGuard` 通過後（user_id 確定後）に controller で行う。
+5. 超過はセキュリティイベントとして構造化ログ（`{ event: 'rate_limit_exceeded', endpoint, ip, secondary, retryAfterSeconds }`、`console.warn`）と CloudWatch EMF メトリクス（`<Endpoint>RateLimited`。購入エンドポイントは `PurchaseRateLimited`）に残す（Issue #204、ADR-0014 の EMF 基盤を再利用）。`AuthRateLimitService` が signup/login/refresh/purchase を共通で扱うため、この観測性の追加は全エンドポイントに一律で効く。
 
 ## 根拠
 

@@ -1,6 +1,6 @@
 // ファイル概要:
 // このファイルは認証系エンドポイント（signup / login / refresh）と購入エンドポイント（purchase）の
-// レート制限 service です（ADR-0012 / ADR-0015、Issue #167 / #205、production-readiness L-9）。
+// レート制限 service です（ADR-0012 / ADR-0015、Issue #167 / #205 / #204、production-readiness L-9）。
 // Valkey 上の固定ウィンドウカウンタで「IP 単位」と「第 2 系統（メール / トークン / user_id）単位」の
 // 2 系統を数え、どちらかが閾値を超えたら 429 を返します。
 //
@@ -11,6 +11,8 @@
 //   素の INCR + EXPIRE を分けると、EXPIRE 前にプロセスが落ちた場合に TTL なしキーが残り、
 //   永久にカウントされ続けるためです。
 // - IP は client-ip.ts の trusted-hops 解決を通した値を受け取ります（偽装対策）。
+// - 超過時は構造化ログ（`event: 'rate_limit_exceeded'`）と EMF メトリクス（`<Endpoint>RateLimited`）を
+//   残します（Issue #204）。購入エンドポイントは特に PurchaseRateLimited という名前になります。
 
 // HttpException は 429 Too Many Requests を返すために使います。
 // Injectable は service を NestJS の DI 対象として登録する decorator です。
@@ -20,6 +22,8 @@ import { HttpException, Injectable, OnModuleDestroy } from '@nestjs/common';
 import Redis from 'ioredis';
 // getOptionalEnv は未設定・空文字を undefined に正規化して返す config helper です。
 import { getOptionalEnv } from '../config';
+// emitMetric はレート制限超過をビジネスメトリクス（EMF）として記録します（Issue #204、ADR-0014）。
+import { emitMetric } from '../observability/emf';
 
 // RateLimitedEndpoint はレート制限の対象エンドポイント名です。カウンタのキー名にも使います。
 export type RateLimitedEndpoint = 'signup' | 'login' | 'refresh' | 'purchase';
@@ -150,6 +154,22 @@ export class AuthRateLimitService implements OnModuleDestroy {
     }
 
     if (retryAfterSeconds > 0) {
+      // セキュリティイベントとして構造化ログに残します（Issue #204）。
+      // ip / secondary は監査時の追跡に必要なため、そのまま出します
+      // （既に他のログ・レート制限キー自体にも同じ値が現れており、追加の漏洩経路ではありません）。
+      console.warn(
+        JSON.stringify({
+          event: 'rate_limit_exceeded',
+          endpoint,
+          ip: subject.ip ?? null,
+          secondary: subject.secondary ?? null,
+          retryAfterSeconds,
+        }),
+      );
+      // 超過をビジネスメトリクスとしても記録します（Issue #204）。エンドポイント別に
+      // 系列を分け、購入エンドポイントは特に PurchaseRateLimited という名前になります。
+      emitMetric(`${capitalize(endpoint)}RateLimited`, 1, 'Count');
+
       // 429 応答。Retry-After 相当の値は body に含め、header は controller が設定します。
       throw new HttpException(
         {
@@ -192,6 +212,11 @@ export function extractRetryAfterSeconds(error: unknown): number | undefined {
     }
   }
   return undefined;
+}
+
+// capitalize はメトリクス名（`${Endpoint}RateLimited`）を組み立てるための先頭大文字化です。
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 // readPositiveIntEnv は環境変数を正の整数として読み、不正・未設定なら fallback を返します。
