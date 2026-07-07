@@ -19,3 +19,9 @@ variable "alert_email" {
   type        = string
   default     = ""
 }
+
+variable "xray_service_names" {
+  description = "X-Ray group のフィルタ対象サービス名一覧（ADR-0014 / Issue #203）。空の場合は X-Ray group を作らない"
+  type        = list(string)
+  default     = []
+}

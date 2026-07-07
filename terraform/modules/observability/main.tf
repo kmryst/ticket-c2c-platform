@@ -24,3 +24,16 @@ resource "aws_sns_topic_subscription" "alerts_email" {
   protocol  = "email"
   endpoint  = var.alert_email
 }
+
+# X-Ray group（ADR-0014 / Issue #203）。この環境の API / Worker のトレースだけを
+# console 上でまとめて絞り込むためのフィルタ。sampling rule は作らない:
+# アプリ側の OTel 標準 sampler（OTEL_TRACES_SAMPLER 環境変数）で制御しており、
+# X-Ray の centralized sampling rule は OTel 標準 sampler から参照されないため。
+resource "aws_xray_group" "this" {
+  count = length(var.xray_service_names) > 0 ? 1 : 0
+
+  group_name = var.name
+  filter_expression = join(" OR ", [
+    for service in var.xray_service_names : "service(\"${service}\")"
+  ])
+}

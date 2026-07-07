@@ -110,3 +110,9 @@ variable "secrets" {
 variable "log_group_name" {
   type = string
 }
+
+variable "otel_collector_image" {
+  description = "ADOT collector sidecar のイメージ URI（ADR-0014 / Issue #203）。null の場合は sidecar を追加しない。アプリは OTLP で localhost:4318 へ送り、collector が X-Ray へ SigV4 署名付きで転送する"
+  type        = string
+  default     = null
+}

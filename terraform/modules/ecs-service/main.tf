@@ -14,38 +14,69 @@ resource "aws_ecs_task_definition" "this" {
   execution_role_arn       = var.execution_role_arn
   task_role_arn            = var.task_role_arn
 
-  container_definitions = jsonencode([
-    {
-      name      = var.name
-      image     = var.image
-      command   = var.command
-      essential = true
+  # アプリコンテナは必ず containerDefinitions[0] に置く。
+  # deploy workflow（deploy-service.yml）が .containerDefinitions[0].image だけを
+  # commit SHA タグへ差し替えて新リビジョンを register するため、
+  # sidecar（index 1 以降）はデプロイをまたいで維持される。
+  container_definitions = jsonencode(concat(
+    [
+      {
+        name      = var.name
+        image     = var.image
+        command   = var.command
+        essential = true
 
-      portMappings = var.container_port != null ? [
-        {
-          containerPort = var.container_port
-          protocol      = "tcp"
-        }
-      ] : []
+        portMappings = var.container_port != null ? [
+          {
+            containerPort = var.container_port
+            protocol      = "tcp"
+          }
+        ] : []
 
-      environment = [
-        for k, v in var.environment : { name = k, value = v }
-      ]
+        environment = [
+          for k, v in var.environment : { name = k, value = v }
+        ]
 
-      secrets = [
-        for k, v in var.secrets : { name = k, valueFrom = v }
-      ]
+        secrets = [
+          for k, v in var.secrets : { name = k, valueFrom = v }
+        ]
 
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = var.log_group_name
-          "awslogs-region"        = var.region
-          "awslogs-stream-prefix" = var.name
+        logConfiguration = {
+          logDriver = "awslogs"
+          options = {
+            "awslogs-group"         = var.log_group_name
+            "awslogs-region"        = var.region
+            "awslogs-stream-prefix" = var.name
+          }
         }
       }
-    }
-  ])
+    ],
+    # ADOT collector sidecar（ADR-0014 / Issue #203）。
+    # イメージ同梱の ECS 用既定設定（OTLP 受信 → X-Ray へ転送）をそのまま使う。
+    # essential = false: collector 停止時はトレースが失われるだけで、
+    # アプリ本体（購入 API / Worker）を巻き込んで落とさない。
+    var.otel_collector_image != null ? [
+      {
+        name      = "otel-collector"
+        image     = var.otel_collector_image
+        command   = ["--config=/etc/ecs/ecs-default-config.yaml"]
+        essential = false
+
+        portMappings = []
+        environment  = []
+        secrets      = []
+
+        logConfiguration = {
+          logDriver = "awslogs"
+          options = {
+            "awslogs-group"         = var.log_group_name
+            "awslogs-region"        = var.region
+            "awslogs-stream-prefix" = "otel-collector"
+          }
+        }
+      }
+    ] : []
+  ))
 }
 
 resource "aws_ecs_service" "this" {
