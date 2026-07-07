@@ -497,6 +497,55 @@ resource "aws_iam_role_policy" "worker_task_xray" {
   })
 }
 
+# ADOT collector sidecar の ECS 用既定設定は、collector 自身の内部メトリクス（自己監視）を
+# awsemf exporter 経由で固定のロググループ /aws/ecs/application/metrics へ書き込む
+# パイプラインを含む（アプリのビジネスメトリクスとは別。あちらは awslogs ドライバ経由で
+# 既に届いている）。この権限が無いと収集は失敗するが、影響は collector 自己監視データの
+# 欠落のみで機能には影響しない（Issue #212。staging 実地検証で発見）。
+resource "aws_iam_role_policy" "api_task_adot_self_monitoring_logs" {
+  name = "write-adot-self-monitoring-logs"
+  role = aws_iam_role.api_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+        ]
+        Resource = [
+          "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/ecs/application/metrics:*",
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "worker_task_adot_self_monitoring_logs" {
+  name = "write-adot-self-monitoring-logs"
+  role = aws_iam_role.worker_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+        ]
+        Resource = [
+          "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/ecs/application/metrics:*",
+        ]
+      }
+    ]
+  })
+}
+
 # ADOT collector sidecar のイメージ（ADR-0014 / Issue #203）。挙動を再現可能にするためタグを固定する。
 locals {
   otel_collector_image = "public.ecr.aws/aws-observability/aws-otel-collector:v0.48.0"
