@@ -424,6 +424,18 @@ dev で実装・検証済みの L-9（リフレッシュトークン rotation / 
 - **staging-smoke-test.yml**: `deploy-app-staging` のローリング更新が steady state に達する前に実行した初回は、`GET /events/search` の projection 反映待ちがタイムアウトして失敗した。worker ログを確認したところ、新旧 worker タスクが一時的に併存し、同一イベントへの購入プロジェクション更新の処理順が入れ替わったことが原因（DB 側の在庫・oversold 防止は正常。他の smoke test アサーションは全部 PASS）。これは ADR-0004（SQS Standard を採用し順序を保証しない設計判断）で許容しているトレードオフの顕在化であり、L-9 のリグレッションではない。ECS サービスが steady state に達したことを確認してから再実行し、成功した。**今後の運用上の教訓**: デプロイ直後にテストを実行する場合は `aws ecs describe-services` で `running == desired` かつ最新イベントが `has reached a steady state` になっていることを確認してから smoke test / E2E を実行する。将来的に worker 側でイベント単位の処理順序を保証すべきかは、現時点では新規課題化せず記録に留める。
 - 検証後、staging は destroy 済み（destroy 後確認は「destroy 後確認」節のとおり実施）。
 
+## L-13 / L-14 staging 実地検証（ADR-0014 / ADR-0015、Issue #203 / #205、2026-07-07）
+
+dev で実装・検証済みの L-13（X-Ray 分散トレーシング + EMF ビジネスメトリクス）と L-14（購入 dual-key レート制限）を staging 環境へ反映し、dev と同水準の実地検証を行った。
+
+- **apply / deploy**: `terraform-apply-staging` 成功 → `deploy-backend-staging`（`run_migrations=true`）成功。
+- **X-Ray トレース連続性**: `POST /events` の trace を確認し、API root segment（`ticket-c2c-staging-api`）を親に Worker 側の `search-projection EventListed` span、Aurora / Valkey span、OpenSearch span までが単一 trace 内で継続することを確認（dev と同一構造）。staging はサンプリング率 0.1（`OTEL_TRACES_SAMPLER_ARG`）のため、購入リクエストの trace は一部しか残らなかったが、trace 構造自体は sampling 率と無関係に dev と同一だった。
+- **EMF ビジネスメトリクス**: CloudWatch へ PurchaseConfirmed（Sum 13）・PurchaseRejected（Sum 1）・WorkerProcessingLagMs（Average 478〜1594ms）の自動抽出を確認（ValkeyFailOpen は未発生）。
+- **購入レート制限（dual-key）**: user_id 系統は 10 回まで確定、11 回目で 429（`retryAfterSeconds=899`）。同一 IP の別ユーザー（NAT 相乗り想定）は user_id 超過後も 200 で通り、巻き込まれないことを確認（dev と同じ結果）。
+- **smoke test 実行中に観測した既知事象**: `GET /events/search` の projection 最終反映値が期待値（`remainingQuantity=0`）ではなく `1` になった。worker ログを確認したところ、`deploy-backend-staging` によるローリング更新直後で worker タスクが再起動しており、2 件の `InventoryChanged` メッセージの処理順序が入れ替わったことが原因（DB 側の在庫確定・oversold 防止は正常）。L-9 staging 実地検証（上記節）で既に記録済みの ADR-0004（SQS Standard、順序非保証）のトレードオフが再度顕在化したもので、今回の X-Ray / レート制限変更によるリグレッションではない。
+- **新規発見（今回の変更に起因）**: ADOT collector 自身の内部メトリクス（自己監視、awsemf exporter）が `logs:PutLogEvents on /aws/ecs/application/metrics` の権限不足で送信できず、worker ログに `AccessDeniedException` が出続けている。dev では発生しなかった（原因未調査）。アプリのビジネスメトリクス（EMF、awslogs 経由）自体には影響なし。ユーザー判断により本 Issue の範囲では対応せず、Issue #212 として別途切り出した。
+- **destroy しない**: dev と異なり、ユーザー判断により今回は staging を destroy せず稼働状態のまま維持する。
+
 ## production-readiness.md との関係
 
 このドキュメントは staging 自体の設計正本です。
