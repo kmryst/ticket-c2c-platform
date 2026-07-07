@@ -181,6 +181,9 @@ resource "aws_iam_policy" "apply_infra" {
           "sqs:List*",
           "sts:DecodeAuthorizationMessage",
           "tag:Get*",
+          # X-Ray group（ADR-0014 / Issue #203）の terraform read / drift 検出用。
+          "xray:Get*",
+          "xray:List*",
         ]
         Resource = "*"
       },
@@ -317,6 +320,12 @@ resource "aws_iam_policy" "apply_infra" {
           "sqs:Set*",
           "sqs:Tag*",
           "sqs:Untag*",
+          # X-Ray group（ADR-0014 / Issue #203）。dev / staging の observability モジュールが作成する。
+          "xray:CreateGroup",
+          "xray:DeleteGroup",
+          "xray:UpdateGroup",
+          "xray:TagResource",
+          "xray:UntagResource",
         ]
         Resource = [
           "arn:aws:cloudwatch:${local.region}:${local.account_id}:alarm:${var.managed_resource_name_prefix}*",
@@ -331,6 +340,9 @@ resource "aws_iam_policy" "apply_infra" {
           # <topic ARN>:<uuid> 形式のため、同じプレフィックスパターンで Unsubscribe も覆える。
           "arn:aws:sns:${local.region}:${local.account_id}:${var.managed_resource_name_prefix}*",
           "arn:aws:sqs:${local.region}:${local.account_id}:${var.managed_resource_name_prefix}*",
+          # X-Ray group（ADR-0014 / Issue #203）。ARN は group/<name>/<id> で id は作成時採番のため
+          # ワイルドカードで覆う。group_name は環境の var.name（ticket-c2c-dev 等）と一致させている。
+          "arn:aws:xray:${local.region}:${local.account_id}:group/${var.managed_resource_name_prefix}*/*",
         ]
       },
       {
