@@ -1,6 +1,7 @@
 // ファイル概要:
-// staging 環境の配線を外側から検証する smoke test です（staging-environment.md「smoke test」）。
-// AWS credential は使わず、STAGING_BASE_URL への HTTP のみで検証します。
+// dev / staging 共通で使える smoke test です（staging-environment.md「smoke test」、Issue #192 で
+// dev にも対応するため環境非依存化した）。AWS credential は使わず、SMOKE_TEST_BASE_URL への
+// HTTP のみで検証します。
 //
 // 検証経路:
 // 1. GET /healthz / GET /readyz（ALB -> API -> Aurora）
@@ -10,11 +11,21 @@
 //    購入は認証必須のため Bearer トークン付きで送り、トークンなしが 401 になることも検証する
 // 5. GET /events/search に projection が反映される（EventBridge -> SQS -> Worker -> OpenSearch）
 //
-// test data は削除しない（失敗時調査用。staging destroy で消える）。
+// test data は削除しない（失敗時調査用。環境 destroy で消える）。
 
 import { randomUUID } from 'node:crypto';
 
-const baseUrl = requiredEnv('STAGING_BASE_URL').replace(/\/+$/, '');
+// SMOKE_TEST_BASE_URL が本来の変数名。STAGING_BASE_URL は旧名との後方互換フォールバック
+// （staging-smoke-test.yml 移行前の呼び出しや、ローカルでの既存の使い方を壊さないため）。
+const baseUrl = resolveBaseUrl().replace(/\/+$/, '');
+
+function resolveBaseUrl(): string {
+  const value = process.env.SMOKE_TEST_BASE_URL ?? process.env.STAGING_BASE_URL;
+  if (!value) {
+    throw new Error('SMOKE_TEST_BASE_URL（または旧名 STAGING_BASE_URL）is required');
+  }
+  return value;
+}
 
 // timeout / interval は staging-environment.md の表に合わせる。
 const HEALTH_TIMEOUT_MS = 2 * 60 * 1000;

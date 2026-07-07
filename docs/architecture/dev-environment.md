@@ -105,6 +105,7 @@ terraform/
 | `terraform-destroy-dev.yml` | workflow_dispatch | `confirm` 入力（`destroy-dev` 完全一致）+ Environment `dev-destroy` の承認 |
 | `deploy-backend-dev.yml` | workflow_dispatch | backend（api + worker）の Docker build → ECR push → ECS サービス更新。`run_migrations` 入力あり（L-11 / Issue #182 で `deploy-app-dev.yml` から分離） |
 | `deploy-frontend-dev.yml` | workflow_dispatch | frontend（Next.js SSR）の Docker build → ECR push → ECS サービス更新 |
+| `dev-smoke-test.yml` | workflow_dispatch | dev の配線を機械的に検証する smoke / integration test（staging-smoke-test.yml を踏襲。Issue #192）。apply ロールを流用せず、dev state file の S3 read-only に限定した専用ロール（Environment `dev-readonly`）で `terraform output` を取得し、以降の HTTP 検証（`scripts/staging/smoke-test.ts`、`npm run smoke:dev`）は AWS credential を使わない。dev の test data は destroy まで残存する |
 
 backend / frontend のデプロイは L-11（Issue #182）で分離した。イメージタグは各 workflow が自分のビルド時点のコミット short SHA を独立して使い、backend / frontend でタグを意図的に同期しない。ロールバック（`image_tag` 入力）も workflow 単位で独立して行う。デプロイ手順本体は reusable workflow `deploy-service.yml`（Issue #180）に共通化されている。
 
@@ -114,9 +115,11 @@ GitHub Environments / Variables:
 |---|---|---|
 | Environment | `dev` | apply / deploy。required reviewer 必須 |
 | Environment | `dev-destroy` | destroy 専用。required reviewer 必須 |
+| Environment | `dev-readonly` | smoke test 専用（Issue #192）。dev state file の S3 read-only ロールのみ引き受け、apply / destroy 権限は持たない。権限が最小のため required reviewer は必須にしない（staging-readonly と同じ方針） |
 | Variable | `AWS_REGION` | `ap-northeast-1` |
 | Variable | `AWS_PLAN_ROLE_ARN` | plan 用読み取りロール |
 | Variable | `AWS_APPLY_ROLE_ARN` | apply / destroy / deploy 用ロール |
+| Variable | `AWS_DEV_READONLY_ROLE_ARN` | `dev-smoke-test.yml` 用の dev state 読み取り専用ロール（Issue #192） |
 
 ## destroy の安全策
 

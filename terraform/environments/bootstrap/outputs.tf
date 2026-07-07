@@ -17,3 +17,8 @@ output "staging_state_readonly_role_arn" {
   description = "staging-smoke-test.yml 用の staging state 読み取り専用ロール ARN（AWS_STAGING_READONLY_ROLE_ARN に設定する）"
   value       = aws_iam_role.staging_state_readonly.arn
 }
+
+output "dev_state_readonly_role_arn" {
+  description = "dev-smoke-test.yml 用の dev state 読み取り専用ロール ARN（AWS_DEV_READONLY_ROLE_ARN に設定する。Issue #192）"
+  value       = aws_iam_role.dev_state_readonly.arn
+}

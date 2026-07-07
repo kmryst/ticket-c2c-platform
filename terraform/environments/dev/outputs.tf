@@ -67,3 +67,13 @@ output "app_url" {
   description = "フロントエンドの公開 HTTPS エンドポイント（ADR-0011）"
   value       = "https://${var.app_subdomain}.${var.hosted_zone_name}"
 }
+
+output "api_base_url" {
+  description = <<-EOT
+    smoke test（dev-smoke-test.yml）等が使う API の base URL（Issue #192）。
+    dev は CloudFront 統合オリジン + ALB 直叩き遮断（ADR-0011 / ADR-0013）が常設のため、
+    staging の alb-http-only 相当のフォールバックは持たず、常に CloudFront 経由の
+    app FQDN + /api を返す。
+  EOT
+  value       = "https://${var.app_subdomain}.${var.hosted_zone_name}/api"
+}

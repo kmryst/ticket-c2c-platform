@@ -116,3 +116,60 @@ resource "aws_iam_role_policy" "staging_state_readonly" {
     ]
   })
 }
+
+# ---------- dev smoke test 用の state 読み取り専用ロール ----------
+# dev-smoke-test.yml は apply ロールを流用せず、dev state file の読み取りに限定した
+# このロールで `terraform output` を取得する（dev-environment.md、staging 版の設計を踏襲。Issue #192）。
+# 以降の HTTP 検証は AWS credential を使わない。
+data "aws_iam_policy_document" "dev_state_readonly_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [module.github_oidc.oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.github_repository}:environment:dev-readonly"]
+    }
+  }
+}
+
+resource "aws_iam_role" "dev_state_readonly" {
+  name                 = "${var.project}-gha-dev-state-readonly"
+  assume_role_policy   = data.aws_iam_policy_document.dev_state_readonly_assume.json
+  max_session_duration = 3600
+}
+
+resource "aws_iam_role_policy" "dev_state_readonly" {
+  name = "read-dev-tfstate"
+  role = aws_iam_role.dev_state_readonly.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        # terraform init（backend 検証）に必要。バケット一覧はオブジェクト名のみで
+        # 状態の中身は含まないため、prefix 条件は付けず GetObject 側で dev に限定する。
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [aws_s3_bucket.tfstate.arn]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = ["${aws_s3_bucket.tfstate.arn}/dev/*"]
+      }
+    ]
+  })
+}
