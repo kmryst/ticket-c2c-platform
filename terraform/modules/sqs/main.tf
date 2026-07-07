@@ -28,7 +28,8 @@ resource "aws_sqs_queue" "this" {
 
 # DLQ 滞留の検知（production-readiness L-5）。
 # Worker の処理失敗で DLQ に移ったメッセージに気づけるよう、1 件以上の滞留で ALARM にする。
-# 通知先（SNS 等）は未整備のため、初期はアラーム状態の可視化のみ（actions なし）。
+# 通知先は root module から dlq_alarm_actions（SNS トピック ARN 等）で受け取る（Issue #200）。
+# 空リストの場合はアラーム状態の可視化のみ（actions なし）。
 resource "aws_cloudwatch_metric_alarm" "dlq_messages" {
   count = var.create_dlq_alarm ? 1 : 0
 
@@ -46,4 +47,8 @@ resource "aws_cloudwatch_metric_alarm" "dlq_messages" {
   dimensions = {
     QueueName = aws_sqs_queue.dlq.name
   }
+
+  # ALARM 遷移だけでなく OK 復帰も通知し、滞留解消（redrive / purge 後）を追跡できるようにする。
+  alarm_actions = var.dlq_alarm_actions
+  ok_actions    = var.dlq_alarm_actions
 }

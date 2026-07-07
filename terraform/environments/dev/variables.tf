@@ -61,3 +61,13 @@ variable "app_subdomain" {
   type        = string
   default     = "ticket-app-dev"
 }
+
+variable "alert_email" {
+  description = <<-EOT
+    CloudWatch アラーム通知（SNS email subscription）の宛先メールアドレス（production-readiness L-5 / Issue #200）。
+    apply は GitHub Actions（terraform-apply-dev.yml）が変数入力なしで実行するため、既定値で運用者宛先を固定する。
+    空文字を渡すと SNS トピック・subscription を作らず、アラームは可視化のみになる。
+  EOT
+  type        = string
+  default     = "komurayoshitodesu@gmail.com"
+}

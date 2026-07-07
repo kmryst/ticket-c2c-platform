@@ -25,3 +25,9 @@ variable "create_dlq_alarm" {
   type        = bool
   default     = true
 }
+
+variable "dlq_alarm_actions" {
+  description = "DLQ アラームの ALARM / OK 遷移時に通知する ARN のリスト（SNS トピック等。production-readiness L-5 / Issue #200）"
+  type        = list(string)
+  default     = []
+}

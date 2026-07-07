@@ -175,6 +175,8 @@ resource "aws_iam_policy" "apply_infra" {
           "scheduler:List*",
           "secretsmanager:Describe*",
           "secretsmanager:List*",
+          "sns:Get*",
+          "sns:List*",
           "sqs:Get*",
           "sqs:List*",
           "sts:DecodeAuthorizationMessage",
@@ -301,6 +303,13 @@ resource "aws_iam_policy" "apply_infra" {
           "scheduler:TagResource",
           "scheduler:UntagResource",
           "scheduler:UpdateSchedule",
+          "sns:CreateTopic",
+          "sns:DeleteTopic",
+          "sns:SetTopicAttributes",
+          "sns:Subscribe",
+          "sns:TagResource",
+          "sns:Unsubscribe",
+          "sns:UntagResource",
           "sqs:Add*",
           "sqs:Create*",
           "sqs:Delete*",
@@ -318,6 +327,9 @@ resource "aws_iam_policy" "apply_infra" {
           # EventBridge Scheduler のスケジュール（L-9 残課題 / Issue #195）。schedule group 未指定時は
           # "default" group に作られる（terraform/modules/scheduled-task）。
           "arn:aws:scheduler:${local.region}:${local.account_id}:schedule/default/${var.managed_resource_name_prefix}*",
+          # SNS アラート通知トピック（L-5 / Issue #200）。subscription ARN は
+          # <topic ARN>:<uuid> 形式のため、同じプレフィックスパターンで Unsubscribe も覆える。
+          "arn:aws:sns:${local.region}:${local.account_id}:${var.managed_resource_name_prefix}*",
           "arn:aws:sqs:${local.region}:${local.account_id}:${var.managed_resource_name_prefix}*",
         ]
       },

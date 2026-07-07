@@ -182,6 +182,10 @@ module "search_projection_queue" {
   name = "${var.name}-search-projection"
   # ADR-0004: FIFO は測定データが必要と示すまで使わない
   fifo = false
+
+  # DLQ 滞留アラームの通知先（production-readiness L-5 / Issue #200）。
+  # observability モジュールのアラート用 SNS トピック（email subscription）へ配線する。
+  dlq_alarm_actions = module.observability.alarm_action_arns
 }
 
 module "eventbridge" {
@@ -546,12 +550,17 @@ module "refresh_token_cleanup" {
 module "observability" {
   source = "../../modules/observability"
 
+  name = var.name
+
   log_group_names = [
     "/ecs/${var.name}-api",
     "/ecs/${var.name}-worker",
     "/ecs/${var.name}-frontend",
   ]
   retention_in_days = 30
+
+  # アラート通知用 SNS トピック + email subscription（production-readiness L-5 / Issue #200）。
+  alert_email = var.alert_email
 }
 
 # ---------- frontend（Next.js SSR。ADR-0011 / Issue #146） ----------
