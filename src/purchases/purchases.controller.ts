@@ -17,14 +17,26 @@ import {
   HttpCode,
   Param,
   Post,
+  Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+// FastifyRequest / FastifyReply はクライアント IP の解決と Retry-After header の設定に使います。
+import { FastifyReply, FastifyRequest } from 'fastify';
 // JwtPayload は JwtAuthGuard 検証済みトークンの claim 型です。
 import { JwtPayload } from '../auth/auth.types';
+// resolveClientIp は X-Forwarded-For を trusted-hops 方式で解決します（ADR-0012）。
+import { resolveClientIp } from '../auth/client-ip';
 // CurrentUser は request.user（検証済み payload）を handler 引数として受け取るデコレータです。
 import { CurrentUser } from '../auth/current-user.decorator';
 // JwtAuthGuard は Bearer トークンを検証する自作 Guard です（ADR-0010）。
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+// AuthRateLimitService は Valkey 固定ウィンドウのレート制限です（ADR-0012 のパターンを購入へ再利用。ADR-0015）。
+// extractRetryAfterSeconds は 429 例外から Retry-After 用の待機秒数を取り出す共有 helper です。
+import {
+  AuthRateLimitService,
+  extractRetryAfterSeconds,
+} from '../auth/rate-limit.service';
 // PurchasesService は購入判定の business logic と transaction 処理を持つ service です。
 import { PurchasesService } from './purchases.service';
 
@@ -32,8 +44,11 @@ import { PurchasesService } from './purchases.service';
 // controller は薄く保ち、在庫や transaction の判断は PurchasesService に委譲します。
 @Controller('events/:eventId/purchases')
 export class PurchasesController {
-  // constructor injection で PurchasesService を受け取り、handler から呼び出します。
-  constructor(private readonly purchasesService: PurchasesService) {}
+  // constructor injection で PurchasesService とレート制限 service を受け取り、handler から呼び出します。
+  constructor(
+    private readonly purchasesService: PurchasesService,
+    private readonly rateLimit: AuthRateLimitService,
+  ) {}
 
   // @Post() は POST /events/:eventId/purchases をこの method に対応させます。
   @Post()
@@ -50,7 +65,29 @@ export class PurchasesController {
     @CurrentUser() user: JwtPayload,
     // body は JSON request body 全体を unknown として受け、service 側で validation します。
     @Body() body: unknown,
+    // request はクライアント IP の解決（trusted-hops 方式）にだけ使います。
+    @Req() request: FastifyRequest,
+    // passthrough を付けることで、429 時の Retry-After header だけ書き込み、
+    // response body は従来どおり NestJS の戻り値シリアライズに任せられます。
+    @Res({ passthrough: true }) reply: FastifyReply,
   ) {
+    // レート制限（ADR-0015 / Issue #205）: JwtAuthGuard 通過後なので user_id は常にあります。
+    // user_id（secondary）が厳しいプライマリゲート、IP は NAT 相乗りを誤ブロックしない
+    // 緩いバックストップです。超過は 429 + Retry-After。
+    try {
+      await this.rateLimit.enforce('purchase', {
+        ip: resolveClientIp(request),
+        secondary: user.sub,
+      });
+    } catch (error) {
+      // 429 の場合、service が body に入れた retryAfterSeconds を標準の Retry-After header にも反映します。
+      const retryAfter = extractRetryAfterSeconds(error);
+      if (retryAfter !== undefined) {
+        reply.header('Retry-After', String(retryAfter));
+      }
+      throw error;
+    }
+
     // service 内で NestJS exception が投げられた場合は、そのまま framework に処理させます。
     try {
       // 購入者はクライアント申告ではなく、トークンの sub claim（users.id）を使います。

@@ -43,8 +43,10 @@ import { resolveClientIp } from './client-ip';
 // TokenClientMeta はリフレッシュトークン発行時に記録する調査用のクライアント情報です。
 import { TokenClientMeta } from './refresh-tokens.service';
 // AuthRateLimitService は signup / login / refresh の固定ウィンドウレート制限です（ADR-0012、Issue #167）。
+// extractRetryAfterSeconds は 429 例外から Retry-After 用の待機秒数を取り出す共有 helper です。
 import {
   AuthRateLimitService,
+  extractRetryAfterSeconds,
   RateLimitedEndpoint,
   RateLimitSubject,
 } from './rate-limit.service';
@@ -222,28 +224,6 @@ export class AuthController {
       throw error;
     }
   }
-}
-
-// extractRetryAfterSeconds は AuthRateLimitService の 429 例外から待機秒数を取り出します。
-function extractRetryAfterSeconds(error: unknown): number | undefined {
-  if (
-    typeof error === 'object' &&
-    error !== null &&
-    'getResponse' in error &&
-    typeof (error as { getResponse: unknown }).getResponse === 'function'
-  ) {
-    const response = (error as { getResponse: () => unknown }).getResponse();
-    if (
-      typeof response === 'object' &&
-      response !== null &&
-      'retryAfterSeconds' in response &&
-      typeof (response as { retryAfterSeconds: unknown }).retryAfterSeconds ===
-        'number'
-    ) {
-      return (response as { retryAfterSeconds: number }).retryAfterSeconds;
-    }
-  }
-  return undefined;
 }
 
 // extractBodyEmail はレート制限のメール系統キー用に body から email を安全に取り出します。
