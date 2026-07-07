@@ -41,6 +41,7 @@
 - 人気イベントの影響隔離は、(1) Valkey による売り切れ後の即時拒否、(2) Worker 分離による非同期処理の隔離、(3) API の DB コネクションプール上限、の 3 層で行う。SQS FIFO によるイベント単位直列化は測定データが出るまで導入しない（[ADR-0004](../adr/0004-defer-sqs-fifo.md)）。
 - フロントエンド（[ADR-0011](../adr/0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md)）: `ticket-app-dev.ticket-c2c.click` → CloudFront（us-east-1 ACM 証明書）→ 同一 ALB を 2 origin（api / frontend、custom header で識別）とする統合オリジン。`/api/*` は API target group、その他は frontend target group（ECS Fargate 上の Next.js SSR、専用 ECR イメージ）へ。ALB の default action は API のまま。`/_next/static/*` のみ edge で長期キャッシュ、SSR / API はキャッシュ無効 + Cookie 全転送。
 - 定期バッチ（Issue #195）: EventBridge Scheduler（日次 03:30 JST）→ ECS RunTask で、API と同一イメージを command override（`node dist/src/database/cleanup-refresh-tokens.js`）起動し、`refresh_tokens` の期限切れ（猶予 30 日超過）ファミリーを削除する。新規 Lambda・専用イメージは持たず、DB migration（`run-db-migration.sh`）と同じ「既存イメージ・別コマンド」パターン。Terraform は `terraform/modules/scheduled-task`。ログは API のロググループへ出力し、専用アラームは持たない。
+- アラート通知（L-5 / Issue #200）: SQS DLQ 滞留の CloudWatch アラーム（滞留 1 件以上で ALARM。Issue #100）の action を、環境共通のアラート用 SNS トピック（`<name>-alerts`、observability モジュール）→ email subscription（`alert_email` 変数、既定は運用者宛）へ配線する。ALARM / OK 両遷移を通知する。email subscription は受信者の Confirm が必要で、destroy 前提運用の dev では apply のたびに confirm が発生する。
 - ALB 直叩き遮断（[ADR-0013](../adr/0013-restrict-alb-ingress-to-cloudfront-prefix-list.md)）: ALB セキュリティグループの ingress を CloudFront origin-facing managed prefix list に限定し、CloudFront を経由しない直接アクセスを遮断する。これにより WAF（L-12）の迂回経路と、認証レート制限の IP 判定バイパス（ADR-0012）を同時に塞ぐ。SSR のサーバー側 API fetch も ALB 直参照をやめ、CloudFront 経由（`ticket-app-dev.ticket-c2c.click/api`）にする。
 
 ## 採用 / 不採用 / 後回し
@@ -56,6 +57,7 @@
 | SQS Standard + DLQ | 採用 | EventBridge → Worker のバッファ・リトライ |
 | SQS FIFO | 後回し | [ADR-0004](../adr/0004-defer-sqs-fifo.md)。モジュールは `fifo` フラグで対応済みにする |
 | CloudWatch Logs / Metrics | 採用 | ログ保持 30 日 |
+| SNS | 採用 | CloudWatch アラーム（DLQ 滞留）のメール通知（L-5 / Issue #200） |
 | ECR | 採用 | 1 リポジトリ（API / Worker 共用イメージ） |
 | Secrets Manager | 採用 | DB 認証情報（Aurora マネージドローテーション統合） |
 | SSM Parameter Store | 採用 | 非秘密の設定値 |
