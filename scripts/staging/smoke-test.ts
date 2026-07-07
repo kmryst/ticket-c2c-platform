@@ -103,10 +103,11 @@ async function main(): Promise<void> {
   assert(me.userId === auth.user.userId, 'me returns the signed-up user');
 
   // 3. seed: capacity 2 の test event を API 経由で作成する
+  // イベント登録は認証必須（L-10 / Issue #194）。作成者は JWT の sub になる。
   const eventType = `smoke-${runId}`;
   const created = await requestJson<EventSummary>('POST /events', `${baseUrl}/events`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...authHeader },
     body: JSON.stringify({
       title: runLabel,
       eventType,
