@@ -196,6 +196,55 @@ describe('AuthRateLimitService (実 Valkey / Lua script)', () => {
     ).rejects.toMatchObject({ status: 429 });
   });
 
+  // 超過時の構造化ログ + EMF メトリクス（Issue #204）。
+  it('超過時に構造化ログ（rate_limit_exceeded）と EMF メトリクス（<Endpoint>RateLimited）を出す', async () => {
+    process.env.AUTH_RATE_LIMIT_PURCHASE_SECONDARY = '1';
+    process.env.METRICS_NAMESPACE = 'TicketC2C/test';
+    const user = `user-${randomUUID()}`;
+    usedKeys.push(`ratelimit:purchase:sub:${user}`);
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    try {
+      await expect(
+        service.enforce('purchase', { secondary: user }),
+      ).resolves.toBeUndefined();
+      await expect(
+        service.enforce('purchase', { secondary: user }),
+      ).rejects.toMatchObject({ status: 429 });
+
+      const warnLine = warnSpy.mock.calls
+        .map(([line]) => line)
+        .find(
+          (line): line is string =>
+            typeof line === 'string' && line.includes('rate_limit_exceeded'),
+        );
+      expect(warnLine).toBeDefined();
+      const parsed = JSON.parse(warnLine as string);
+      expect(parsed).toMatchObject({
+        event: 'rate_limit_exceeded',
+        endpoint: 'purchase',
+        secondary: user,
+      });
+      expect(parsed.retryAfterSeconds).toBeGreaterThan(0);
+
+      const emfLine = logSpy.mock.calls
+        .map(([line]) => line)
+        .find(
+          (line): line is string =>
+            typeof line === 'string' && line.includes('PurchaseRateLimited'),
+        );
+      expect(emfLine).toBeDefined();
+      const record = JSON.parse(emfLine as string);
+      expect(record.PurchaseRateLimited).toBe(1);
+    } finally {
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+      delete process.env.METRICS_NAMESPACE;
+    }
+  });
+
   it('VALKEY_URL 未設定では fail-open（制限なし）で通る', async () => {
     const original = process.env.VALKEY_URL;
     delete process.env.VALKEY_URL;
