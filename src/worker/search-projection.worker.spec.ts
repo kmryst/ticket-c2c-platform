@@ -159,3 +159,110 @@ describe('SearchProjectionWorker.pollOnce', () => {
     expect(deletedReceiptHandles()).toEqual(['rh1-redelivered']);
   });
 });
+
+// 可観測性（ADR-0014 / Issue #203）の追加仕様:
+// - ReceiveMessage は SentTimestamp を要求し、削除完了時に処理遅延を EMF で出す
+// - detail._traceContext が同梱されていても（無くても）処理は変わらない
+describe('SearchProjectionWorker observability (Issue #203)', () => {
+  let sqsSend: jest.SpyInstance;
+  let logSpy: jest.SpyInstance;
+  let worker: SearchProjectionWorker;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    sqsSend = jest.spyOn(SQSClient.prototype, 'send');
+    logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    worker = new SearchProjectionWorker(
+      'https://sqs.example/queue',
+      'opensearch.example',
+    );
+  });
+
+  afterEach(() => {
+    sqsSend.mockRestore();
+    logSpy.mockRestore();
+    delete process.env.METRICS_NAMESPACE;
+  });
+
+  function pollOnce(): Promise<void> {
+    return (worker as unknown as { pollOnce(): Promise<void> }).pollOnce();
+  }
+
+  it('ReceiveMessage で SentTimestamp 属性を要求する', async () => {
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: [] });
+      }
+      return Promise.resolve({});
+    });
+
+    await pollOnce();
+
+    const receive = sqsSend.mock.calls
+      .map(([command]) => command)
+      .find((command) => command instanceof ReceiveMessageCommand) as
+      | ReceiveMessageCommand
+      | undefined;
+    expect(receive?.input.MessageSystemAttributeNames).toEqual([
+      'SentTimestamp',
+    ]);
+  });
+
+  it('削除完了後に WorkerProcessingLagMs を EMF で出力する', async () => {
+    process.env.METRICS_NAMESPACE = 'TicketC2C/test';
+    const message = {
+      ...eventListedMessage('e1', 'rh1'),
+      Attributes: { SentTimestamp: String(Date.now() - 5000) },
+    };
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: [message] });
+      }
+      return Promise.resolve({});
+    });
+    opensearchMock.index.mockResolvedValue({});
+
+    await pollOnce();
+
+    const emfLines = logSpy.mock.calls
+      .map(([line]) => line)
+      .filter(
+        (line): line is string =>
+          typeof line === 'string' && line.includes('WorkerProcessingLagMs'),
+      );
+    expect(emfLines).toHaveLength(1);
+    const record = JSON.parse(emfLines[0]);
+    expect(record.WorkerProcessingLagMs).toBeGreaterThanOrEqual(5000);
+    expect(record._aws.CloudWatchMetrics[0].Namespace).toBe('TicketC2C/test');
+  });
+
+  it('detail に _traceContext が同梱されていても通常どおり処理・削除される', async () => {
+    const body = JSON.parse(eventListedMessage('e1', 'rh1').Body);
+    body.detail._traceContext = {
+      'x-amzn-trace-id':
+        'Root=1-5f84c7a1-aaaaaaaaaaaaaaaaaaaaaaaa;Parent=bbbbbbbbbbbbbbbb;Sampled=1',
+    };
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({
+          Messages: [
+            {
+              MessageId: 'mid-e1',
+              ReceiptHandle: 'rh1',
+              Body: JSON.stringify(body),
+            },
+          ],
+        });
+      }
+      return Promise.resolve({});
+    });
+    opensearchMock.index.mockResolvedValue({});
+
+    await pollOnce();
+
+    expect(opensearchMock.index).toHaveBeenCalledTimes(1);
+    // _traceContext はプロジェクションのドキュメントへは書き込まれない。
+    const indexedDoc = opensearchMock.index.mock.calls[0][0].body;
+    expect(indexedDoc).not.toHaveProperty('_traceContext');
+  });
+});

@@ -9,6 +9,11 @@ import {
   PutEventsCommand,
 } from '@aws-sdk/client-eventbridge';
 import { getOptionalEnv } from '../config';
+// injectTraceContext は現在の trace を EventBridge detail へ同梱するための helper です（ADR-0014）。
+import {
+  injectTraceContext,
+  TRACE_CONTEXT_FIELD,
+} from '../observability/trace-context';
 
 // DomainEventType は technology-stack.md で定義したドメインイベントです。
 export type DomainEventType =
@@ -36,6 +41,15 @@ export class DomainEventsService {
     if (!this.client || !this.busName) {
       return;
     }
+
+    // 現在の trace context を detail に同梱します（ADR-0014）。EventBridge → SQS には
+    // trace header を運ぶ仕組みがないため、detail 内の予約フィールドで Worker まで届けます。
+    // トレーシング無効時（ローカル PoC）は undefined になり、detail は従来のままです。
+    const traceContext = injectTraceContext();
+    const detailWithTrace = traceContext
+      ? { ...detail, [TRACE_CONTEXT_FIELD]: traceContext }
+      : detail;
+
     try {
       await this.client.send(
         new PutEventsCommand({
@@ -44,7 +58,7 @@ export class DomainEventsService {
               EventBusName: this.busName,
               Source: this.source,
               DetailType: detailType,
-              Detail: JSON.stringify(detail),
+              Detail: JSON.stringify(detailWithTrace),
             },
           ],
         }),

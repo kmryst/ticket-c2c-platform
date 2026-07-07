@@ -3,6 +3,9 @@
 // ECS タスク定義で `node dist/src/worker.js` を command に指定して起動します。
 
 import 'dotenv/config';
+// tracing は計装対象モジュールより先に初期化します（ADR-0014）。opt-in のため
+// OTEL_TRACING_ENABLED=true でなければ副作用はありません。
+import './observability/tracing';
 import { getOptionalEnv } from './config';
 import { SearchProjectionWorker } from './worker/search-projection.worker';
 

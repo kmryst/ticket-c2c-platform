@@ -399,6 +399,53 @@ resource "aws_iam_role_policy" "worker_task_sqs" {
   })
 }
 
+# X-Ray トレース書き込み（ADR-0014 / Issue #203）。
+# 同一タスク内の ADOT collector sidecar が task role の資格情報で
+# PutTraceSegments / PutTelemetryRecords を呼ぶ。X-Ray の書き込み API は
+# リソースレベル制限をサポートしないため Resource は * とする（それでも actions は最小の 2 つ）。
+resource "aws_iam_role_policy" "api_task_xray" {
+  name = "write-xray-traces"
+  role = aws_iam_role.api_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+        ]
+        Resource = ["*"]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "worker_task_xray" {
+  name = "write-xray-traces"
+  role = aws_iam_role.worker_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+        ]
+        Resource = ["*"]
+      }
+    ]
+  })
+}
+
+# ADOT collector sidecar のイメージ（ADR-0014 / Issue #203）。挙動を再現可能にするためタグを固定する。
+locals {
+  otel_collector_image = "public.ecr.aws/aws-observability/aws-otel-collector:v0.48.0"
+}
+
 module "api_service" {
   source = "../../modules/ecs-service"
 
@@ -419,6 +466,9 @@ module "api_service" {
   autoscaling_max_capacity  = local.dev_settings.autoscaling_max
   scheduled_scaling_actions = local.dev_settings.scheduled_scaling_actions
 
+  # X-Ray 分散トレーシング用 ADOT collector sidecar（ADR-0014 / Issue #203）。
+  otel_collector_image = local.otel_collector_image
+
   environment = {
     PORT                = "3000"
     DB_HOST             = module.aurora.cluster_endpoint
@@ -436,6 +486,15 @@ module "api_service" {
     # CloudFront → ALB 構成のため、X-Forwarded-For の末尾 1 段（ALB が追記した CloudFront edge IP）を
     # 飛ばした位置＝CloudFront が観測した viewer IP を採用する。
     RATE_LIMIT_TRUSTED_PROXY_HOPS = "1"
+    # X-Ray 分散トレーシング（ADR-0014 / Issue #203）。opt-in フラグ + サービスマップ上の表示名。
+    OTEL_TRACING_ENABLED = "true"
+    OTEL_SERVICE_NAME    = "${var.name}-api"
+    # サンプリングはアプリ側の OTel 標準 sampler で制御する。dev は検証用途のため全量（1.0）。
+    OTEL_TRACES_SAMPLER     = "parentbased_traceidratio"
+    OTEL_TRACES_SAMPLER_ARG = "1.0"
+    # ビジネスメトリクス（EMF）の名前空間と Service dimension（ADR-0014）。
+    METRICS_NAMESPACE = "TicketC2C/dev"
+    METRICS_SERVICE   = "api"
   }
 
   secrets = {
@@ -466,9 +525,21 @@ module "worker_service" {
   autoscaling_max_capacity  = local.dev_settings.autoscaling_max
   scheduled_scaling_actions = local.dev_settings.scheduled_scaling_actions
 
+  # X-Ray 分散トレーシング用 ADOT collector sidecar（ADR-0014 / Issue #203）。
+  otel_collector_image = local.otel_collector_image
+
   environment = {
     SQS_QUEUE_URL       = module.search_projection_queue.queue_url
     OPENSEARCH_ENDPOINT = module.opensearch.endpoint
+    # X-Ray 分散トレーシング（ADR-0014 / Issue #203）。Worker 側は API から
+    # EventBridge detail 経由で届く trace context を継続する（consumer span）。
+    OTEL_TRACING_ENABLED = "true"
+    OTEL_SERVICE_NAME    = "${var.name}-worker"
+    # Worker の span は親（API 側）の sampling 判定に追従させる。親なしイベントは全量。
+    OTEL_TRACES_SAMPLER     = "parentbased_traceidratio"
+    OTEL_TRACES_SAMPLER_ARG = "1.0"
+    METRICS_NAMESPACE       = "TicketC2C/dev"
+    METRICS_SERVICE         = "worker"
   }
 }
 
@@ -505,6 +576,9 @@ module "observability" {
 
   # アラート通知用 SNS トピック + email subscription（production-readiness L-5 / Issue #200）。
   alert_email = var.alert_email
+
+  # X-Ray group（ADR-0014 / Issue #203）。この環境の API / Worker のトレースを console で絞り込む。
+  xray_service_names = ["${var.name}-api", "${var.name}-worker"]
 }
 
 # ---------- frontend（Next.js SSR。ADR-0011 / Issue #146） ----------

@@ -19,6 +19,8 @@ import { DatabaseService } from '../database/database.service';
 import { InventoryCacheService } from '../cache/inventory-cache.service';
 // DomainEventsService は購入確定を EventBridge へ伝えるための publisher です。
 import { DomainEventsService } from '../messaging/domain-events.service';
+// emitMetric は購入判定のビジネスメトリクス（EMF）を出します（ADR-0014 / Issue #203）。
+import { emitMetric } from '../observability/emf';
 // purchase.types は controller と service の間で共有する入力・出力の型です。
 import {
   ParsedPurchaseInput,
@@ -136,6 +138,11 @@ export class PurchasesService {
         : false;
 
       if (!isReplayCandidate) {
+        // 前段拒否も購入拒否として計測します。DB には履歴が残らないため、
+        // メトリクスがないと sold_out_precheck の発生量を後から追えません（ADR-0014）。
+        emitMetric('PurchaseRejected', 1, 'Count', {
+          Reason: 'sold_out_precheck',
+        });
         // 前段拒否は DB に履歴を残さない設計です（DB 保護がこのフィルタの目的のため）。
         return {
           purchaseId: null,
@@ -166,6 +173,16 @@ export class PurchasesService {
         gate,
         counterVersion,
       );
+
+      // 購入判定の結果をビジネスメトリクスとして記録します（ADR-0014）。
+      // confirm / reject 率は CloudWatch 側で 2 メトリクスの比として算出します。
+      if (result.status === 'confirmed') {
+        emitMetric('PurchaseConfirmed', 1, 'Count');
+      } else {
+        emitMetric('PurchaseRejected', 1, 'Count', {
+          Reason: result.rejectionReason ?? 'unknown',
+        });
+      }
 
       // 確定購入は EventBridge へ伝搬し、Worker が検索プロジェクションを更新します。
       if (result.status === 'confirmed') {

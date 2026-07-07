@@ -14,6 +14,8 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import Redis from 'ioredis';
 import { getOptionalEnv } from '../config';
+// emitMetric は Valkey fail-open（障害時に判定を DB へ流した事象）の発生量を記録します（ADR-0014）。
+import { emitMetric } from '../observability/emf';
 
 // ReserveOutcome は前段フィルタの判定結果です。
 // - reserved: カウンタを減算できた（DB 確定に進む。DB で失敗したら補償する）
@@ -144,6 +146,9 @@ export class InventoryCacheService implements OnModuleDestroy {
     } catch (error) {
       // Valkey 障害で購入を止めない。正確性は PostgreSQL の条件付き更新が保証します。
       console.error('Valkey reserve failed:', error);
+      // fail-open の発生量をメトリクスに残します（ADR-0014）。前段フィルタが効いていない間は
+      // 売り切れ後のトラフィックが Aurora へ素通りするため、増加はアラート対象の兆候です。
+      emitMetric('ValkeyFailOpen', 1, 'Count', { Operation: 'reserve' });
       return 'unknown';
     }
   }
@@ -179,6 +184,7 @@ export class InventoryCacheService implements OnModuleDestroy {
       return (await this.client.get(this.versionKey(eventId))) ?? '0';
     } catch (error) {
       console.error('Valkey getCounterVersion failed:', error);
+      emitMetric('ValkeyFailOpen', 1, 'Count', { Operation: 'getCounterVersion' });
       return null;
     }
   }
@@ -253,6 +259,7 @@ export class InventoryCacheService implements OnModuleDestroy {
       return exists === 1;
     } catch (error) {
       console.error('Valkey wasRequestSeen failed:', error);
+      emitMetric('ValkeyFailOpen', 1, 'Count', { Operation: 'wasRequestSeen' });
       return true;
     }
   }

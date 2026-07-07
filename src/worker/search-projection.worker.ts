@@ -10,6 +10,16 @@ import {
   SQSClient,
 } from '@aws-sdk/client-sqs';
 import { Client } from '@opensearch-project/opensearch';
+// SpanKind / SpanStatusCode / trace は Worker 側の consumer span を張るための OTel API です。
+// SDK 未起動時（ローカル PoC）は no-op になります（ADR-0014）。
+import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
+// context.with 相当の親 context 指定には extractTraceContext の戻り値を使います。
+import {
+  extractTraceContext,
+  TRACE_CONTEXT_FIELD,
+} from '../observability/trace-context';
+// emitMetric は Worker の処理遅延メトリクス（EMF）を出します（ADR-0014）。
+import { emitMetric } from '../observability/emf';
 // createOpenSearchClient は AWS 上では SigV4 署名付きクライアントを返します（production-readiness M-3）。
 import { createOpenSearchClient } from '../opensearch';
 import { EVENTS_INDEX } from '../search/search.service';
@@ -88,6 +98,8 @@ export class SearchProjectionWorker {
         MaxNumberOfMessages: 10,
         // SQS モジュール側の receive_wait_time_seconds と合わせたロングポーリングです。
         WaitTimeSeconds: 20,
+        // SentTimestamp は処理遅延メトリクス（送信からの経過時間）の計算に使います（ADR-0014）。
+        MessageSystemAttributeNames: ['SentTimestamp'],
       }),
     );
 
@@ -99,6 +111,23 @@ export class SearchProjectionWorker {
           ReceiptHandle: message.ReceiptHandle,
         }),
       );
+      // 削除まで完了した時点の「SQS 送信からの経過時間」を処理遅延として記録します。
+      // キュー全体の滞留は SQS 標準メトリクス ApproximateAgeOfOldestMessage が別途拾うため、
+      // こちらは「正常系での消費までの遅延」を見る用途です。
+      this.emitProcessingLag(message);
+    }
+  }
+
+  // emitProcessingLag は SentTimestamp から処理完了までの経過 ms を EMF で出します。
+  // 属性が欠けている場合（ローカルの偽 SQS など）は何もしません。
+  private emitProcessingLag(message: Message): void {
+    const sentTimestamp = Number(message.Attributes?.SentTimestamp);
+    if (!Number.isFinite(sentTimestamp) || sentTimestamp <= 0) {
+      return;
+    }
+    const lagMs = Date.now() - sentTimestamp;
+    if (lagMs >= 0) {
+      emitMetric('WorkerProcessingLagMs', lagMs, 'Milliseconds');
     }
   }
 
@@ -107,6 +136,44 @@ export class SearchProjectionWorker {
       return;
     }
     const envelope = JSON.parse(message.Body) as EventBridgeEnvelope;
+
+    // detail に同梱された trace context（ADR-0014）を復元し、API 側で始まった trace の
+    // 続きとして consumer span を張ります。context が無ければ独立した trace になります。
+    const parentContext = extractTraceContext(
+      envelope.detail?.[TRACE_CONTEXT_FIELD],
+    );
+    const tracer = trace.getTracer('search-projection-worker');
+
+    await tracer.startActiveSpan(
+      `search-projection ${envelope['detail-type']}`,
+      {
+        kind: SpanKind.CONSUMER,
+        attributes: {
+          'messaging.system': 'aws_sqs',
+          'messaging.operation': 'process',
+        },
+      },
+      parentContext,
+      async (span) => {
+        try {
+          await this.processEnvelope(envelope);
+        } catch (error) {
+          // 失敗した span はエラーとして記録し、X-Ray 側で fault として見えるようにします。
+          if (error instanceof Error) {
+            span.recordException(error);
+          }
+          span.setStatus({ code: SpanStatusCode.ERROR });
+          throw error;
+        } finally {
+          span.end();
+        }
+      },
+    );
+  }
+
+  // processEnvelope は EventBridge イベント 1 件を OpenSearch プロジェクションへ反映します
+  // （旧 handleMessage の本体。trace 用の span 管理と分離しました）。
+  private async processEnvelope(envelope: EventBridgeEnvelope): Promise<void> {
     const detailType = envelope['detail-type'];
     const detail = envelope.detail;
     const eventId = detail.eventId as string | undefined;

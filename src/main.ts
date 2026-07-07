@@ -5,6 +5,10 @@
 
 // dotenv/config は .env の値を process.env に読み込むため、アプリ起動の最初に import します。
 import 'dotenv/config';
+// tracing は計装対象モジュール（http / pg / ioredis / aws-sdk）が require される前に
+// 初期化する必要があるため、dotenv の直後・他のアプリ import より先に読み込みます（ADR-0014）。
+// OTEL_TRACING_ENABLED=true でなければ副作用はありません。
+import './observability/tracing';
 // reflect-metadata は NestJS の decorator / DI が型メタデータを読むために必要です。
 import 'reflect-metadata';
 // NestFactory は NestJS アプリケーション本体を生成するための入口です。
