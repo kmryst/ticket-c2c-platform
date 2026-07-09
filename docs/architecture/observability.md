@@ -117,6 +117,32 @@ API / Worker ─ EMF（stdout 構造化ログ）─► CloudWatch Logs ─► Cl
 - **14.4 / 3 の倍率**: Google SRE の月次 error budget 理論由来の数値だが、本設計は「起動期間中」ベースの SLO であり厳密な適用ではない。heuristic な初期値として扱う。
 - **technical_failure 絶対数アラーム**: 購入 API は低頻度なため、burn-rate の低トラフィックガード（5件/5分）を割り込む時間帯が多い。見逃し防止のため、絶対数の静的閾値アラームを別途併設している。
 - **latency のサンプル数ガード**: `PurchaseRequestLatencyMs` 自体の SampleCount は metric math で直接参照できないため、同時刻に出力される `PurchaseRequestOutcome{Outcome=success}` の Sum を代理指標として使う。
+
+### dev / staging 実地検証（2026-07-09〜10）
+
+**実発火（Aurora の SG から app SG への ingress を一時 revoke → ECS API タスクを force-new-deployment して DB プールを切断 → 事前取得済み JWT トークンで購入 API を呼び出し、technical_failure（HTTP 500）を実際に発生させて検証）**:
+
+| アラーム | 実測値 | ALARM 遷移 | SNS action（ALARM 側） | OK 復帰 | SNS action（OK 側） |
+|---|---|---|---|---|---|
+| `purchase-error-burn-rate-fast` | error_burn_ratio = 200.0（閾値 14.4。success=0, technical_failure=8 → error_rate=100%） | 2026-07-10 00:38:08 JST | `Successfully executed action` | 2026-07-10 00:44:08 JST | `Successfully executed action` |
+| `purchase-technical-failure-weak` | Sum = 8 件 / 5分（閾値 1件） | 2026-07-10 01:12:18 JST | `Successfully executed action` | 2026-07-10 01:16:18 JST | `Successfully executed action` |
+| `purchase-technical-failure-normal` | Sum = 35 件 / 30分（閾値 3件） | 2026-07-10 00:38:28 JST | `Successfully executed action` | 2026-07-10 01:11:26 JST | `Successfully executed action` |
+
+`error-burn-rate-slow`（6 期間連続 = 30 分の持続条件）は、JWT トークンの有効期限（15 分）・購入エンドポイントのレート制限（user_id 主体 10 回/15分、ADR-0015）という運用制約により、実際に 30 分間切れ目なく閾値超過を維持することが困難だった（トークン更新・レート制限回避のためのユーザーローテーションを挟むと、5 分バケットの一部で `eligible_count < 5`（低トラフィックガード）を割り込み、6 期間連続の条件が崩れる）。
+
+**SNS 配線確認のみ（`aws cloudwatch set-alarm-state` で ALARM → SNS action → OK を直接確認。metric math の計算ロジック自体は error-burn-rate-fast の実発火で検証済みのため、evaluation_periods の違いのみの slow burn / latency 系はここでは配線確認に留めた）**:
+
+| アラーム | ALARM 遷移 | SNS action | OK 復帰 | SNS action |
+|---|---|---|---|---|
+| `purchase-error-burn-rate-slow` | 確認済み | `Successfully executed action` | 確認済み | `Successfully executed action` |
+| `purchase-latency-burn-rate-fast` | 確認済み | `Successfully executed action` | 確認済み | `Successfully executed action` |
+| `purchase-latency-burn-rate-slow` | 確認済み | `Successfully executed action` | 確認済み | `Successfully executed action` |
+
+**staging 確認**: `terraform plan` / `apply` が通り、上記 6 アラームすべてが `OK` 状態で作成されたことを確認（軽量パターン）。`alarm_actions` が空でない（`ticket-c2c-staging-alerts` SNS トピック ARN が設定されている）ことも確認した。
+
+**既知の運用事項**:
+- 新規作成したアラーム（特に metric math ベース）は、実際のメトリクスデータが変化しても再評価まで数分〜数十分のラグが観測された。データが本当に届いているか（`get-metric-statistics` で確認）と、アラームの `StateUpdatedTimestamp` が古いままかどうかを切り分けて判断する必要がある。
+- 購入 API のレート制限（user_id 主体 10 回/15分、ADR-0015）と JWT トークンの有効期限（15分）は、30 分以上の持続的な負荷試験を単一ユーザーで行う場合の制約になる。複数ユーザーのトークンをローテーションする、またはレート制限を一時的に緩めるなどの対応が必要。
 - 設計判断の詳細（外部レビューで訂正・追加した点を含む）は [ADR-0017](../adr/0017-purchase-api-slo-burn-rate.md) を参照。
 
 ## CloudWatch アラーム（Issue #218）
