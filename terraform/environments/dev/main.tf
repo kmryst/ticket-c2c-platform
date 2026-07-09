@@ -99,6 +99,9 @@ module "aurora" {
   # dev はエフェメラル環境（未使用時 destroy）のため保持 1 日で十分。prod では 7 日以上へ。
   backup_retention_period    = 1
   auto_minor_version_upgrade = true
+
+  # Golden Signal アラーム（Issue #218）の通知先。DLQ アラームと同じ SNS トピックへ配線する。
+  alarm_actions = module.observability.alarm_action_arns
 }
 
 module "valkey" {
@@ -258,6 +261,9 @@ module "alb" {
 
   # フロントエンド用 target group と CloudFront 識別ヘッダーの listener rule（ADR-0011）。
   enable_frontend = true
+
+  # Golden Signal アラーム（Issue #218）の通知先。DLQ アラームと同じ SNS トピックへ配線する。
+  alarm_actions = module.observability.alarm_action_arns
 }
 
 # API の公開 FQDN を ALB へ向ける
@@ -496,6 +502,10 @@ resource "aws_iam_role_policy" "worker_task_adot_self_monitoring_logs" {
 # ADOT collector sidecar のイメージ（ADR-0014 / Issue #203）。挙動を再現可能にするためタグを固定する。
 locals {
   otel_collector_image = "public.ecr.aws/aws-observability/aws-otel-collector:v0.48.0"
+
+  # EMF ビジネスメトリクスの名前空間（ADR-0014）。ECS タスクの METRICS_NAMESPACE と
+  # observability モジュールの EMF アラーム（Issue #218）で同じ値を使う。
+  metrics_namespace = "TicketC2C/dev"
 }
 
 module "api_service" {
@@ -517,6 +527,9 @@ module "api_service" {
   autoscaling_min_capacity  = local.dev_settings.autoscaling_min
   autoscaling_max_capacity  = local.dev_settings.autoscaling_max
   scheduled_scaling_actions = local.dev_settings.scheduled_scaling_actions
+
+  # CPU / Memory アラーム（Issue #218）の通知先。DLQ アラームと同じ SNS トピックへ配線する。
+  alarm_actions = module.observability.alarm_action_arns
 
   # X-Ray 分散トレーシング用 ADOT collector sidecar（ADR-0014 / Issue #203）。
   otel_collector_image = local.otel_collector_image
@@ -545,7 +558,7 @@ module "api_service" {
     OTEL_TRACES_SAMPLER     = "parentbased_traceidratio"
     OTEL_TRACES_SAMPLER_ARG = "1.0"
     # ビジネスメトリクス（EMF）の名前空間と Service dimension（ADR-0014）。
-    METRICS_NAMESPACE = "TicketC2C/dev"
+    METRICS_NAMESPACE = local.metrics_namespace
     METRICS_SERVICE   = "api"
   }
 
@@ -577,6 +590,9 @@ module "worker_service" {
   autoscaling_max_capacity  = local.dev_settings.autoscaling_max
   scheduled_scaling_actions = local.dev_settings.scheduled_scaling_actions
 
+  # CPU / Memory アラーム（Issue #218）の通知先。DLQ アラームと同じ SNS トピックへ配線する。
+  alarm_actions = module.observability.alarm_action_arns
+
   # X-Ray 分散トレーシング用 ADOT collector sidecar（ADR-0014 / Issue #203）。
   otel_collector_image = local.otel_collector_image
 
@@ -590,7 +606,7 @@ module "worker_service" {
     # Worker の span は親（API 側）の sampling 判定に追従させる。親なしイベントは全量。
     OTEL_TRACES_SAMPLER     = "parentbased_traceidratio"
     OTEL_TRACES_SAMPLER_ARG = "1.0"
-    METRICS_NAMESPACE       = "TicketC2C/dev"
+    METRICS_NAMESPACE       = local.metrics_namespace
     METRICS_SERVICE         = "worker"
   }
 }
@@ -631,6 +647,10 @@ module "observability" {
 
   # X-Ray group（ADR-0014 / Issue #203）。この環境の API / Worker のトレースを console で絞り込む。
   xray_service_names = ["${var.name}-api", "${var.name}-worker"]
+
+  # EMF ビジネスメトリクスのアラーム（ValkeyFailOpen / WorkerProcessingLagMs。Issue #218）。
+  # ECS タスクの METRICS_NAMESPACE と同じ名前空間を渡す。
+  metrics_namespace = local.metrics_namespace
 }
 
 # ---------- frontend（Next.js SSR。ADR-0011 / Issue #146） ----------
@@ -709,6 +729,9 @@ module "frontend_service" {
   autoscaling_min_capacity  = local.dev_settings.autoscaling_min
   autoscaling_max_capacity  = local.dev_settings.autoscaling_max
   scheduled_scaling_actions = local.dev_settings.scheduled_scaling_actions
+
+  # CPU / Memory アラーム（Issue #218）の通知先。DLQ アラームと同じ SNS トピックへ配線する。
+  alarm_actions = module.observability.alarm_action_arns
 
   environment = {
     PORT     = "3000"

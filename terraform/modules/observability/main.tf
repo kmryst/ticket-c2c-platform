@@ -37,3 +37,61 @@ resource "aws_xray_group" "this" {
     for service in var.xray_service_names : "service(\"${service}\")"
   ])
 }
+
+# ---------- EMF ビジネスメトリクスのアラーム（Issue #218） ----------
+# EMF（ADR-0014）は CloudWatch Logs からメトリクスが自動抽出されるため、
+# metric filter は不要でアラーム定義だけでよい。メトリクスの所有 terraform モジュールが
+# 存在しない（アプリコードが出す）ため、SNS トピックを持つこのモジュールに置く。
+# 通知先はこのモジュール自身のアラート用 SNS トピック（alert_email が空なら actions なし）。
+
+# ValkeyFailOpen: 前段フィルタ（Valkey）障害時の fail-open は設計上の許容だが、
+# レート制限・売り切れ前段拒否が無効化されたまま「静かに」進行する状態を放置しないため、
+# 1 件でも観測したら即 ALARM にする。dimension は Service のみの集計側 set を使い、
+# Operation 別（reserve / getCounterVersion / wasRequestSeen）の内訳はコンソールで確認する。
+resource "aws_cloudwatch_metric_alarm" "valkey_fail_open" {
+  count = var.metrics_namespace != "" ? 1 : 0
+
+  alarm_name          = "${var.name}-valkey-fail-open"
+  alarm_description   = "API が Valkey 障害で fail-open した（前段フィルタ・レート制限が無効化されている。Valkey の状態を確認する）"
+  namespace           = var.metrics_namespace
+  metric_name         = "ValkeyFailOpen"
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    Service = "api"
+  }
+
+  # ALARM 遷移だけでなく OK 復帰も通知する（DLQ アラームと同じ運用）。
+  alarm_actions = aws_sns_topic.alerts[*].arn
+  ok_actions    = aws_sns_topic.alerts[*].arn
+}
+
+# WorkerProcessingLagMs: SQS 送信から Worker の処理完了（削除）までの経過時間。
+# p90 が閾値を超える持続は「検索プロジェクションの鮮度劣化」（Worker のスループット不足・
+# 処理詰まり）として通知する。DLQ アラーム（処理失敗）とは別軸の「遅いが失敗していない」検知。
+resource "aws_cloudwatch_metric_alarm" "worker_processing_lag" {
+  count = var.metrics_namespace != "" ? 1 : 0
+
+  alarm_name          = "${var.name}-worker-processing-lag"
+  alarm_description   = "Worker の処理遅延（WorkerProcessingLagMs p90）が ${var.worker_lag_alarm_threshold_ms} ms を超過（検索プロジェクションの鮮度劣化。Worker の詰まり・スループット不足を確認する）"
+  namespace           = var.metrics_namespace
+  metric_name         = "WorkerProcessingLagMs"
+  extended_statistic  = "p90"
+  period              = 300
+  evaluation_periods  = 2
+  threshold           = var.worker_lag_alarm_threshold_ms
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    Service = "worker"
+  }
+
+  alarm_actions = aws_sns_topic.alerts[*].arn
+  ok_actions    = aws_sns_topic.alerts[*].arn
+}

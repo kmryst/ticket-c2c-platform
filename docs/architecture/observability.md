@@ -76,6 +76,27 @@ API / Worker ─ EMF（stdout 構造化ログ）─► CloudWatch Logs ─► Cl
 - confirm / reject 率は CloudWatch 側で 2 メトリクスの比として算出する。
 - キュー全体の滞留は SQS 標準メトリクス `ApproximateAgeOfOldestMessage`（DLQ アラーム含む。Issue #201）を併用する。WorkerProcessingLagMs は「正常系での消費までの遅延」を見る用途。
 
+## CloudWatch アラーム（Issue #218）
+
+SRE の Four Golden Signals（Errors / Availability / Saturation / Latency 相当）を、既存パターン（sqs モジュールの DLQ アラーム）に倣い「リソースを所有する terraform モジュール内に配置し、`alarm_actions` を root module から注入」する形で実装している。全アラームの通知先は observability モジュールのアラート用 SNS トピック（`<name>-alerts` → email。L-5 / Issue #200）で、ALARM / OK 両遷移を通知する。
+
+| アラーム | 所有モジュール | メトリクス | 条件 | 意図 |
+|---|---|---|---|---|
+| `<name>-alb-5xx` | alb | `HTTPCode_Target_5XX_Count` + `HTTPCode_ELB_5XX_Count`（metric math 合算、FILL 0 埋め） | Sum >= 10 / 5 分 x 2 期間 | Errors: API / frontend のエラー急増 |
+| `<name>-alb-{api,frontend}-unhealthy-hosts` | alb | `UnHealthyHostCount` | Max >= 1 / 5 分 x 2 期間 | Availability: 回復しないヘルスチェック失敗 |
+| `<service>-cpu-high` / `<service>-memory-high` | ecs-service（api / worker / frontend 各サービス） | `CPUUtilization` / `MemoryUtilization` | Avg > 85% / 5 分 x 3 期間 | Saturation: スケール不足・OOM kill 前兆 |
+| `<name>-aurora-cpu-high` | aurora | `CPUUtilization`（DBClusterIdentifier） | Avg > 80% / 5 分 x 3 期間 | Saturation: クエリ性能劣化 |
+| `<name>-aurora-freeable-memory-low` | aurora | `FreeableMemory` | Avg < 256 MiB / 5 分 x 3 期間 | Saturation: メモリ枯渇 |
+| `<name>-aurora-connections-high` | aurora | `DatabaseConnections` | Avg > 推定 max_connections の 80% / 5 分 x 3 期間 | Saturation: 接続リーク。閾値は max ACU から自動導出 |
+| `<name>-aurora-acu-near-max` | aurora | `ServerlessDatabaseCapacity` | Avg > max_capacity の 90% / 5 分 x 3 期間 | Saturation: スケール上限到達 |
+| `<name>-valkey-fail-open` | observability | `ValkeyFailOpen`（EMF、Service=api） | Sum >= 1 / 1 分 x 1 期間 | 前段フィルタ無効化のサイレント進行を即検知 |
+| `<name>-worker-processing-lag` | observability | `WorkerProcessingLagMs`（EMF、Service=worker） | p90 > 30,000 ms / 5 分 x 2 期間 | Latency: 検索プロジェクション鮮度劣化 |
+| `<name>-search-projection-dlq-messages-visible` | sqs（既存。L-5 / Issue #200） | `ApproximateNumberOfMessagesVisible` | Max >= 1 / 1 分 | Worker の処理失敗（DLQ 滞留） |
+
+- Aurora Serverless v2 に `CPUCreditBalance` は存在しない（バーストクレジットは t 系インスタンス専用）。CPU の頭打ちは CPUUtilization + ACU 上限接近で捕捉する。
+- min 0 ACU の auto-pause 中や ECS タスク 0 台ではメトリクスのデータ点自体が出ないため、全アラームで `treat_missing_data = notBreaching`（destroy 前提運用・pause は正常状態）。
+- EMF メトリクスは CloudWatch Logs から自動抽出されるため metric filter は不要（アラーム定義のみ）。EMF アラームはメトリクスを所有する terraform モジュールが存在しないため、SNS トピックを所有する observability モジュールに置く。
+
 ## 環境変数一覧
 
 | 変数 | 例 | 説明 |

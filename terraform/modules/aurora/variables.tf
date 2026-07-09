@@ -84,3 +84,21 @@ variable "auto_minor_version_upgrade" {
   type        = bool
   default     = true
 }
+
+variable "create_alarms" {
+  description = "Aurora の CloudWatch アラーム（CPU / メモリ / 接続数 / ACU 上限接近）を作成するか（Issue #218）"
+  type        = bool
+  default     = true
+}
+
+variable "alarm_actions" {
+  description = "アラームの ALARM / OK 遷移時に通知する ARN のリスト（SNS トピック等。Issue #218）"
+  type        = list(string)
+  default     = []
+}
+
+variable "alarm_freeable_memory_threshold_bytes" {
+  description = "FreeableMemory（bytes）のアラーム閾値。5 分平均がこれを下回る状態が 3 期間続くと ALARM。既定 256 MiB"
+  type        = number
+  default     = 268435456
+}

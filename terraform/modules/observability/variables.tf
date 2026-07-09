@@ -25,3 +25,15 @@ variable "xray_service_names" {
   type        = list(string)
   default     = []
 }
+
+variable "metrics_namespace" {
+  description = "EMF ビジネスメトリクスの CloudWatch 名前空間（ADR-0014、例: TicketC2C/dev）。ECS タスクの METRICS_NAMESPACE と一致させる。空文字の場合は EMF メトリクスのアラーム（Issue #218）を作成しない"
+  type        = string
+  default     = ""
+}
+
+variable "worker_lag_alarm_threshold_ms" {
+  description = "WorkerProcessingLagMs（p90）のアラーム閾値（ms）。5 分 p90 がこれを超える状態が 2 期間続くと ALARM（Issue #218）"
+  type        = number
+  default     = 30000
+}

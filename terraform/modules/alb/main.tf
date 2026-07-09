@@ -164,3 +164,93 @@ resource "aws_lb_listener_rule" "frontend" {
     }
   }
 }
+
+# ---------- CloudWatch アラーム（Golden Signals: Errors / Availability。Issue #218） ----------
+# 既存パターン（sqs モジュールの DLQ アラーム）に倣い、アラームはリソースを所有する
+# このモジュール内に置く。通知先は root module から alarm_actions（SNS トピック ARN 等）で受け取る。
+
+# ALB 経由の 5xx 応答数（Errors）。ターゲット起因（HTTPCode_Target_5XX_Count）と
+# ALB 自身起因（HTTPCode_ELB_5XX_Count: ターゲット未接続・タイムアウト等）は別メトリクスのため、
+# metric math で合算して 1 本のアラームにする。どちらも「エラーが 0 の期間はデータ点自体が出ない」
+# ため、FILL で 0 埋めし、treat_missing_data = notBreaching とあわせて無トラフィック時の誤発火を防ぐ。
+resource "aws_cloudwatch_metric_alarm" "http_5xx" {
+  count = var.create_alarms ? 1 : 0
+
+  alarm_name          = "${var.name}-alb-5xx"
+  alarm_description   = "ALB ${var.name} の 5xx 応答（ターゲット起因 + ALB 起因の合算）が閾値を超過（API / frontend のエラー急増を確認する）"
+  evaluation_periods  = 2
+  threshold           = var.alarm_5xx_threshold
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "e1"
+    expression  = "FILL(m1, 0) + FILL(m2, 0)"
+    label       = "5xx total (target + elb)"
+    return_data = true
+  }
+
+  metric_query {
+    id = "m1"
+    metric {
+      namespace   = "AWS/ApplicationELB"
+      metric_name = "HTTPCode_Target_5XX_Count"
+      stat        = "Sum"
+      period      = 300
+      dimensions = {
+        LoadBalancer = aws_lb.this.arn_suffix
+      }
+    }
+  }
+
+  metric_query {
+    id = "m2"
+    metric {
+      namespace   = "AWS/ApplicationELB"
+      metric_name = "HTTPCode_ELB_5XX_Count"
+      stat        = "Sum"
+      period      = 300
+      dimensions = {
+        LoadBalancer = aws_lb.this.arn_suffix
+      }
+    }
+  }
+
+  # ALARM 遷移だけでなく OK 復帰も通知する（DLQ アラームと同じ運用）。
+  alarm_actions = var.alarm_actions
+  ok_actions    = var.alarm_actions
+}
+
+# target group ごとの unhealthy ターゲット数（Availability）。
+# API / frontend の両 target group を対象にする（frontend は enable_frontend = true のときのみ）。
+# ヘルスチェックは 30s 間隔 x unhealthy_threshold 3 回（約 90 秒）で unhealthy 判定されるため、
+# 5 分 x 2 期間の継続で「一時的な入れ替わり」ではなく「回復しない障害」を通知する。
+locals {
+  unhealthy_host_targets = var.create_alarms ? merge(
+    { api = aws_lb_target_group.api },
+    var.enable_frontend ? { frontend = aws_lb_target_group.frontend[0] } : {},
+  ) : {}
+}
+
+resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
+  for_each = local.unhealthy_host_targets
+
+  alarm_name          = "${var.name}-alb-${each.key}-unhealthy-hosts"
+  alarm_description   = "ALB ${var.name} の ${each.key} target group に unhealthy ターゲットが継続して存在する（タスクのヘルスチェック失敗を確認する）"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "UnHealthyHostCount"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 2
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    LoadBalancer = aws_lb.this.arn_suffix
+    TargetGroup  = each.value.arn_suffix
+  }
+
+  alarm_actions = var.alarm_actions
+  ok_actions    = var.alarm_actions
+}

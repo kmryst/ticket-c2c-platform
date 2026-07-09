@@ -116,3 +116,27 @@ variable "otel_collector_image" {
   type        = string
   default     = null
 }
+
+variable "create_alarms" {
+  description = "CPU / Memory 使用率の CloudWatch アラームを作成するか（Issue #218）"
+  type        = bool
+  default     = true
+}
+
+variable "alarm_actions" {
+  description = "アラームの ALARM / OK 遷移時に通知する ARN のリスト（SNS トピック等。Issue #218）"
+  type        = list(string)
+  default     = []
+}
+
+variable "alarm_cpu_threshold" {
+  description = "CPUUtilization（%）のアラーム閾値。5 分平均がこれを超える状態が 3 期間続くと ALARM"
+  type        = number
+  default     = 85
+}
+
+variable "alarm_memory_threshold" {
+  description = "MemoryUtilization（%）のアラーム閾値。5 分平均がこれを超える状態が 3 期間続くと ALARM"
+  type        = number
+  default     = 85
+}
