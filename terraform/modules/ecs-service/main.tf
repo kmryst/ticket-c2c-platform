@@ -149,3 +149,56 @@ resource "aws_appautoscaling_scheduled_action" "this" {
     max_capacity = each.value.max_capacity
   }
 }
+
+# ---------- CloudWatch アラーム（Golden Signals: Saturation。Issue #218） ----------
+# 既存パターン（sqs モジュールの DLQ アラーム）に倣い、アラームはサービスを所有する
+# このモジュール内に置く。CPU / Memory の持続的な高騰は、スケール不足または
+# リソースリーク（メモリ）の兆候として通知する。Fargate はタスク単位の上限が固定のため、
+# Memory 85% 超の持続は OOM kill（コンテナ強制終了）の前兆になる。
+# タスク 0 台（scale in / 停止中）ではデータ点が出ないため notBreaching にする。
+resource "aws_cloudwatch_metric_alarm" "cpu_high" {
+  count = var.create_alarms ? 1 : 0
+
+  alarm_name          = "${var.name}-cpu-high"
+  alarm_description   = "ECS サービス ${var.name} の CPUUtilization が ${var.alarm_cpu_threshold}% を超過（スケール不足・処理詰まりを確認する）"
+  namespace           = "AWS/ECS"
+  metric_name         = "CPUUtilization"
+  statistic           = "Average"
+  period              = 300
+  evaluation_periods  = 3
+  threshold           = var.alarm_cpu_threshold
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    ClusterName = var.cluster_name
+    ServiceName = aws_ecs_service.this.name
+  }
+
+  # ALARM 遷移だけでなく OK 復帰も通知する（DLQ アラームと同じ運用）。
+  alarm_actions = var.alarm_actions
+  ok_actions    = var.alarm_actions
+}
+
+resource "aws_cloudwatch_metric_alarm" "memory_high" {
+  count = var.create_alarms ? 1 : 0
+
+  alarm_name          = "${var.name}-memory-high"
+  alarm_description   = "ECS サービス ${var.name} の MemoryUtilization が ${var.alarm_memory_threshold}% を超過（OOM kill 前兆・メモリリークを確認する）"
+  namespace           = "AWS/ECS"
+  metric_name         = "MemoryUtilization"
+  statistic           = "Average"
+  period              = 300
+  evaluation_periods  = 3
+  threshold           = var.alarm_memory_threshold
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    ClusterName = var.cluster_name
+    ServiceName = aws_ecs_service.this.name
+  }
+
+  alarm_actions = var.alarm_actions
+  ok_actions    = var.alarm_actions
+}

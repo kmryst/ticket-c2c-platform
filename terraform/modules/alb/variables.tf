@@ -79,3 +79,21 @@ variable "frontend_header_value" {
   type        = string
   default     = "frontend"
 }
+
+variable "create_alarms" {
+  description = "ALB の CloudWatch アラーム（5xx / unhealthy hosts）を作成するか（Issue #218）"
+  type        = bool
+  default     = true
+}
+
+variable "alarm_actions" {
+  description = "アラームの ALARM / OK 遷移時に通知する ARN のリスト（SNS トピック等。Issue #218）"
+  type        = list(string)
+  default     = []
+}
+
+variable "alarm_5xx_threshold" {
+  description = "5xx 合算（ターゲット起因 + ALB 起因）の 5 分あたり許容件数。これ以上が 2 期間続くと ALARM"
+  type        = number
+  default     = 10
+}
