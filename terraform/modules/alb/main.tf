@@ -190,8 +190,12 @@ resource "aws_cloudwatch_metric_alarm" "http_5xx" {
     return_data = true
   }
 
+  # AWS API 仕様（PutMetricAlarm）: 式（e1）の結果のみ ReturnData = true、
+  # 入力側のメトリクス（m1 / m2）は明示的に false にする（省略時の terraform provider 既定値も
+  # false だが、AWS の API 契約どおり明示する）。
   metric_query {
-    id = "m1"
+    id          = "m1"
+    return_data = false
     metric {
       namespace   = "AWS/ApplicationELB"
       metric_name = "HTTPCode_Target_5XX_Count"
@@ -204,7 +208,8 @@ resource "aws_cloudwatch_metric_alarm" "http_5xx" {
   }
 
   metric_query {
-    id = "m2"
+    id          = "m2"
+    return_data = false
     metric {
       namespace   = "AWS/ApplicationELB"
       metric_name = "HTTPCode_ELB_5XX_Count"
