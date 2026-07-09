@@ -79,3 +79,6 @@ YYYY-MM-DD
 | [0011](./0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md) | フロントエンドを Next.js SSR コンテナとして ECS でホスティングし、CloudFront 統合オリジン + httpOnly Cookie 認証を採用する | Accepted |
 | [0012](./0012-refresh-token-rotation-and-auth-hardening.md) | リフレッシュトークンのローテーションと認証の堅牢化（reuse detection・レート制限・シークレットローテーション） | Accepted |
 | [0013](./0013-restrict-alb-ingress-to-cloudfront-prefix-list.md) | ALB の ingress を CloudFront managed prefix list に限定し、直叩きを遮断する | Accepted |
+| [0014](./0014-xray-distributed-tracing-with-adot-sidecar.md) | X-Ray 分散トレーシングを ADOT collector sidecar で導入し、EMF でビジネスメトリクスを出す | Accepted |
+| [0015](./0015-purchase-rate-limit-dual-key.md) | 購入エンドポイントのレート制限を user_id 主体の dual-key 方式で導入する | Accepted |
+| [0016](./0016-purchase-api-sli-definition.md) | 購入 API の SLI（成功率・レイテンシ）を定義する | Accepted |

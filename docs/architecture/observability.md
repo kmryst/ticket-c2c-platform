@@ -72,9 +72,22 @@ API / Worker ─ EMF（stdout 構造化ログ）─► CloudWatch Logs ─► Cl
 | PurchaseRejected | Count | API | Service, Reason | 購入拒否数（sold_out_precheck / DB 判定理由別） |
 | ValkeyFailOpen | Count | API | Service, Operation | 前段フィルタ障害で fail-open した回数。増加は Aurora 素通りの兆候 |
 | WorkerProcessingLagMs | Milliseconds | Worker | Service | SQS 送信から処理完了（削除）までの経過時間 |
+| PurchaseRequestOutcome | Count | API | Service, Outcome | 購入 API の技術的な成否分類（success / technical_failure / rate_limited / invalid_request）。SLI: 成功率の算出元（ADR-0016 / Issue #225） |
+| PurchaseRequestLatencyMs | Milliseconds | API | Service, Outcome | 購入 API の応答時間（Guard 通過後〜応答まで）。SLI: レイテンシ（ADR-0016 / Issue #225） |
 
 - confirm / reject 率は CloudWatch 側で 2 メトリクスの比として算出する。
 - キュー全体の滞留は SQS 標準メトリクス `ApproximateAgeOfOldestMessage`（DLQ アラーム含む。Issue #201）を併用する。WorkerProcessingLagMs は「正常系での消費までの遅延」を見る用途。
+- `PurchaseConfirmed` / `PurchaseRejected` が「業務判定の結果」を表すのに対し、`PurchaseRequestOutcome` / `PurchaseRequestLatencyMs` は「HTTP 応答レベルでシステムとして正しく応答できたか」を表す別軸のメトリクス。sold_out 等のビジネス拒否は HTTP 200 のため `Outcome=success` に含まれる（ADR-0016）。
+
+## 購入 API の SLI（成功率・レイテンシ。ADR-0016 / Issue #225）
+
+購入 API（`POST /events/:eventId/purchases`）は C2C チケット販売の中核フローであり、Issue #218 の ALB 5xx アラーム（全エンドポイント横断の粗いインフラ監視）とは別に、購入 API 単体のユーザー体験としての SLI を定義している。実装は `src/observability/request-outcome.interceptor.ts`（`RequestOutcomeInterceptor`、汎用 NestJS Interceptor）で、`purchases.controller.ts` の `createPurchase` handler に適用している。
+
+- **成功率 SLI**: `count(Outcome=success) / (count(Outcome=success) + count(Outcome=technical_failure))`。`rate_limited`（429）・`invalid_request`（400/401/404/409）は分母から除外する
+- **レイテンシ SLI**: `PurchaseRequestLatencyMs`（`performance.now()` で計測。JwtAuthGuard 通過後〜応答まで）
+- **401 は計測対象外**: NestJS の実行順序（Guard → Interceptor → Handler）により、Guard（`JwtAuthGuard`）が投げる 401 は Interceptor に到達する前に短絡するため。Issue #225 が元々「認証・検索は将来拡張」としていた範囲と一致する
+- 設計判断の詳細（Outcome 分類の根拠、ALB 5xx アラームとの役割分担、`PurchaseRateLimited` との関係）は [ADR-0016](../adr/0016-purchase-api-sli-definition.md) を参照
+- SLO 目標値・burn-rate アラームは別 Issue（フェーズ3）で扱う。本節はあくまで「何を計測するか」の定義
 
 ## CloudWatch アラーム（Issue #218）
 

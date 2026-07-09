@@ -20,6 +20,7 @@ import {
   Req,
   Res,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 // FastifyRequest / FastifyReply はクライアント IP の解決と Retry-After header の設定に使います。
 import { FastifyReply, FastifyRequest } from 'fastify';
@@ -37,6 +38,10 @@ import {
   AuthRateLimitService,
   extractRetryAfterSeconds,
 } from '../auth/rate-limit.service';
+// RequestOutcomeInterceptor は購入 API の SLI（成功率・レイテンシ）を計測する汎用 Interceptor です
+// （ADR-0016 / Issue #225）。Guard（JwtAuthGuard）より後に実行されるため、401 は計測対象外です
+// （NestJS の Guard → Interceptor という実行順序による帰結。ADR-0016 参照）。
+import { RequestOutcomeInterceptor } from '../observability/request-outcome.interceptor';
 // PurchasesService は購入判定の business logic と transaction 処理を持つ service です。
 import { PurchasesService } from './purchases.service';
 
@@ -55,6 +60,11 @@ export class PurchasesController {
   // 購入は認証必須です（ADR-0010、Issue #135）。有効な Bearer トークンがないリクエストは
   // handler 到達前に 401 になり、buyer_id のなりすましはトークンなしには成立しません。
   @UseGuards(JwtAuthGuard)
+  // 購入 API の SLI（成功率・レイテンシ）を計測します（ADR-0016 / Issue #225）。
+  // メトリクス名は `PurchaseRequestLatencyMs`（Milliseconds）/ `PurchaseRequestOutcome`（Count）。
+  @UseInterceptors(
+    new RequestOutcomeInterceptor('PurchaseRequestLatencyMs', 'PurchaseRequestOutcome'),
+  )
   // 購入判定は confirmed / rejected のどちらも業務上は正常応答なので、成功時は 200 に統一します。
   @HttpCode(200)
   // createPurchase は HTTP request を service 呼び出しに変換するだけの薄い handler です。
