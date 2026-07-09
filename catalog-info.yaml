@@ -1,0 +1,30 @@
+# Backstage Software Catalog の Component 定義（source of truth）。
+#
+# idp-golden-path が GitHub URL location（backstage/app-config.yaml の catalog.locations）
+# 経由でこのファイルを取り込む。所有権はこのリポジトリ側にあり、
+# メタデータの変更はこのリポジトリの通常の PR レビューを通る。
+# 経緯: https://github.com/kmryst/idp-golden-path/issues/91
+#
+# lifecycle: staging 環境での検証まで完了、prod 化は未着手（README 参照）のため
+# "production" ではなく "staging" とする。
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ticket-c2c-platform
+  description: >-
+    C2C チケット売買プラットフォームのシステム設計・実装。
+    AWS 上の dev / staging 環境構築、k6 負荷検証、Aurora / Valkey / OpenSearch の failover 検証まで実施
+  annotations:
+    github.com/project-slug: kmryst/ticket-c2c-platform
+  links:
+    - url: https://github.com/kmryst/ticket-c2c-platform
+      title: GitHub Repository
+  tags:
+    - aws
+    - nodejs
+    - terraform
+spec:
+  type: service
+  lifecycle: staging
+  owner: platform
+  system: kmryst-portfolio
