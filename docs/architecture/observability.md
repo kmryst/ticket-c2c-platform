@@ -87,7 +87,37 @@ API / Worker ─ EMF（stdout 構造化ログ）─► CloudWatch Logs ─► Cl
 - **レイテンシ SLI**: `PurchaseRequestLatencyMs`（`performance.now()` で計測。JwtAuthGuard 通過後〜応答まで）
 - **401 は計測対象外**: NestJS の実行順序（Guard → Interceptor → Handler）により、Guard（`JwtAuthGuard`）が投げる 401 は Interceptor に到達する前に短絡するため。Issue #225 が元々「認証・検索は将来拡張」としていた範囲と一致する
 - 設計判断の詳細（Outcome 分類の根拠、ALB 5xx アラームとの役割分担、`PurchaseRateLimited` との関係）は [ADR-0016](../adr/0016-purchase-api-sli-definition.md) を参照
-- SLO 目標値・burn-rate アラームは別 Issue（フェーズ3）で扱う。本節はあくまで「何を計測するか」の定義
+- SLO 目標値・burn-rate アラームは [ADR-0017](../adr/0017-purchase-api-slo-burn-rate.md) / Issue #227 で実装済み（次節参照）
+
+## 購入 API の SLO 目標値と burn-rate アラート（ADR-0017 / Issue #227）
+
+購入 API の SLI（前節）に対して SLO 目標値を定め、CloudWatch metric math による multi-window multi-burn-rate アラート（fast burn / slow burn の2 window）を実装している。terraform-hannibal（別プロジェクト）の ADR-0026 を参考にしたが、購入 API 固有のアプリレベルメトリクス（ALB 集約値ではなく `PurchaseRequestOutcome` / `PurchaseRequestLatencyMs`）を使える点が異なる。実装は `terraform/modules/observability`。
+
+### SLO 目標値
+
+| 項目 | 値 |
+|---|---|
+| 成功率 SLO | 99.5% |
+| レイテンシ SLO | p95 < 800ms（`Outcome=success` のみ対象） |
+| 最小リクエスト数（低トラフィックガード） | 5 件 / 5 分 |
+
+### アラーム一覧
+
+| アラーム | 入力メトリクス | 条件 | 意図 |
+|---|---|---|---|
+| `<name>-purchase-error-burn-rate-fast` | `PurchaseRequestOutcome`（Service=api, Outcome=technical_failure / success） | error burn ratio > 14.4 / 5分 | 成功率 SLO からの急激な逸脱（fast burn） |
+| `<name>-purchase-error-burn-rate-slow` | 同上 | error burn ratio > 3 / 30分（6期間連続） | 成功率 SLO からの持続的な逸脱（slow burn） |
+| `<name>-purchase-technical-failure-weak` | `PurchaseRequestOutcome`（Outcome=technical_failure） | Sum >= 1 / 5分 | 低頻度時（burn-rateガード未満）の早期・弱め通知 |
+| `<name>-purchase-technical-failure-normal` | 同上 | Sum >= 3 / 30分 | 低頻度時の持続検知・通常通知 |
+| `<name>-purchase-latency-burn-rate-fast` | `PurchaseRequestLatencyMs`（Outcome=success、p95） | latency burn ratio > 2.0 / 5分 | レイテンシ SLO からの急激な逸脱（fast burn） |
+| `<name>-purchase-latency-burn-rate-slow` | 同上 | latency burn ratio > 1.2 / 30分（6期間連続） | レイテンシ SLO からの持続的な逸脱（slow burn） |
+
+- **dimension の注意**: `PurchaseRequestOutcome` / `PurchaseRequestLatencyMs` は `Service` + `Outcome` の組み合わせで別系列になる（`emf.ts` の dimension set 仕様）。metric math では必ず `Service="api"` を明示して参照する。
+- **error burn rate の式**: `eligible_count = technical_failure + success`、`error_rate = IF(eligible_count >= 5, technical_failure/eligible_count*100, 0)`、`error_burn_ratio = error_rate / (100 - 99.5)`。「成功率」ではなく「error burn rate」を正本にすることで、しきい値の向き（大きいほど悪い）を直感的にしている。
+- **14.4 / 3 の倍率**: Google SRE の月次 error budget 理論由来の数値だが、本設計は「起動期間中」ベースの SLO であり厳密な適用ではない。heuristic な初期値として扱う。
+- **technical_failure 絶対数アラーム**: 購入 API は低頻度なため、burn-rate の低トラフィックガード（5件/5分）を割り込む時間帯が多い。見逃し防止のため、絶対数の静的閾値アラームを別途併設している。
+- **latency のサンプル数ガード**: `PurchaseRequestLatencyMs` 自体の SampleCount は metric math で直接参照できないため、同時刻に出力される `PurchaseRequestOutcome{Outcome=success}` の Sum を代理指標として使う。
+- 設計判断の詳細（外部レビューで訂正・追加した点を含む）は [ADR-0017](../adr/0017-purchase-api-slo-burn-rate.md) を参照。
 
 ## CloudWatch アラーム（Issue #218）
 
