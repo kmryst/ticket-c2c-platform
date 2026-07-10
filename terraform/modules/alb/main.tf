@@ -4,8 +4,8 @@ resource "aws_security_group" "alb" {
 
   # ingress の送信元は 2 系統をサポートする（ADR-0007 / ADR-0013）。
   #
-  # 1. CIDR ベース（allowed_ingress_cidrs）: 検証時に自分の IP へ絞る等。alb-http-only の既定。
-  #    HTTPS 有効時は 80（リダイレクト用）と 443 の両方を開ける。
+  # 1. CIDR ベース（allowed_ingress_cidrs）: 検証時に自分の IP へ絞る等の escape hatch。既定は空（ingress なし）。
+  #    明示的に渡した場合のみ許可する（Issue #232）。HTTPS 有効時は 80（リダイレクト用）と 443 の両方を開ける。
   dynamic "ingress" {
     for_each = length(var.allowed_ingress_cidrs) > 0 ? (var.enable_https ? [80, 443] : [80]) : []
     content {

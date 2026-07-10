@@ -2,7 +2,7 @@
 
 ## ステータス
 
-Accepted（決定 3 の「初回は alb-http-only」は実施済み。実装順序 step 7 完了後は staging apply workflow の既定を `https-dns` とした。Issue #91 / #94）
+Accepted（決定 3 の「初回は alb-http-only」は実施済み。実装順序 step 7 完了後は staging apply workflow の既定を `https-dns` とした。Issue #91 / #94。destroy workflow との構成解釈の食い違いを解消するため、Terraform 変数 `public_endpoint_mode` の既定値も `https-dns` に統一した。`alb-http-only` はローカル apply の escape hatch として維持。Issue #232）
 
 ## 日付
 
