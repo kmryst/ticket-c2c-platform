@@ -47,3 +47,4 @@ Accepted（frontend origin 向け CloudFront `default_cache_behavior` の `allow
 - WAF 導入時（ADR-0005 の prod 構想）。CloudFront への WAF アタッチと合わせてレート制限・認証系保護を再設計する。
 - 認証で即時失効・リフレッシュトークンが要件化した場合（ADR-0010 の再検討トリガーと同一）。
 - frontend に Server Actions（`'use server'`）または POST/PUT/PATCH/DELETE を受ける Route Handler を追加する場合。CloudFront の `allowed_methods` 拡張をセットで実装する（Issue #236）。
+- （2026-07-10 追記）SSR の server-side fetch が CloudFront 経由（NAT + CloudFront + ALB の回り道）になっており、レイテンシ・コストが実害として顕在化した場合。内部経路（frontend タスクから ALB / API へ直接）への切り替えを再検討する（`docs/architecture/production-readiness.md` L-17、Issue #238）。
