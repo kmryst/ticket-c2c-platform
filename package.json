@@ -30,7 +30,7 @@
     "@nestjs/common": "^11.1.27",
     "@nestjs/core": "^11.1.27",
     "@nestjs/jwt": "^11.0.2",
-    "@nestjs/platform-fastify": "^11.1.27",
+    "@nestjs/platform-fastify": "^11.1.28",
     "@opensearch-project/opensearch": "^3.6.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
