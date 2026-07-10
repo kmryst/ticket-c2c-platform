@@ -3,6 +3,9 @@
 
 locals {
   autoscaling_enabled = var.autoscaling_min_capacity != null && var.autoscaling_max_capacity != null
+  # target-tracking policy は Auto Scaling target（min/max）が有効な場合のみ意味を持つ。
+  # target なしで policy だけ作ると、実際にはスケールしない設定を残すことになる（Issue #234）。
+  autoscaling_policy_enabled = local.autoscaling_enabled && var.autoscaling_cpu_target != null
 }
 
 resource "aws_ecs_task_definition" "this" {
@@ -131,6 +134,26 @@ resource "aws_appautoscaling_target" "this" {
   resource_id        = "service/${var.cluster_name}/${aws_ecs_service.this.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
+}
+
+# CPU 使用率ベースの target-tracking policy（Issue #234）。
+# min/max（aws_appautoscaling_target）だけでは実際にはスケールしないため、
+# 負荷をかけて検証する環境（staging-full）でのみ min/max と policy をセットで有効化する。
+resource "aws_appautoscaling_policy" "cpu" {
+  count = local.autoscaling_policy_enabled ? 1 : 0
+
+  name               = "${var.name}-cpu-target-tracking"
+  policy_type        = "TargetTrackingScaling"
+  service_namespace  = aws_appautoscaling_target.this[0].service_namespace
+  resource_id        = aws_appautoscaling_target.this[0].resource_id
+  scalable_dimension = aws_appautoscaling_target.this[0].scalable_dimension
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+    target_value = var.autoscaling_cpu_target
+  }
 }
 
 resource "aws_appautoscaling_scheduled_action" "this" {
