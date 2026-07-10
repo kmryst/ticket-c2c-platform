@@ -2,7 +2,7 @@
 
 ## ステータス
 
-Accepted
+Accepted（frontend origin 向け CloudFront `default_cache_behavior` の `allowed_methods` は Issue #236 で `GET/HEAD/OPTIONS` に制限した。詳細は「反対材料・トレードオフ」参照）
 
 ## 日付
 
@@ -38,6 +38,7 @@ Accepted
 - **Cookie 認証はトークン失効の弱点（ADR-0010 の L-9）をそのまま引き継ぐ。** リフレッシュトークン・即時失効は引き続きバックログ。また Bearer と Cookie の 2 経路を Guard が受けるため、検証ロジックの分岐が 1 つ増える。
 - **`/api` プレフィックス除去 hook は暗黙の経路知識になる。** ALB にパス書き換え機能がないための実装であり、API Gateway 系ならルーティング層で解決できた。hook は main.ts に閉じ、単体テストで担保する。
 - **同時デプロイの結合。** deploy-app workflow が backend / frontend を同時にデプロイするため、frontend のみの変更でも backend イメージが再ビルドされる。PoC 規模では許容し、頻度が上がったら workflow を分離する。
+- **frontend origin の CloudFront `allowed_methods` を `GET/HEAD/OPTIONS` に絞った（Issue #236）。** 現状 frontend は Server Actions（`'use server'`）・form の `action` 属性・POST 等を受ける Route Handler のいずれも実装していないため、最小権限の原則で PUT/POST/PATCH/DELETE を許可しないことにした。`/api/*` behavior（バックエンドAPI向け）はフルメソッド許可のまま維持する。この制限により、将来 frontend に Server Actions や POST を受ける Route Handler を追加する場合、CloudFront 側の `allowed_methods` 拡張（`terraform/modules/cloudfront/main.tf` の `default_cache_behavior`）を実装の一部として必ず行う必要がある「気づきにくい依存」が生まれる。追加実装時はこの ADR を参照し、CloudFront の許可メソッド拡張をセットで行うこと。
 
 ## 再検討のトリガー
 
@@ -45,3 +46,4 @@ Accepted
 - フロントエンドのトラフィック特性が API と大きく乖離し、ALB / CloudFront の分離（別 distribution / 別 ALB）が必要になった場合。
 - WAF 導入時（ADR-0005 の prod 構想）。CloudFront への WAF アタッチと合わせてレート制限・認証系保護を再設計する。
 - 認証で即時失効・リフレッシュトークンが要件化した場合（ADR-0010 の再検討トリガーと同一）。
+- frontend に Server Actions（`'use server'`）または POST/PUT/PATCH/DELETE を受ける Route Handler を追加する場合。CloudFront の `allowed_methods` 拡張をセットで実装する（Issue #236）。
