@@ -36,11 +36,13 @@ variable "vpc_cidr" {
 variable "public_endpoint_mode" {
   description = <<-EOT
     公開エンドポイントのモード（staging-environment.md / ADR-0008）。
-    alb-http-only: ALB HTTP リスナーのみ。ACM 証明書・HTTPS リスナー・Route53 alias を作らない（初回 staging）。
+    alb-http-only: ALB HTTP リスナーのみ。ACM 証明書・HTTPS リスナー・Route53 alias を作らない。
+    ingress は既定で閉（Issue #232）。ローカル apply でデバッグする際の escape hatch として維持する。
     https-dns: <api_subdomain>.<hosted_zone_name> の ACM 証明書（DNS 検証）・HTTPS リスナー・Route53 alias を作る。
+    現行の既定運用（terraform-apply-staging.yml の入力既定でもある。Issue #94 / #232）。
   EOT
   type        = string
-  default     = "alb-http-only"
+  default     = "https-dns"
 
   validation {
     condition     = contains(["alb-http-only", "https-dns"], var.public_endpoint_mode)
@@ -76,8 +78,10 @@ variable "alb_allowed_ingress_cidrs" {
   description = <<-EOT
     ALB への ingress を CIDR ベースで追加許可する（ADR-0007）。
     ADR-0013 で https-dns の ALB は CloudFront origin-facing prefix list に限定したため、既定は空。
-    alb-http-only モードでは root が 0.0.0.0/0 を明示的に渡す（CloudFront なしのため）。
-    一時的なデバッグで自分の IP を直接許可したい場合のみ CIDR を渡す（escape hatch）。
+    alb-http-only（CloudFront なし）でも既定は空で ingress なし（Issue #232）。
+    一時的なデバッグで自分の IP を直接許可したい場合のみ、明示的に CIDR を渡す（escape hatch）。
+    CI workflow には CIDR 入力を追加しない。ローカル terraform apply での運用手順は
+    staging-environment.md の「alb-http-only をローカル apply で検証する手順」を参照。
   EOT
   type        = list(string)
   default     = []

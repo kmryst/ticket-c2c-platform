@@ -308,8 +308,10 @@ module "alb" {
   certificate_arn = local.https_enabled ? aws_acm_certificate_validation.api[0].certificate_arn : null
 
   # ADR-0013: https-dns（CloudFront あり）では ALB 直叩きを CloudFront prefix list で遮断する。
-  # alb-http-only（CloudFront なし・保護対象なし。初回構築 fallback）では従来どおり CIDR で開ける。
-  allowed_ingress_cidrs   = local.https_enabled ? var.alb_allowed_ingress_cidrs : ["0.0.0.0/0"]
+  # alb-http-only（CloudFront なし・escape hatch）では既定で ingress なし。dev（environments/dev/main.tf）と
+  # 同じく var.alb_allowed_ingress_cidrs を明示的に渡した場合のみ CIDR ベースで許可する
+  #（Issue #232。0.0.0.0/0 全開放の既定は廃止）。
+  allowed_ingress_cidrs   = var.alb_allowed_ingress_cidrs
   ingress_prefix_list_ids = local.https_enabled ? [data.aws_ec2_managed_prefix_list.cloudfront.id] : []
 
   # フロントエンド（ADR-0011）は CloudFront + 独自ドメインが前提のため https-dns モード限定。

@@ -3,5 +3,5 @@
 # name                 = "ticket-c2c-staging"
 # vpc_cidr             = "10.10.0.0/16"
 # capacity_profile     = "normal"        # normal / full
-# public_endpoint_mode = "alb-http-only" # alb-http-only / https-dns
+# public_endpoint_mode = "https-dns"     # alb-http-only / https-dns（既定 https-dns。alb-http-only はローカル apply の escape hatch）
 # api_subdomain        = "ticket-api-staging"
