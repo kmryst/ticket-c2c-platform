@@ -12,16 +12,20 @@ locals {
   capacity_profiles = {
     # normal: 本番相当トポロジーを最小サイズで検証する profile（staging-environment.md capacity profile 表）。
     # schema migration は boot path から分離済み（Issue #92）のため、API の scale out 制約は解消。
-    # normal は desired 1 / max 3 とし、rolling deploy とスケールアウトを安価に検証できるようにする。
+    # autoscaling target（min/max）は撤去する（Issue #234）。target-tracking policy を実装していない
+    # 環境に min/max だけ置いても実際にはスケールしないため、動かない設定は残さない。
+    # スケールアウト検証（rolling deploy との組み合わせ含む）は full 専任にする。
     normal = {
       nat_gateway_mode = "single"
 
       api_desired_count         = 1
       worker_desired_count      = 1
-      api_autoscaling_min       = 0
-      api_autoscaling_max       = 3
-      worker_autoscaling_min    = 0
-      worker_autoscaling_max    = 4
+      api_autoscaling_min       = null
+      api_autoscaling_max       = null
+      worker_autoscaling_min    = null
+      worker_autoscaling_max    = null
+      autoscaling_cpu_target    = null
+      frontend_desired_count    = 1
       scheduled_scaling_actions = []
 
       aurora_min_capacity          = 0
@@ -42,15 +46,22 @@ locals {
 
     # full: 負荷試験・failover 検証用の一時的な強化 profile。
     # schema migration 分離済み（Issue #92）のため API 2+ のブロッカーは解消済み。
+    # autoscaling は full のみ有効化する（Issue #234）。負荷をかけて実際に検証できる
+    # profile でのみ policy を持たせる。api/worker とも実測データがまだないため、
+    # まず素直な対称値（現状の 2 倍 = min 2 / max 4）から始め、必要なら full での検証結果を見て調整する。
+    # frontend は「スケールする層」ではなく「落ちない層」という位置づけのため autoscaling は入れず、
+    # full が failover 検証用 profile である以上 AZ 跨ぎの failover 検証ができるよう desired_count のみ 2 にする。
     full = {
       nat_gateway_mode = "per_az"
 
       api_desired_count         = 2
       worker_desired_count      = 2
-      api_autoscaling_min       = 0
+      api_autoscaling_min       = 2
       api_autoscaling_max       = 4
-      worker_autoscaling_min    = 0
-      worker_autoscaling_max    = 8
+      worker_autoscaling_min    = 2
+      worker_autoscaling_max    = 4
+      autoscaling_cpu_target    = 60
+      frontend_desired_count    = 2
       scheduled_scaling_actions = []
 
       aurora_min_capacity          = 0.5
@@ -581,6 +592,7 @@ module "api_service" {
   desired_count             = local.capacity_profile_settings.api_desired_count
   autoscaling_min_capacity  = local.capacity_profile_settings.api_autoscaling_min
   autoscaling_max_capacity  = local.capacity_profile_settings.api_autoscaling_max
+  autoscaling_cpu_target    = local.capacity_profile_settings.autoscaling_cpu_target
   scheduled_scaling_actions = local.capacity_profile_settings.scheduled_scaling_actions
 
   # CPU / Memory アラーム（Issue #218）の通知先。DLQ アラームと同じ SNS トピックへ配線する。
@@ -643,6 +655,7 @@ module "worker_service" {
   desired_count             = local.capacity_profile_settings.worker_desired_count
   autoscaling_min_capacity  = local.capacity_profile_settings.worker_autoscaling_min
   autoscaling_max_capacity  = local.capacity_profile_settings.worker_autoscaling_max
+  autoscaling_cpu_target    = local.capacity_profile_settings.autoscaling_cpu_target
   scheduled_scaling_actions = local.capacity_profile_settings.scheduled_scaling_actions
 
   # CPU / Memory アラーム（Issue #218）の通知先。DLQ アラームと同じ SNS トピックへ配線する。
@@ -784,8 +797,11 @@ module "frontend_service" {
   container_port     = 3000
   target_group_arn   = module.alb.frontend_target_group_arn
   log_group_name     = "/ecs/${var.name}-frontend"
-  # フロントエンドは負荷検証の対象外のため capacity profile に依存させず 1 task 固定にする。
-  desired_count             = 1
+  # フロントエンドは負荷検証の対象外のため autoscaling は入れない（Issue #234）。
+  # desired_count のみ capacity profile に連動させる。full は failover 検証用 profile であり、
+  # frontend が 1 task 固定のままだと AZ 跨ぎの failover 検証ができず profile の目的と矛盾するため、
+  # full では 2（スケールする層ではなく落ちない層、という位置づけ）にする。
+  desired_count             = local.capacity_profile_settings.frontend_desired_count
   autoscaling_min_capacity  = null
   autoscaling_max_capacity  = null
   scheduled_scaling_actions = []

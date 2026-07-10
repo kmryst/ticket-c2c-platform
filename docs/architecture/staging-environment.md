@@ -187,10 +187,14 @@ terraform state list   # 空であること
 | `capacity_profile` 入力 | なし | `normal` | `full` |
 | VPC CIDR | `10.0.0.0/16` | `10.10.0.0/16` | `10.10.0.0/16` |
 | NAT Gateway | single | single | per AZ |
-| API desired count | 1 | 1 | 2+ |
+| API desired count | 1 | 1 | 2 |
 | Worker desired count | 1 | 1 | 2 |
-| API autoscaling min/max | なし | 0 / 3 | 0 / 4 |
-| Worker autoscaling min/max | なし | 0 / 4 | 0 / 8 |
+| Frontend desired count | 1 | 1 | 2 |
+| API autoscaling min/max | なし | なし | 2 / 4 |
+| API autoscaling policy | なし | なし | CPU target-tracking 60% |
+| Worker autoscaling min/max | なし | なし | 2 / 4 |
+| Worker autoscaling policy | なし | なし | CPU target-tracking 60% |
+| Frontend autoscaling | なし | なし | なし |
 | scheduled scaling | なし | 初期は空 | 初期は空 |
 | Aurora writer | 1 | 1 | 1 |
 | Aurora reader | 0 | 1 | 1 |
@@ -212,7 +216,10 @@ terraform state list   # 空であること
 - API desired count は normal では 1 にする（コスト最小の常態）。schema migration は boot path から分離済み（Issue #92）のため、複数タスク同時起動の DDL 競合リスクはない。
 - ECS service の `deployment_circuit_breaker` を有効化する（[production-readiness.md](./production-readiness.md) L-3、未着手）。staging は deploy 検証を主目的の一つとするため、壊れたイメージを push した際に `aws ecs wait services-stable` がタイムアウトまでハングし続けるのを防ぐ。
 - Worker desired count も normal では 1 にする。初回は EventBridge -> SQS -> Worker -> OpenSearch projection の配線確認が主目的で、Worker 多重化の検証は full に回す。
-- API autoscaling max は normal 3 / full 4 にする（Issue #92 で schema-on-boot の DDL 競合ブロッカーが解消したため引き上げ）。normal の max 3 は rolling deploy とスケールアウトを安価に検証できる値。Worker autoscaling max は normal: 4、full: 8。
+- autoscaling（min/max・target-tracking policy）は full にのみ実装する（Issue #234 / ADR-0018）。normal は「安価な日常検証」、full は「負荷試験・failover 検証」という役割分担であり、policy は実際に負荷をかけて検証できる場所でしか価値がない。以前の normal（API 0/3、Worker 0/4）は `aws_appautoscaling_target`（min/max）だけを持ち target-tracking policy を実装していなかったため、実際にはスケールしない「見せかけの設定」だった。動かない設定は置かない方針で撤去した。
+- full の API / Worker autoscaling min/max は 2 / 4（対称）にし、CPU 使用率 60% の target-tracking policy を有効化する（`terraform/modules/ecs-service` の `aws_appautoscaling_policy`）。実測データ（過去の負荷試験結果、キューのバックログ推移など）がない段階のため、Worker だけ非対称に大きな倍率にする根拠を持てない。まず素直な 2 倍（現状 desired_count の 2 倍）から始め、full での負荷試験結果を見て必要なら Worker の max だけ引き上げる。
+- CPU 60% という閾値自体は、ECS target-tracking の一般的な出発点である 50〜70% の範囲から選んだ。高すぎるとバースト吸収の余地がなくなり、低すぎると過剰スケールアウトでコストが増える。ECS Fargate はタスク起動に環境変数取得・DB コネクションプール初期化等で 1〜2 分程度かかりうるため、60% にすることで残り 40% の余白でその間の負荷増を吸収できる。staging-full は「本番相当構成での負荷試験により autoscaling の実動作を検証する」ための profile であり、閾値は検証しやすさではなく実運用を想定した一般的な値を採用する。
+- Frontend desired count は normal 1 / full 2 にする（従来は全 profile で 1 固定）。Frontend（SSR）は負荷検証の対象外という既存方針は維持し autoscaling は入れないが、full は failover 検証用 profile であるため、Frontend が 1 task 固定のままだと AZ 跨ぎの failover 検証ができず profile の目的と矛盾する。Frontend は「スケールする層」ではなく「落ちない層」という位置づけで desired_count のみ引き上げる。
 - scheduled scaling actions は初期は空にする。検証タイミングと衝突して「いつの間にか 0 台」になる事故を避け、運用が安定してから夜間停止を追加する。
 - Aurora normal は min ACU 0 / max ACU 4 にする。idle cost を抑えつつ、smoke test と小規模検証に十分な上限を持つ。
 - Aurora full は min ACU 0.5 / max ACU 8 にする。負荷検証や failover 検証時の cold start 影響を減らす。

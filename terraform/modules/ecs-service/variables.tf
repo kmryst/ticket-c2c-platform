@@ -54,6 +54,12 @@ variable "autoscaling_max_capacity" {
   default     = null
 }
 
+variable "autoscaling_cpu_target" {
+  description = "CPU 使用率ベースの target-tracking policy の目標値（%）。null の場合は policy を作らない（Auto Scaling target の min/max だけでは実際にはスケールしないため、min/max と policy はセットで有効化する運用にする。Issue #234）"
+  type        = number
+  default     = null
+}
+
 variable "scheduled_scaling_actions" {
   description = "ECS Service の scheduled scaling action 一覧"
   type = list(object({
