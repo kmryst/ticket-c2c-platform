@@ -62,10 +62,14 @@ resource "aws_cloudfront_distribution" "this" {
   }
 
   # SSR ページ（default）: キャッシュ無効・Cookie 全転送（認証状態でレンダリングが変わるため）。
+  # allowed_methods は GET/HEAD/OPTIONS のみにする（Issue #236）。frontend（Next.js SSR）は
+  # Server Actions（'use server'）・form の action 属性・POST 等を受ける Route Handler の
+  # いずれも実装しておらず、PUT/POST/PATCH/DELETE を必要としない。最小権限の原則で絞る。
+  # 将来 Server Actions を追加する場合はここを拡張する必要がある（ADR-0011 参照）。
   default_cache_behavior {
     target_origin_id       = local.frontend_origin_id
     viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
     cached_methods         = ["GET", "HEAD"]
     compress               = true
 
