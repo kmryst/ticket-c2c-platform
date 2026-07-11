@@ -10,9 +10,11 @@ import {
 } from '@aws-sdk/client-eventbridge';
 import { getOptionalEnv } from '../config';
 // injectTraceContext は現在の trace を EventBridge detail へ同梱するための helper です（ADR-0014）。
+// traceLogFields は発行失敗ログに trace id / span id を付与します（Issue #255）。
 import {
   injectTraceContext,
   TRACE_CONTEXT_FIELD,
+  traceLogFields,
 } from '../observability/trace-context';
 
 // DomainEventType は technology-stack.md で定義したドメインイベントです。
@@ -65,7 +67,12 @@ export class DomainEventsService {
       );
     } catch (error) {
       // イベント発行失敗で API 応答を失敗させない。検索プロジェクションは次のイベントで追いつきます。
-      console.error(`EventBridge publish failed (${detailType}):`, error);
+      // detailType / trace id を構造化フィールドで残し、発行元リクエストの trace へ辿れるようにします（Issue #255）。
+      console.error(
+        'EventBridge publish failed',
+        { detailType, ...traceLogFields() },
+        error,
+      );
     }
   }
 }

@@ -17,6 +17,9 @@ import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import {
   extractTraceContext,
   TRACE_CONTEXT_FIELD,
+  // traceLogFields は構造化ログへ trace id / span id を付与し、
+  // CloudWatch Logs から X-Ray trace へ辿れるようにします（Issue #255）。
+  traceLogFields,
 } from '../observability/trace-context';
 // emitMetric は Worker の処理遅延メトリクス（EMF）を出します（ADR-0014）。
 import { emitMetric } from '../observability/emf';
@@ -179,7 +182,10 @@ export class SearchProjectionWorker {
     const eventId = detail.eventId as string | undefined;
 
     if (!eventId) {
-      console.warn('message without eventId skipped', { detailType });
+      console.warn('message without eventId skipped', {
+        detailType,
+        ...traceLogFields(),
+      });
       return;
     }
 
@@ -204,7 +210,11 @@ export class SearchProjectionWorker {
           body: doc,
           refresh: true,
         });
-        console.log('indexed event', { eventId, detailType });
+        console.log('indexed event', {
+          eventId,
+          detailType,
+          ...traceLogFields(),
+        });
         break;
       }
       case 'InventoryChanged': {
@@ -224,15 +234,19 @@ export class SearchProjectionWorker {
         console.log('updated inventory', {
           eventId,
           remainingQuantity: detail.remainingQuantity,
+          ...traceLogFields(),
         });
         break;
       }
       case 'TicketPurchased':
         // 検索プロジェクションの在庫更新は InventoryChanged が担うため、ここでは記録のみ行います。
-        console.log('ticket purchased', { eventId });
+        console.log('ticket purchased', { eventId, ...traceLogFields() });
         break;
       default:
-        console.warn('unknown detail-type skipped', { detailType });
+        console.warn('unknown detail-type skipped', {
+          detailType,
+          ...traceLogFields(),
+        });
     }
   }
 }
