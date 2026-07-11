@@ -1116,3 +1116,144 @@ resource "aws_route53_record" "app_alias" {
     evaluate_target_health = false
   }
 }
+
+# ---------- エッジ監視（CloudFront / WAF の CloudWatch アラーム。L-16 / Issue #252） ----------
+
+# CloudFront / WAF（scope=CLOUDFRONT）のメトリクスは us-east-1 にのみ発行され、
+# CloudWatch alarm の alarm_actions は同一リージョンの SNS トピックしか指定できないため、
+# 既存 Tokyo 側（observability モジュール）の SNS トピックは再利用できず us-east-1 に新設する。
+# EventBridge cross-region 集約は 3 アラームのみで構成過剰のため見送り
+# （production-readiness L-16 の設計判断。Issue #250 / #251）。
+resource "aws_sns_topic" "edge_alerts" {
+  count    = var.alert_email != "" ? 1 : 0
+  provider = aws.us_east_1
+
+  name = "${var.name}-edge-alerts"
+}
+
+# 既存 Tokyo 側と同じ email subscription パターン（受信者が Confirm するまで Pending）。
+# 同一アドレスへ 2 通目の確認メールが届くのは受容済みの運用（L-16 設計判断）。
+resource "aws_sns_topic_subscription" "edge_alerts_email" {
+  count    = var.alert_email != "" ? 1 : 0
+  provider = aws.us_east_1
+
+  topic_arn = aws_sns_topic.edge_alerts[0].arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
+# CloudFront additional metrics（OriginLatency 等）を有効化する有料アドオン。
+# 既存レイテンシ監視が購入 API の p95（ADR-0017）のみで、検索・イベント一覧・SSR ページロード
+# 等の経路が未カバーだった穴を埋めるために採用する（L-16 設計判断。destroy 運用のため実費は僅少）。
+resource "aws_cloudfront_monitoring_subscription" "app" {
+  distribution_id = module.cloudfront.distribution_id
+
+  monitoring_subscription {
+    realtime_metrics_subscription_config {
+      realtime_metrics_subscription_status = "Enabled"
+    }
+  }
+}
+
+# CloudFront 5xx 率。ADR-0017 の purchase_error_burn_rate と同じ「低トラフィックガード付き割合」
+# パターンを踏襲: Requests < 10 の期間は 0 とみなし、極小トラフィック時の単発失敗による誤検知を防ぐ。
+resource "aws_cloudwatch_metric_alarm" "cloudfront_5xx_rate" {
+  provider = aws.us_east_1
+
+  alarm_name          = "${var.name}-cloudfront-5xx-rate"
+  alarm_description   = "[Critical] CloudFront の 5xx 率が 5% を超過（10 分継続。Requests >= 10 の低トラフィックガード付き。ユーザー入口の広範な障害を示す。L-16 / Issue #252）"
+  evaluation_periods  = 2
+  threshold           = 5
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "m1"
+    return_data = false
+    metric {
+      namespace   = "AWS/CloudFront"
+      metric_name = "Requests"
+      stat        = "Sum"
+      period      = 300
+      dimensions = {
+        DistributionId = module.cloudfront.distribution_id
+        Region         = "Global"
+      }
+    }
+  }
+
+  metric_query {
+    id          = "m2"
+    return_data = false
+    metric {
+      namespace   = "AWS/CloudFront"
+      metric_name = "5xxErrorRate"
+      stat        = "Average"
+      period      = 300
+      dimensions = {
+        DistributionId = module.cloudfront.distribution_id
+        Region         = "Global"
+      }
+    }
+  }
+
+  metric_query {
+    id          = "e1"
+    expression  = "IF(m1>=10, m2, 0)"
+    label       = "guarded_5xx_error_rate"
+    return_data = true
+  }
+
+  alarm_actions = aws_sns_topic.edge_alerts[*].arn
+  ok_actions    = aws_sns_topic.edge_alerts[*].arn
+}
+
+# Origin latency p90。additional metrics（上記 monitoring subscription）が前提。
+resource "aws_cloudwatch_metric_alarm" "cloudfront_origin_latency" {
+  provider = aws.us_east_1
+
+  alarm_name          = "${var.name}-cloudfront-origin-latency"
+  alarm_description   = "[Warning] CloudFront の origin latency p90 が 2000 ms を超過（15 分継続。購入 API 以外も含む全経路のバックエンド遅延。L-16 / Issue #252）"
+  namespace           = "AWS/CloudFront"
+  metric_name         = "OriginLatency"
+  extended_statistic  = "p90"
+  period              = 300
+  evaluation_periods  = 3
+  threshold           = 2000
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    DistributionId = module.cloudfront.distribution_id
+    Region         = "Global"
+  }
+
+  alarm_actions = aws_sns_topic.edge_alerts[*].arn
+  ok_actions    = aws_sns_topic.edge_alerts[*].arn
+}
+
+# WAF block 急増。セキュリティシグナルは割合ガードをかけると初動検知が遅れるため、
+# 絶対数・1 期間の即時検知とする（L-16 設計判断）。
+# scope=CLOUDFRONT の WAF メトリクスに Region dimension は付かない（WebACL + Rule=ALL で集計）。
+resource "aws_cloudwatch_metric_alarm" "waf_block" {
+  provider = aws.us_east_1
+
+  alarm_name          = "${var.name}-waf-block"
+  alarm_description   = "[Warning] WAF のブロック数が 50 件 / 5 分以上（攻撃兆候。WAF は防御に成功しているシグナルのため、当日中に攻撃パターンを確認する。L-16 / Issue #252）"
+  namespace           = "AWS/WAFV2"
+  metric_name         = "BlockedRequests"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 50
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    WebACL = "${var.name}-app-waf"
+    Rule   = "ALL"
+  }
+
+  alarm_actions = aws_sns_topic.edge_alerts[*].arn
+  ok_actions    = aws_sns_topic.edge_alerts[*].arn
+}
