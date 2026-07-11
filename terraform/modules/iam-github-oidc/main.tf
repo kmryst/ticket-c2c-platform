@@ -180,6 +180,10 @@ resource "aws_iam_policy" "apply_infra" {
           "sqs:Get*",
           "sqs:List*",
           "sts:DecodeAuthorizationMessage",
+          # CloudWatch Synthetics canary（Issue #256）の terraform read / drift 検出用。
+          "synthetics:Describe*",
+          "synthetics:Get*",
+          "synthetics:List*",
           "tag:Get*",
           # X-Ray group（ADR-0014 / Issue #203）の terraform read / drift 検出用。
           "xray:Get*",
@@ -526,6 +530,39 @@ resource "aws_iam_policy" "apply_state_iam" {
         Effect   = "Allow"
         Action   = "wafv2:*"
         Resource = "*"
+      },
+      {
+        # CloudWatch Synthetics canary（Issue #256）。CloudFront / WAF（L-16）と同じ理由で
+        # us-east-1 に作成する: canary のメトリクスは作成リージョンに乗り、CloudWatch alarm の
+        # alarm_actions は同一リージョンの SNS トピックしか指定できないため、既存の us-east-1 側
+        # SNS トピック（<name>-edge-alerts）と揃える。canary 名はプロジェクトプレフィックスへ限定。
+        Sid    = "SyntheticsWrite"
+        Effect = "Allow"
+        Action = [
+          "synthetics:CreateCanary",
+          "synthetics:DeleteCanary",
+          "synthetics:StartCanary",
+          "synthetics:StopCanary",
+          "synthetics:TagResource",
+          "synthetics:UntagResource",
+          "synthetics:UpdateCanary",
+        ]
+        Resource = "arn:aws:synthetics:us-east-1:${local.account_id}:canary:${var.managed_resource_name_prefix}*"
+      },
+      {
+        # canary（terraform/modules/synthetics-canary）の実行ロールを Synthetics の
+        # 内部 Lambda へ受け渡すための PassRole（CreateCanary の ExecutionRoleArn パラメータ）。
+        # AWS 公式ドキュメント（Required roles and permissions for CloudWatch canaries）が
+        # 求める PassedToService の組（lambda.amazonaws.com / synthetics.amazonaws.com）どおり。
+        Sid      = "PassRolesToSynthetics"
+        Effect   = "Allow"
+        Action   = "iam:PassRole"
+        Resource = local.managed_role_arn
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = ["lambda.amazonaws.com", "synthetics.amazonaws.com"]
+          }
+        }
       },
       {
         # backend の state / lock オブジェクト操作（use_lockfile = true）と、bootstrap が管理する
