@@ -34,7 +34,7 @@ resource "aws_cloudwatch_metric_alarm" "dlq_messages" {
   count = var.create_dlq_alarm ? 1 : 0
 
   alarm_name          = "${local.dlq_name}-messages-visible"
-  alarm_description   = "DLQ ${local.dlq_name} に滞留メッセージがある（Worker の処理失敗を確認する）"
+  alarm_description   = "[Warning] DLQ ${local.dlq_name} に滞留メッセージがある（Worker の処理失敗を確認する）"
   namespace           = "AWS/SQS"
   metric_name         = "ApproximateNumberOfMessagesVisible"
   statistic           = "Maximum"

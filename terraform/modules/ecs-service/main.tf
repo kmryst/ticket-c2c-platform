@@ -183,7 +183,7 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   count = var.create_alarms ? 1 : 0
 
   alarm_name          = "${var.name}-cpu-high"
-  alarm_description   = "ECS サービス ${var.name} の CPUUtilization が ${var.alarm_cpu_threshold}% を超過（スケール不足・処理詰まりを確認する）"
+  alarm_description   = "[Warning] ECS サービス ${var.name} の CPUUtilization が ${var.alarm_cpu_threshold}% を超過（スケール不足・処理詰まりを確認する）"
   namespace           = "AWS/ECS"
   metric_name         = "CPUUtilization"
   statistic           = "Average"
@@ -207,7 +207,7 @@ resource "aws_cloudwatch_metric_alarm" "memory_high" {
   count = var.create_alarms ? 1 : 0
 
   alarm_name          = "${var.name}-memory-high"
-  alarm_description   = "ECS サービス ${var.name} の MemoryUtilization が ${var.alarm_memory_threshold}% を超過（OOM kill 前兆・メモリリークを確認する）"
+  alarm_description   = "[Warning] ECS サービス ${var.name} の MemoryUtilization が ${var.alarm_memory_threshold}% を超過（OOM kill 前兆・メモリリークを確認する）"
   namespace           = "AWS/ECS"
   metric_name         = "MemoryUtilization"
   statistic           = "Average"

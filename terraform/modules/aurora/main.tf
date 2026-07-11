@@ -112,7 +112,7 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   count = var.create_alarms ? 1 : 0
 
   alarm_name          = "${var.name}-aurora-cpu-high"
-  alarm_description   = "Aurora クラスタ ${aws_rds_cluster.this.cluster_identifier} の CPUUtilization が 80% を超過（クエリ性能劣化・ACU 上限到達を確認する）"
+  alarm_description   = "[Warning] Aurora クラスタ ${aws_rds_cluster.this.cluster_identifier} の CPUUtilization が 80% を超過（クエリ性能劣化・ACU 上限到達を確認する）"
   namespace           = "AWS/RDS"
   metric_name         = "CPUUtilization"
   statistic           = "Average"
@@ -137,7 +137,7 @@ resource "aws_cloudwatch_metric_alarm" "freeable_memory_low" {
   count = var.create_alarms ? 1 : 0
 
   alarm_name          = "${var.name}-aurora-freeable-memory-low"
-  alarm_description   = "Aurora クラスタ ${aws_rds_cluster.this.cluster_identifier} の FreeableMemory が ${var.alarm_freeable_memory_threshold_bytes} bytes を下回った（メモリ枯渇・ACU 上限到達を確認する）"
+  alarm_description   = "[Critical] Aurora クラスタ ${aws_rds_cluster.this.cluster_identifier} の FreeableMemory が ${var.alarm_freeable_memory_threshold_bytes} bytes を下回った（メモリ枯渇・ACU 上限到達を確認する）"
   namespace           = "AWS/RDS"
   metric_name         = "FreeableMemory"
   statistic           = "Average"
@@ -159,7 +159,7 @@ resource "aws_cloudwatch_metric_alarm" "connections_high" {
   count = var.create_alarms ? 1 : 0
 
   alarm_name          = "${var.name}-aurora-connections-high"
-  alarm_description   = "Aurora クラスタ ${aws_rds_cluster.this.cluster_identifier} の DatabaseConnections が推定 max_connections の 80%（${local.connections_alarm_threshold}）を超過（接続リーク・pool 設定過大を確認する）"
+  alarm_description   = "[Warning] Aurora クラスタ ${aws_rds_cluster.this.cluster_identifier} の DatabaseConnections が推定 max_connections の 80%（${local.connections_alarm_threshold}）を超過（接続リーク・pool 設定過大を確認する）"
   namespace           = "AWS/RDS"
   metric_name         = "DatabaseConnections"
   statistic           = "Average"
@@ -183,7 +183,7 @@ resource "aws_cloudwatch_metric_alarm" "acu_near_max" {
   count = var.create_alarms ? 1 : 0
 
   alarm_name          = "${var.name}-aurora-acu-near-max"
-  alarm_description   = "Aurora クラスタ ${aws_rds_cluster.this.cluster_identifier} の ServerlessDatabaseCapacity が max_capacity（${var.max_capacity} ACU）の 90% を超過（スケール上限到達。max_capacity 引き上げを検討する）"
+  alarm_description   = "[Warning] Aurora クラスタ ${aws_rds_cluster.this.cluster_identifier} の ServerlessDatabaseCapacity が max_capacity（${var.max_capacity} ACU）の 90% を超過（スケール上限到達。max_capacity 引き上げを検討する）"
   namespace           = "AWS/RDS"
   metric_name         = "ServerlessDatabaseCapacity"
   statistic           = "Average"

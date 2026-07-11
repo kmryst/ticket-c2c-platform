@@ -52,7 +52,7 @@ resource "aws_cloudwatch_metric_alarm" "valkey_fail_open" {
   count = var.metrics_namespace != "" ? 1 : 0
 
   alarm_name          = "${var.name}-valkey-fail-open"
-  alarm_description   = "API が Valkey 障害で fail-open した（前段フィルタ・レート制限が無効化されている。Valkey の状態を確認する）"
+  alarm_description   = "[Critical] API が Valkey 障害で fail-open した（前段フィルタ・レート制限が無効化されている。Valkey の状態を確認する）"
   namespace           = var.metrics_namespace
   metric_name         = "ValkeyFailOpen"
   statistic           = "Sum"
@@ -78,7 +78,7 @@ resource "aws_cloudwatch_metric_alarm" "worker_processing_lag" {
   count = var.metrics_namespace != "" ? 1 : 0
 
   alarm_name          = "${var.name}-worker-processing-lag"
-  alarm_description   = "Worker の処理遅延（WorkerProcessingLagMs p90）が ${var.worker_lag_alarm_threshold_ms} ms を超過（検索プロジェクションの鮮度劣化。Worker の詰まり・スループット不足を確認する）"
+  alarm_description   = "[Warning] Worker の処理遅延（WorkerProcessingLagMs p90）が ${var.worker_lag_alarm_threshold_ms} ms を超過（検索プロジェクションの鮮度劣化。Worker の詰まり・スループット不足を確認する）"
   namespace           = var.metrics_namespace
   metric_name         = "WorkerProcessingLagMs"
   extended_statistic  = "p90"
@@ -121,7 +121,7 @@ resource "aws_cloudwatch_metric_alarm" "purchase_error_burn_rate_fast" {
   count = var.metrics_namespace != "" ? 1 : 0
 
   alarm_name          = "${var.name}-purchase-error-burn-rate-fast"
-  alarm_description   = "購入 API の error burn rate が fast burn しきい値（${var.purchase_error_burn_rate_fast_multiplier}x）を超過（5 分 window。成功率 SLO ${var.purchase_success_slo_percent}% からの急激な逸脱を検知する。ADR-0017）"
+  alarm_description   = "[Critical] 購入 API の error burn rate が fast burn しきい値（${var.purchase_error_burn_rate_fast_multiplier}x）を超過（5 分 window。成功率 SLO ${var.purchase_success_slo_percent}% からの急激な逸脱を検知する。ADR-0017）"
   evaluation_periods  = 1
   threshold           = var.purchase_error_burn_rate_fast_multiplier
   comparison_operator = "GreaterThanThreshold"
@@ -186,7 +186,7 @@ resource "aws_cloudwatch_metric_alarm" "purchase_error_burn_rate_slow" {
   count = var.metrics_namespace != "" ? 1 : 0
 
   alarm_name          = "${var.name}-purchase-error-burn-rate-slow"
-  alarm_description   = "購入 API の error burn rate が slow burn しきい値（${var.purchase_error_burn_rate_slow_multiplier}x）を超過（30 分 window。成功率 SLO ${var.purchase_success_slo_percent}% からの持続的な逸脱を検知する。ADR-0017）"
+  alarm_description   = "[Warning] 購入 API の error burn rate が slow burn しきい値（${var.purchase_error_burn_rate_slow_multiplier}x）を超過（30 分 window。成功率 SLO ${var.purchase_success_slo_percent}% からの持続的な逸脱を検知する。ADR-0017）"
   evaluation_periods  = 6
   threshold           = var.purchase_error_burn_rate_slow_multiplier
   comparison_operator = "GreaterThanThreshold"
@@ -257,7 +257,7 @@ resource "aws_cloudwatch_metric_alarm" "purchase_technical_failure_weak" {
   count = var.metrics_namespace != "" ? 1 : 0
 
   alarm_name          = "${var.name}-purchase-technical-failure-weak"
-  alarm_description   = "購入 API で technical_failure を検知（早期・弱め通知。5 分で ${var.purchase_technical_failure_weak_threshold} 件以上。低頻度時の burn-rate ガードを補完する。ADR-0017）"
+  alarm_description   = "[Info] 購入 API で technical_failure を検知（早期・弱め通知。5 分で ${var.purchase_technical_failure_weak_threshold} 件以上。低頻度時の burn-rate ガードを補完する。ADR-0017）"
   namespace           = var.metrics_namespace
   metric_name         = "PurchaseRequestOutcome"
   statistic           = "Sum"
@@ -280,7 +280,7 @@ resource "aws_cloudwatch_metric_alarm" "purchase_technical_failure_normal" {
   count = var.metrics_namespace != "" ? 1 : 0
 
   alarm_name          = "${var.name}-purchase-technical-failure-normal"
-  alarm_description   = "購入 API で technical_failure が持続（通常通知。30 分で ${var.purchase_technical_failure_normal_threshold} 件以上。ADR-0017）"
+  alarm_description   = "[Warning] 購入 API で technical_failure が持続（通常通知。30 分で ${var.purchase_technical_failure_normal_threshold} 件以上。ADR-0017）"
   namespace           = var.metrics_namespace
   metric_name         = "PurchaseRequestOutcome"
   statistic           = "Sum"
@@ -310,7 +310,7 @@ resource "aws_cloudwatch_metric_alarm" "purchase_latency_burn_rate_fast" {
   count = var.metrics_namespace != "" ? 1 : 0
 
   alarm_name          = "${var.name}-purchase-latency-burn-rate-fast"
-  alarm_description   = "購入 API の レイテンシ（Outcome=success の p95）が fast burn しきい値（SLO の ${var.purchase_latency_burn_rate_fast_multiplier}x = ${var.purchase_latency_slo_ms * var.purchase_latency_burn_rate_fast_multiplier}ms）を超過（5 分 window。ADR-0017）"
+  alarm_description   = "[Warning] 購入 API の レイテンシ（Outcome=success の p95）が fast burn しきい値（SLO の ${var.purchase_latency_burn_rate_fast_multiplier}x = ${var.purchase_latency_slo_ms * var.purchase_latency_burn_rate_fast_multiplier}ms）を超過（5 分 window。ADR-0017）"
   evaluation_periods  = 1
   threshold           = var.purchase_latency_burn_rate_fast_multiplier
   comparison_operator = "GreaterThanThreshold"
@@ -361,7 +361,7 @@ resource "aws_cloudwatch_metric_alarm" "purchase_latency_burn_rate_slow" {
   count = var.metrics_namespace != "" ? 1 : 0
 
   alarm_name          = "${var.name}-purchase-latency-burn-rate-slow"
-  alarm_description   = "購入 API の レイテンシ（Outcome=success の p95）が slow burn しきい値（SLO の ${var.purchase_latency_burn_rate_slow_multiplier}x = ${var.purchase_latency_slo_ms * var.purchase_latency_burn_rate_slow_multiplier}ms）を超過（30 分 window。ADR-0017）"
+  alarm_description   = "[Warning] 購入 API の レイテンシ（Outcome=success の p95）が slow burn しきい値（SLO の ${var.purchase_latency_burn_rate_slow_multiplier}x = ${var.purchase_latency_slo_ms * var.purchase_latency_burn_rate_slow_multiplier}ms）を超過（30 分 window。ADR-0017）"
   evaluation_periods  = 6
   threshold           = var.purchase_latency_burn_rate_slow_multiplier
   comparison_operator = "GreaterThanThreshold"
