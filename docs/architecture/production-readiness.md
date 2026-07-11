@@ -11,7 +11,7 @@
 ## 凡例
 
 - **重大度**: High / Medium / Low
-- **カテゴリ**: IAM / Network / Secrets / Reliability / Cost / CI-CD / Data-integrity
+- **カテゴリ**: IAM / Network / Secrets / Reliability / Cost / CI-CD / Data-integrity / Operations
 - **ステータス**: 未着手 / Issue化済み（#番号） / 対応済み
 
 ## High
@@ -59,6 +59,21 @@
 | L-17 | Reliability / Cost | （2026-07-10 追記）SSR の server-side fetch が CloudFront 経由（NAT + CloudFront + ALB の回り道）になっている。境界を統一する設計意図（ADR-0011）としては妥当だが、レイテンシ・コストの観点では内部経路（frontend タスクから ALB / API へ直接）の方が短い。現状は設計意図が明確なため対応不要と判断。 | レイテンシ・コストが実害として顕在化した場合に、内部経路への切り替えを再検討する。 | 対応不要と判断（Issue #238。再検討条件は [ADR-0011](../adr/0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md) 参照） |
 | L-18 | Reliability | CloudWatch アラームは SNS email 1 系統に通知が集約されており、弱め通知・通常通知・即時対応が必要な通知の扱いがアラーム名や説明文に依存していた。prod 化前にどのアラームをどの緊急度で扱うかが明文化されていなかった。 | severity 分類・通知先・エスカレーション条件の定義。 | 対応済み（2026-07-11、Issue #257。既存 22 本 + edge alarms 3 本（#252）+ synthetic alarm 1 本（#256、後日実装・本節へ反映済み）を Critical / Warning / Info の 3 段階に分類し、severity ごとの通知先・初動目標・確認タイミング・エスカレーション条件を [`docs/architecture/observability.md`](observability.md) の「アラームの severity と escalation 方針（Issue #257）」節に記録した。通知チャネルは SNS email 1 系統を維持（対応者 1 名・destroy 運用主体という前提のため、複数トピック分割はオーバーヘッドに見合わない）とし、prod 化時の再検討条件（常設運用化・対応者複数化・見逃し発生・ノイズ増）を明記。Slack / PagerDuty / 複数 SNS トピック導入の判断基準も記録（PagerDuty はオンコール輪番発生までは不採用、ADR-0011 のポートフォリオ主目的とも不整合と判断）。`purchase-technical-failure-weak` は Info tier の命名規約として正式化し、`-normal` / burn-rate 系との段階的エスカレーション関係を明文化。`unhealthy-hosts` 系（staging の `capacity_profile=full` による 2 タスク構成での縮退ケースを考慮）・Aurora 容量系は Composite Alarm を追加せず（ADR-0017 の composite alarm 不採用判断を踏襲）、`alb-5xx` 等との同時 ALARM 時に Critical へ格上げする併発エスカレーション運用をドキュメントのみで定義。Terraform 通知経路の変更（`alarm_description` への severity プレフィックス付与、複数 SNS トピック分割）は後続 TODO として `observability.md` に記録し、本 Issue のスコープ外とした） |
 | L-19 | Reliability | ALB / ECS / Aurora / EMF / 購入 API SLO 等の内部メトリクスは整備済みだが、実ユーザーに近い入口（CloudFront）から代表 read-only 経路が実際に到達可能かを継続確認する外形監視（synthetic monitoring）がなかった。 | CloudWatch Synthetics canary によるユーザー入口の外形監視の追加。 | Terraform 定義済み・plan 検証済み、実地確認は未実施（2026-07-11、Issue #256。EventBridge + Lambda の自前実装ではなく、CloudWatch Synthetics canary の組み込みマルチステップ機能（`executeHttpStep`）を採用（設計判断確定済み）。単一の multi-step API canary（`terraform/modules/synthetics-canary`）が CloudFront 経由で `/api/healthz`（healthz 相当）・`/`（frontend HTML）・`/api/events`（API 代表 read endpoint。認証不要・L-10）の 3 step を順に GET し、いずれか 1 つでも失敗すると canary 全体が失敗として記録される。認証・secret を要する操作、副作用のある操作は対象外（read-only 限定）。canary 本体・失敗アラーム（`<name>-synthetic-check-failure`。severity: Critical）は us-east-1 に作成し、L-16 / Issue #252 で新設した `<name>-edge-alerts` SNS トピックへ ALARM / OK 両遷移を通知する（cloudfront-5xx-rate と同じ「2 期間（10 分）継続」パターン）。実行頻度は 5 分間隔（コスト影響は `observability.md` に記録。dev/staging は destroy 前提運用のため実費は僅少）。アーティファクト S3 バケットは `force_destroy = true` + 30 日ライフサイクルで、canary destroy 時に残存しない設計にしている（**Terraform コード上の設計であり、apply → destroy による実地確認は未実施**）。staging は `public_endpoint_mode=alb-http-only` の場合 CloudFront 自体が存在しないため canary モジュール呼び出しごと条件化（作成しない）。bootstrap 側の apply ロール IAM ポリシーへ `synthetics:*` 系アクション・対象 `iam:PassRole`（`lambda.amazonaws.com` / `synthetics.amazonaws.com`）をプロジェクトプレフィックス限定で追加。**AWS リソースは実際に作らない方針のため apply はせず**、`terraform fmt` / dev・staging・bootstrap 全 root の `terraform validate` / 実バックエンドに対する `terraform plan -target`（dev・staging の canary 一式 9 リソースと bootstrap の IAM ポリシー差分がエラーなく計画されることを確認）までとした。受け入れ条件にある「dev/staging での synthetic check 成功と alarm action 配線確認結果」は今回スキップし、次回 dev / staging apply の機会に確認する。（2026-07-11 追記）第三者レビュー（Codex）指摘により 3 点修正: ①`delete_lambda`（既定 `false`）を明示的に `true` にし、canary destroy 時に AWS 側の補助 Lambda・レイヤーが残存するバグを修正、②canary 実行ロールへ AWS 推奨の標準権限セットのうち不足していた `s3:GetObject`（artifacts バケットのオブジェクト ARN 限定）・`xray:PutTraceSegments`（`Resource="*"`）を追加、③本行・`observability.md` の「destroy で残存しない」という断定的な記述を「Terraform 定義済み、実地未検証」という正確な表現に修正） |
+| L-20 | Reliability / Operations | dev / staging 向け Observability は整備済みだが、prod 常設運用としての SRE 運用体制・通知設計・閾値調整・アラートレビューは未整備。詳細は下記「L-20: prod SRE 運用で未整備の項目」を参照。 | prod 化前に運用設計を確定する。 | 未着手（現時点では dev / staging destroy 運用と対応者 1 名の前提で許容。実ユーザー・実トラフィックを伴う常設 prod 運用開始、対応者 2 名以上、Critical 見逃し、Info / Warning 通知が週 10 件超などの条件成立時に Issue 化する） |
+
+### L-20: prod SRE 運用で未整備の項目
+
+現時点の Observability は、dev / staging の destroy 運用と対応者 1 名を前提に、Terraform 定義・SLO/SLI・アラーム・Dashboard・runbook・severity/escalation 方針までを整備している。prod 常設運用へ進む場合は、次の運用項目を別途決める。
+
+| 項目 | 現状 | prod 化前に決めること |
+|---|---|---|
+| オンコール体制 | 対応者 1 名前提。夜間・休日・不在時の一次対応は未定義。 | 対応者、確認時間帯、一次対応責任、エスカレーション先。 |
+| 通知ルーティング | SNS email 1 系統。severity は alarm description と手動判断で区別。 | critical / non-critical 分割、Slack / PagerDuty / SNS 分割の採用条件。 |
+| 閾値調整 | dev / staging 検証ベースの初期閾値。 | 実ユーザートラフィックを見たうえで、p95 / error rate / burn-rate 閾値を再調整する基準。 |
+| アラーム疲れ評価 | Info / Warning の通知量は未計測。 | ノイズ量の定期確認、不要アラームの抑制、閾値見直しの基準。 |
+| 継続的な運用レビュー | runbook と severity 方針はあるが、レビュー頻度は未定義。 | 月次または障害後レビュー、runbook 更新、アラーム棚卸しの運用。 |
+
+初期判断と再検討条件は [`docs/architecture/observability.md`](observability.md) の「通知チャネル」「アラームの severity と escalation 方針」を正本とする。
 
 ## 次の優先順位（推奨）
 
