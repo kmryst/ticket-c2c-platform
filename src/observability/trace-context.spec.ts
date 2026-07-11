@@ -1,6 +1,7 @@
 // ファイル概要:
-// このファイルは trace-context.ts（EventBridge detail 経由の trace 伝搬 helper）の unit test です（Issue #203）。
-// AWSXRayPropagator を明示的に登録し、inject → extract の往復で trace が継続することを検証します。
+// このファイルは trace-context.ts（trace 伝搬・ログ相関 helper）の unit test です（Issue #203, #255）。
+// AWSXRayPropagator を明示的に登録し、inject → extract の往復で trace が継続することと、
+// traceLogFields が trace context の有無に応じて正しくログ用フィールドを返すことを検証します。
 
 import {
   context,
@@ -12,7 +13,11 @@ import { AWSXRayPropagator } from '@opentelemetry/propagator-aws-xray';
 // AsyncLocalStorageContextManager は context.with / context.active を実際に機能させるために登録します。
 // SDK 未起動の既定では no-op context manager のため、active() が常に ROOT_CONTEXT になるからです。
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
-import { extractTraceContext, injectTraceContext } from './trace-context';
+import {
+  extractTraceContext,
+  injectTraceContext,
+  traceLogFields,
+} from './trace-context';
 
 describe('trace-context', () => {
   beforeAll(() => {
@@ -53,6 +58,48 @@ describe('trace-context', () => {
     const restored = trace.getSpanContext(extractTraceContext(carrier));
     expect(restored?.traceId).toBe(spanContext.traceId);
     expect(restored?.spanId).toBe(spanContext.spanId);
+  });
+
+  it('アクティブな span がなければ traceLogFields は undefined を返す（ローカル PoC でログを汚さない）', () => {
+    expect(traceLogFields()).toBeUndefined();
+    // undefined のスプレッドは no-op のため、呼び出し側のログ構造も壊れません。
+    expect({ eventId: 'e1', ...traceLogFields() }).toEqual({ eventId: 'e1' });
+  });
+
+  it('アクティブな span context があれば X-Ray 形式の traceId と spanId を返す', () => {
+    const spanContext = {
+      traceId: '5f84c7a1aaaaaaaaaaaaaaaaaaaaaaaa',
+      spanId: 'bbbbbbbbbbbbbbbb',
+      traceFlags: TraceFlags.SAMPLED,
+      isRemote: false,
+    };
+
+    const fields = context.with(
+      trace.setSpanContext(context.active(), spanContext),
+      () => traceLogFields(),
+    );
+
+    expect(fields).toEqual({
+      // OTel の 32 hex traceId は X-Ray console で検索できる 1-<8hex>-<24hex> 形式へ変換されます。
+      traceId: '1-5f84c7a1-aaaaaaaaaaaaaaaaaaaaaaaa',
+      spanId: 'bbbbbbbbbbbbbbbb',
+    });
+  });
+
+  it('invalid な span context（全ゼロ）では traceLogFields は undefined を返す', () => {
+    const invalidSpanContext = {
+      traceId: '00000000000000000000000000000000',
+      spanId: '0000000000000000',
+      traceFlags: TraceFlags.NONE,
+      isRemote: false,
+    };
+
+    const fields = context.with(
+      trace.setSpanContext(context.active(), invalidSpanContext),
+      () => traceLogFields(),
+    );
+
+    expect(fields).toBeUndefined();
   });
 
   it('extract は carrier が undefined や不正値でも例外にせず現在の context を返す', () => {

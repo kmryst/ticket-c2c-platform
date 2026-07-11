@@ -24,6 +24,8 @@ import Redis from 'ioredis';
 import { getOptionalEnv } from '../config';
 // emitMetric はレート制限超過をビジネスメトリクス（EMF）として記録します（Issue #204、ADR-0014）。
 import { emitMetric } from '../observability/emf';
+// traceLogFields はセキュリティイベントログへ trace id / span id を付与します（Issue #255）。
+import { traceLogFields } from '../observability/trace-context';
 
 // RateLimitedEndpoint はレート制限の対象エンドポイント名です。カウンタのキー名にも使います。
 export type RateLimitedEndpoint = 'signup' | 'login' | 'refresh' | 'purchase';
@@ -164,6 +166,9 @@ export class AuthRateLimitService implements OnModuleDestroy {
           ip: subject.ip ?? null,
           secondary: subject.secondary ?? null,
           retryAfterSeconds,
+          // trace id / span id で該当リクエストの X-Ray trace へ辿れるようにします（Issue #255）。
+          // トレーシング無効時（ローカル PoC）は undefined のスプレッドとなり、フィールドは追加されません。
+          ...traceLogFields(),
         }),
       );
       // 超過をビジネスメトリクスとしても記録します（Issue #204）。エンドポイント別に

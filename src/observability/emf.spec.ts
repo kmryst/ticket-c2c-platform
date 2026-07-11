@@ -1,7 +1,12 @@
 // ファイル概要:
-// このファイルは emf.ts（CloudWatch EMF 出力 helper）の unit test です（Issue #203）。
-// opt-in ゲート（METRICS_NAMESPACE）と EMF JSON の構造を検証します。
+// このファイルは emf.ts（CloudWatch EMF 出力 helper）の unit test です（Issue #203, #255）。
+// opt-in ゲート（METRICS_NAMESPACE）と EMF JSON の構造、trace 相関 ID の
+// 「ログ属性のみ・dimension 化しない」制約を検証します。
 
+// context.with で trace context を実際にアクティブにするため、
+// AsyncLocalStorageContextManager を登録します（trace-context.spec.ts と同じ手法）。
+import { context, trace, TraceFlags } from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { emitMetric } from './emf';
 
 describe('emitMetric', () => {
@@ -66,5 +71,53 @@ describe('emitMetric', () => {
     const record = JSON.parse(logSpy.mock.calls[0][0] as string);
     expect(record.WorkerProcessingLagMs).toBe(1234);
     expect(record._aws.CloudWatchMetrics[0].Metrics[0].Unit).toBe('Milliseconds');
+  });
+
+  describe('trace 相関 ID（Issue #255）', () => {
+    beforeAll(() => {
+      context.setGlobalContextManager(
+        new AsyncLocalStorageContextManager().enable(),
+      );
+    });
+
+    afterAll(() => {
+      context.disable();
+    });
+
+    it('trace context がなければ traceId / spanId は record に含まれない（ローカル PoC）', () => {
+      process.env.METRICS_NAMESPACE = 'TicketC2C/test';
+
+      emitMetric('PurchaseConfirmed', 1, 'Count');
+
+      const record = JSON.parse(logSpy.mock.calls[0][0] as string);
+      expect(record).not.toHaveProperty('traceId');
+      expect(record).not.toHaveProperty('spanId');
+    });
+
+    it('アクティブな trace context があれば traceId / spanId をログ属性として含めるが、dimension には入れない', () => {
+      process.env.METRICS_NAMESPACE = 'TicketC2C/test';
+      const spanContext = {
+        traceId: '5f84c7a1aaaaaaaaaaaaaaaaaaaaaaaa',
+        spanId: 'bbbbbbbbbbbbbbbb',
+        traceFlags: TraceFlags.SAMPLED,
+        isRemote: false,
+      };
+
+      context.with(trace.setSpanContext(context.active(), spanContext), () => {
+        emitMetric('PurchaseRejected', 1, 'Count', {
+          Reason: 'sold_out_precheck',
+        });
+      });
+
+      const record = JSON.parse(logSpy.mock.calls[0][0] as string);
+      // ログ属性としては X-Ray 形式の traceId と spanId が含まれます。
+      expect(record.traceId).toBe('1-5f84c7a1-aaaaaaaaaaaaaaaaaaaaaaaa');
+      expect(record.spanId).toBe('bbbbbbbbbbbbbbbb');
+      // dimension set には絶対に含まれません（高カーディナリティ値の系列数爆発を防ぐ制約）。
+      expect(record._aws.CloudWatchMetrics[0].Dimensions).toEqual([
+        ['Service'],
+        ['Service', 'Reason'],
+      ]);
+    });
   });
 });

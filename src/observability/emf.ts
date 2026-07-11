@@ -8,6 +8,9 @@
 // METRICS_NAMESPACE 未設定（ローカル PoC 既定）では何も出しません（opt-in）。
 // Terraform が dev / staging の ECS タスクへ METRICS_NAMESPACE / METRICS_SERVICE を設定します。
 
+// traceLogFields はログ ↔ trace 相関のための trace id / span id です（Issue #255）。
+import { traceLogFields } from './trace-context';
+
 // MetricUnit は CloudWatch がサポートする単位のうち、このリポジトリで使うものだけを列挙します。
 export type MetricUnit = 'Count' | 'Milliseconds';
 
@@ -39,6 +42,11 @@ export function emitMetric(
     extraKeys.length > 0 ? [['Service'], ['Service', ...extraKeys]] : [['Service']];
 
   // EMF の仕様に従い、_aws メタデータとメトリクス値・dimension 値を同じ JSON に入れます。
+  // traceId / spanId はログ属性としてのみ含めます（Issue #255）。dimension set には
+  // 絶対に加えません。trace id は高カーディナリティ値であり、dimension にすると
+  // CloudWatch メトリクスの系列数（課金対象）が無際限に増えるためです。
+  // EMF は _aws.CloudWatchMetrics.Dimensions に列挙されたキーだけを dimension として抽出し、
+  // それ以外の top-level キーは CloudWatch Logs 上の検索可能なログ属性に留まります。
   const record: Record<string, unknown> = {
     _aws: {
       Timestamp: Date.now(),
@@ -52,6 +60,7 @@ export function emitMetric(
     },
     Service: service,
     ...extraDimensions,
+    ...traceLogFields(),
     [name]: value,
   };
 

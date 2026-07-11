@@ -60,6 +60,37 @@ API / Worker ─ EMF（stdout 構造化ログ）─► CloudWatch Logs ─► Cl
 - 環境ごとに X-Ray group（`ticket-<env>`、filter: `service("ticket-<env>-api") OR service("ticket-<env>-worker")`）を Terraform（observability モジュール）で作成している。
 - 購入 1 リクエストは「API の HTTP span → pg / ioredis / EventBridge PutEvents → Worker の CONSUMER span → OpenSearch 更新」まで 1 trace で表示される。
 
+### ログ ↔ trace 相関（Issue #255）
+
+API / Worker の主要な構造化ログと EMF record には、出力時点でアクティブな span の相関 ID が含まれる。
+
+- 共通 helper: `src/observability/trace-context.ts` の `traceLogFields()`。current span context から `traceId`（X-Ray console でそのまま検索できる `1-<epoch 8hex>-<24hex>` 形式）と `spanId`（16 hex）を返す。アクティブな span がない・トレーシング無効（ローカル PoC）の場合は `undefined` を返すため、`{ ...traceLogFields() }` とスプレッドするだけでログ構造を壊さず安全に使える。
+- 付与済みのログ: Worker の処理ログ（`indexed event` / `updated inventory` 等）、購入 API の在庫不整合エラーログ、`rate_limit_exceeded` セキュリティイベントログ、EventBridge 発行失敗ログ、および EMF record（`emf.ts`。出力時点で span がアクティブなもの）。
+- 例外: `WorkerProcessingLagMs` は「SQS 送信から削除完了まで」を計測する設計上、CONSUMER span 終了後（メッセージ削除後）に出力されるため trace id は付かない（計測点を span 内へ動かすと意味が変わるため意図的にそのままにしている）。
+- **EMF での制約**: `traceId` / `spanId` は EMF record のログ属性としてのみ含め、`_aws.CloudWatchMetrics.Dimensions` には絶対に加えない。trace id は高カーディナリティ値であり、dimension にすると CloudWatch メトリクスの系列数（課金対象）が無際限に増えるため。`eventId` / `buyerId` / `requestId` を dimension に入れない既存制約と同じ理由である。
+
+**ログから trace を探す手順**:
+
+1. CloudWatch Logs Insights で該当ロググループ（API / Worker の ECS ロググループ）を選び、調査対象のログを絞り込む。EMF record や JSON ログは自動でフィールド化される。
+
+   ```
+   fields @timestamp, @message, traceId, spanId
+   | filter ispresent(traceId)
+   | sort @timestamp desc
+   | limit 50
+   ```
+
+2. 見つけたログの `traceId`（例: `1-5f84c7a1-aaaaaaaaaaaaaaaaaaaaaaaa`）をコピーし、X-Ray console（CloudWatch → X-Ray traces）の trace 検索へそのまま貼り付けて開く。
+3. 逆方向（trace → ログ）は、X-Ray で特定した trace id を Logs Insights で `filter traceId = "1-..."` として検索し、同一リクエスト・同一イベント処理に紐づく API / Worker 双方のログを横断取得する。
+
+   ```
+   fields @timestamp, @log, @message
+   | filter traceId = "1-5f84c7a1-aaaaaaaaaaaaaaaaaaaaaaaa"
+   | sort @timestamp asc
+   ```
+
+注意: サンプリングで記録されなかったリクエスト（staging は 0.1）でも trace id 自体は採番されるため、ログに `traceId` があっても X-Ray 側に trace が存在しない場合がある（dev は全量サンプリングのため原則一致する）。
+
 ## ビジネスメトリクス（CloudWatch EMF）
 
 - 実装: `src/observability/emf.ts`。EMF 形式の JSON を stdout へ 1 行出すだけ（awslogs → CloudWatch Logs → 自動抽出）。PutMetricData 不使用、追加 IAM 不要。

@@ -21,6 +21,8 @@ import { InventoryCacheService } from '../cache/inventory-cache.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
 // emitMetric は購入判定のビジネスメトリクス（EMF）を出します（ADR-0014 / Issue #203）。
 import { emitMetric } from '../observability/emf';
+// traceLogFields は構造化ログへ trace id / span id を付与します（Issue #255）。
+import { traceLogFields } from '../observability/trace-context';
 // purchase.types は controller と service の間で共有する入力・出力の型です。
 import {
   ParsedPurchaseInput,
@@ -310,6 +312,8 @@ export class PurchasesService {
           console.error('ticket inventory not found for existing event', {
             // 対象 eventId をログに残します。
             eventId: input.eventId,
+            // trace id / span id を含め、X-Ray 上の該当リクエスト trace へ辿れるようにします（Issue #255）。
+            ...traceLogFields(),
           });
           // クライアント入力の問題ではないため、500 として返します。
           throw new InternalServerErrorException(
