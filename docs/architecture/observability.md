@@ -65,7 +65,8 @@ API / Worker ─ EMF（stdout 構造化ログ）─► CloudWatch Logs ─► Cl
 API / Worker の主要な構造化ログと EMF record には、出力時点でアクティブな span の相関 ID が含まれる。
 
 - 共通 helper: `src/observability/trace-context.ts` の `traceLogFields()`。current span context から `traceId`（X-Ray console でそのまま検索できる `1-<epoch 8hex>-<24hex>` 形式）と `spanId`（16 hex）を返す。アクティブな span がない・トレーシング無効（ローカル PoC）の場合は `undefined` を返すため、`{ ...traceLogFields() }` とスプレッドするだけでログ構造を壊さず安全に使える。
-- 付与済みのログ: Worker の処理ログ（`indexed event` / `updated inventory` 等）、購入 API の在庫不整合エラーログ、`rate_limit_exceeded` セキュリティイベントログ、EventBridge 発行失敗ログ、およびすべての EMF record（`emf.ts`）。
+- 付与済みのログ: Worker の処理ログ（`indexed event` / `updated inventory` 等）、購入 API の在庫不整合エラーログ、`rate_limit_exceeded` セキュリティイベントログ、EventBridge 発行失敗ログ、および EMF record（`emf.ts`。出力時点で span がアクティブなもの）。
+- 例外: `WorkerProcessingLagMs` は「SQS 送信から削除完了まで」を計測する設計上、CONSUMER span 終了後（メッセージ削除後）に出力されるため trace id は付かない（計測点を span 内へ動かすと意味が変わるため意図的にそのままにしている）。
 - **EMF での制約**: `traceId` / `spanId` は EMF record のログ属性としてのみ含め、`_aws.CloudWatchMetrics.Dimensions` には絶対に加えない。trace id は高カーディナリティ値であり、dimension にすると CloudWatch メトリクスの系列数（課金対象）が無際限に増えるため。`eventId` / `buyerId` / `requestId` を dimension に入れない既存制約と同じ理由である。
 
 **ログから trace を探す手順**:
