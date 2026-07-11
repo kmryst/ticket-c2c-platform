@@ -272,7 +272,7 @@ canary 自体・失敗アラームは **us-east-1** に作成する。理由は 
 |---|---|---|---|---|
 | `<name>-synthetic-check-failure` | `CloudWatchSynthetics` `SuccessPercent`（dimension: CanaryName） | Average < 100 / 5 分 x 2 期間（10 分継続） | Critical | Errors: CloudFront 経由のユーザー入口そのものの到達性喪失を検知。単発のネットワーク瞬断による誤発火を避けるため 2 期間継続を条件にする（`cloudfront-5xx-rate` と同じパターン） |
 
-`treat_missing_data = notBreaching`（destroy 運用・canary 未稼働時はデータ点自体が出ないため）。ALARM / OK 両遷移を us-east-1 側 SNS トピック（`<name>-edge-alerts`）へ通知する。severity は Critical（`docs/architecture/observability.md`「アラームの severity と escalation 方針」節参照）: CloudFront 経由の代表 read-only 経路の失敗は、内部メトリクスでは検知できない外形障害（DNS / CDN / WAF 誤設定など）を捕捉する最終防衛線であり、ユーザー入口そのものが死んでいるシグナルであるため。
+`treat_missing_data = notBreaching`（destroy 運用・canary 未稼働時はデータ点自体が出ないため）。ALARM / OK 両遷移を us-east-1 側 SNS トピック（`<name>-edge-alerts`）へ通知する。発報時の初動対応は [`docs/runbooks/alarm-synthetic-check-failure.md`](../runbooks/alarm-synthetic-check-failure.md)（Issue #272）を参照。severity は Critical（`docs/architecture/observability.md`「アラームの severity と escalation 方針」節参照）: CloudFront 経由の代表 read-only 経路の失敗は、内部メトリクスでは検知できない外形障害（DNS / CDN / WAF 誤設定など）を捕捉する最終防衛線であり、ユーザー入口そのものが死んでいるシグナルであるため。
 
 ### destroy 運用での残存リソース対策（Terraform 定義済み、実地未検証）
 
@@ -416,7 +416,7 @@ Critical 通知（`alb-5xx`、`purchase-error-burn-rate-fast`、`synthetic-check
 
 ### 後続 TODO（Terraform 変更、別 Issue に切り出す粒度）
 
-1. 全アラームの `alarm_description` に severity プレフィックス（`[Critical]` / `[Warning]` / `[Info]`）を付与する。email 件名 / 本文での判別性向上が目的。低リスク・plan 差分は description のみ。
+1. ~~全アラームの `alarm_description` に severity プレフィックス（`[Critical]` / `[Warning]` / `[Info]`）を付与する。email 件名 / 本文での判別性向上が目的。低リスク・plan 差分は description のみ。~~ → 2026-07-11 対応済み（Issue #272。既存 22 本（observability 8 / alb 3 / ecs-service 6 / aurora 4 / sqs 1）へ本節の分類どおり `[Critical]`×4 / `[Warning]`×17 / `[Info]`×1 を付与。edge 3 本・synthetic 1 本は実装時に付与済みのため変更なし。`alarm_description` 以外の属性は無変更で、plan 差分が description のみであることを dev / staging / bootstrap の plan で確認。実環境への apply・実発火確認は未実施で、次回 dev / staging apply の実地検証時に確認する）。
 2. ~~#252 実装時、us-east-1 の 3 アラームへ本節の分類（`cloudfront-5xx-rate` = Critical、`cloudfront-origin-latency` / `waf-block` = Warning）を適用する。~~（#252 で適用済み。3 アラームの `alarm_description` に severity プレフィックス付与済み）
 3. ~~#256 実装時、synthetic monitoring のアラーム構成（単一 / 複数）が決まり次第、本節の Critical 行を実アラーム名に更新する。~~ → 2026-07-11 対応済み（Issue #256。単一 canary・`<name>-synthetic-check-failure` の 1 本として実装し、本節の表・分類根拠を実アラーム名に更新した）。
 4. （prod 化時・再検討条件成立時のみ）SNS トピックの critical / non-critical 2 分割。observability モジュールの `alarm_action_arns` を severity 別 map に拡張する。
@@ -436,6 +436,7 @@ CloudWatch アラーム発報時の初動確認・切り分け・復旧判断は
 | WorkerProcessingLagMs | [`docs/runbooks/alarm-worker-processing-lag.md`](../runbooks/alarm-worker-processing-lag.md) |
 | SQS DLQ 滞留 | [`docs/runbooks/alarm-sqs-dlq.md`](../runbooks/alarm-sqs-dlq.md) |
 | CloudFront / WAF edge（L-16 / Issue #252） | [`docs/runbooks/alarm-cloudfront-waf-edge.md`](../runbooks/alarm-cloudfront-waf-edge.md) |
+| synthetic-check-failure（L-19 / Issue #256、runbook は Issue #272） | [`docs/runbooks/alarm-synthetic-check-failure.md`](../runbooks/alarm-synthetic-check-failure.md) |
 
 secret / credential 値の出力に注意が必要な手順（Aurora マスター認証情報の取り扱い等）は該当 runbook にその旨を明記している。フォーマットは既存の `docs/runbooks/jwt-secret-rotation.md` を踏襲している。
 

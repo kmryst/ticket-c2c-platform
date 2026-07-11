@@ -177,7 +177,7 @@ resource "aws_cloudwatch_metric_alarm" "http_5xx" {
   count = var.create_alarms ? 1 : 0
 
   alarm_name          = "${var.name}-alb-5xx"
-  alarm_description   = "ALB ${var.name} の 5xx 応答（ターゲット起因 + ALB 起因の合算）が閾値を超過（API / frontend のエラー急増を確認する）"
+  alarm_description   = "[Critical] ALB ${var.name} の 5xx 応答（ターゲット起因 + ALB 起因の合算）が閾値を超過（API / frontend のエラー急増を確認する）"
   evaluation_periods  = 2
   threshold           = var.alarm_5xx_threshold
   comparison_operator = "GreaterThanOrEqualToThreshold"
@@ -241,7 +241,7 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
   for_each = local.unhealthy_host_targets
 
   alarm_name          = "${var.name}-alb-${each.key}-unhealthy-hosts"
-  alarm_description   = "ALB ${var.name} の ${each.key} target group に unhealthy ターゲットが継続して存在する（タスクのヘルスチェック失敗を確認する）"
+  alarm_description   = "[Warning] ALB ${var.name} の ${each.key} target group に unhealthy ターゲットが継続して存在する（タスクのヘルスチェック失敗を確認する）"
   namespace           = "AWS/ApplicationELB"
   metric_name         = "UnHealthyHostCount"
   statistic           = "Maximum"
