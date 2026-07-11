@@ -1289,3 +1289,20 @@ module "dashboard" {
   # モジュール既定値（99.5% / 800ms）を使う。module.observability も同じ既定値を使用しており
   # （ADR-0017）、root ではどちらも override していないため実質的な値は一致する。
 }
+
+# ---------- CloudFront 経由の外形監視（synthetic monitoring。Issue #256） ----------
+# CloudWatch Synthetics canary の組み込みマルチステップ機能（executeHttpStep）で、
+# read-only の代表 3 endpoint（healthz 相当・frontend HTML・API 代表 read endpoint）を
+# 定期的に外形監視する。severity は Critical（docs/architecture/observability.md 参照）。
+# canary 自体・失敗アラームは us-east-1 に作成する（edge_alerts SNS トピックと同一リージョンに
+# 揃える理由は L-16 / Issue #252 と同じ）。dev は CloudFront が常設のため無条件で作成する。
+module "synthetic_check" {
+  source = "../../modules/synthetics-canary"
+  providers = {
+    aws = aws.us_east_1
+  }
+
+  name          = var.name
+  app_fqdn      = local.app_fqdn
+  alarm_actions = aws_sns_topic.edge_alerts[*].arn
+}
