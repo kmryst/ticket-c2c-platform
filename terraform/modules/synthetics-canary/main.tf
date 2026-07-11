@@ -111,9 +111,12 @@ resource "aws_iam_role_policy" "canary" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "ArtifactsWrite"
+        # s3:GetObject は AWS 公式ドキュメント（Required roles and permissions for
+        # canaries）が求める標準権限セットに含まれる（canary が過去のアーティファクトを
+        # 読み戻す用途。第三者レビュー指摘で追加）。
+        Sid      = "ArtifactsReadWrite"
         Effect   = "Allow"
-        Action   = ["s3:PutObject"]
+        Action   = ["s3:PutObject", "s3:GetObject"]
         Resource = ["${aws_s3_bucket.artifacts.arn}/*"]
       },
       {
@@ -149,6 +152,15 @@ resource "aws_iam_role_policy" "canary" {
           "arn:aws:logs:us-east-1:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/cwsyn-${local.canary_name}-*:*",
         ]
       },
+      {
+        # AWS 公式ドキュメントが求める標準権限セットに含まれる（X-Ray はリソースレベル
+        # 制限非対応。第三者レビュー指摘で追加）。この canary は active_tracing を
+        # 有効化していないため実際には呼ばれないが、AWS 推奨のロールを踏襲する。
+        Sid      = "Tracing"
+        Effect   = "Allow"
+        Action   = ["xray:PutTraceSegments"]
+        Resource = ["*"]
+      },
     ]
   })
 }
@@ -162,6 +174,11 @@ resource "aws_synthetics_canary" "this" {
   zip_file             = data.archive_file.canary.output_path
   runtime_version      = var.runtime_version
   start_canary         = true
+
+  # delete_lambda の既定値（false）のままだと、canary destroy 後も裏で作られた
+  # Lambda 関数・レイヤーが残存し、destroy 前提運用（Issue #256 の受け入れ条件）と
+  # 矛盾する（第三者レビュー指摘）。明示的に true にして canary 削除時に道連れで消す。
+  delete_lambda = true
 
   schedule {
     expression = var.schedule_expression

@@ -274,9 +274,11 @@ canary 自体・失敗アラームは **us-east-1** に作成する。理由は 
 
 `treat_missing_data = notBreaching`（destroy 運用・canary 未稼働時はデータ点自体が出ないため）。ALARM / OK 両遷移を us-east-1 側 SNS トピック（`<name>-edge-alerts`）へ通知する。severity は Critical（`docs/architecture/observability.md`「アラームの severity と escalation 方針」節参照）: CloudFront 経由の代表 read-only 経路の失敗は、内部メトリクスでは検知できない外形障害（DNS / CDN / WAF 誤設定など）を捕捉する最終防衛線であり、ユーザー入口そのものが死んでいるシグナルであるため。
 
-### destroy 運用での残存リソースなし
+### destroy 運用での残存リソース対策（Terraform 定義済み、実地未検証）
 
-canary 本体（`aws_synthetics_canary`）・IAM 実行ロール・アーティファクト S3 バケット（`force_destroy = true`）はすべて Terraform 管理下にあり、`terraform destroy` で残存しない設計にしている。canary 作成時に AWS 側が暗黙的に作る補助リソース（Lambda 関数・レイヤー等）は `delete_lambda`（既定 `false`）を明示的に設定していないため既定値のままだが、canary 本体の削除に伴い AWS 側で追従して削除される想定（[AWS Synthetics DeleteCanary のドキュメント](https://docs.aws.amazon.com/AmazonSynthetics/latest/APIReference/API_DeleteCanary.html)参照。実 destroy 検証は次回 dev / staging apply の機会に行う）。
+canary 本体（`aws_synthetics_canary`）・IAM 実行ロール・アーティファクト S3 バケット（`force_destroy = true`）はすべて Terraform 管理下にあり、`terraform destroy` で削除される設計にしている。canary 作成時に AWS 側が暗黙的に作る補助リソース（Lambda 関数・レイヤー等）も、`delete_lambda = true` を明示設定し canary 本体の削除に道連れで削除されるようにした（既定値 `false` のままだと canary 削除後もこれらが残存し、destroy 前提運用の受け入れ条件と矛盾するバグになる。第三者レビュー指摘で修正）。
+
+**この節の内容は Terraform コード上の設計であり、実際に apply → destroy して残存リソースがないことを確認したものではない**（「AWS リソースは実際に作らない」方針のため、Issue #256 実装時点では未検証）。実地検証（apply 後の canary 稼働確認・destroy 後の残存リソースなしの確認）は次回 dev / staging apply の機会に行う。[AWS Synthetics DeleteCanary のドキュメント](https://docs.aws.amazon.com/AmazonSynthetics/latest/APIReference/API_DeleteCanary.html)も参照。
 
 ### staging の `alb-http-only` モードでの扱い
 
