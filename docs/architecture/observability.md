@@ -376,6 +376,23 @@ Critical 通知（`alb-5xx`、`purchase-error-burn-rate-fast`、`synthetic-check
 4. （prod 化時・再検討条件成立時のみ）SNS トピックの critical / non-critical 2 分割。observability モジュールの `alarm_action_arns` を severity 別 map に拡張する。
 5. 併発エスカレーション基準（`unhealthy-hosts` × `alb-5xx`、Aurora 容量系 × `purchase-error-burn-rate-fast` / `alb-5xx` / `synthetic-check-failure`）はドキュメント記載のみで自動化しない。将来 Composite Alarm や EventBridge によるアラーム相関の自動化を検討する場合は、ADR-0017 の不採用判断を覆す理由（コスト対効果の再評価）を伴う別 ADR として起票する。
 
+## アラーム対応 runbook（Issue #254）
+
+CloudWatch アラーム発報時の初動確認・切り分け・復旧判断は `docs/runbooks/` に runbook として整備している。各 runbook は影響範囲・初動確認・主な原因候補・確認コマンド・復旧/緩和の判断・エスカレーション条件を記載し、severity・エスカレーション条件は本ドキュメントの「アラームの severity と escalation 方針（Issue #257）」節と整合させている。
+
+| アラーム群 | runbook |
+|---|---|
+| 購入 API SLO / burn-rate / technical_failure | [`docs/runbooks/alarm-purchase-api-slo.md`](../runbooks/alarm-purchase-api-slo.md) |
+| ALB 5xx / unhealthy hosts | [`docs/runbooks/alarm-alb.md`](../runbooks/alarm-alb.md) |
+| ECS CPU / Memory（api / worker / frontend） | [`docs/runbooks/alarm-ecs-cpu-memory.md`](../runbooks/alarm-ecs-cpu-memory.md) |
+| Aurora CPU / memory / connections / ACU near max | [`docs/runbooks/alarm-aurora.md`](../runbooks/alarm-aurora.md) |
+| ValkeyFailOpen | [`docs/runbooks/alarm-valkey-fail-open.md`](../runbooks/alarm-valkey-fail-open.md) |
+| WorkerProcessingLagMs | [`docs/runbooks/alarm-worker-processing-lag.md`](../runbooks/alarm-worker-processing-lag.md) |
+| SQS DLQ 滞留 | [`docs/runbooks/alarm-sqs-dlq.md`](../runbooks/alarm-sqs-dlq.md) |
+| CloudFront / WAF edge（L-16 / Issue #252） | [`docs/runbooks/alarm-cloudfront-waf-edge.md`](../runbooks/alarm-cloudfront-waf-edge.md) |
+
+secret / credential 値の出力に注意が必要な手順（Aurora マスター認証情報の取り扱い等）は該当 runbook にその旨を明記している。フォーマットは既存の `docs/runbooks/jwt-secret-rotation.md` を踏襲している。
+
 ## 環境変数一覧
 
 | 変数 | 例 | 説明 |
