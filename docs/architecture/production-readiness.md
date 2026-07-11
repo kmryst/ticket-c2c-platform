@@ -77,13 +77,14 @@
 
 ## 次の優先順位（推奨）
 
-上記のうちどれから着手すべきかの推奨順位。2026-07-05、ユーザー・CODEX・Claude の議論で合意。
+上記のうちどれから着手すべきかの推奨順位。2026-07-11、Issue #270 で更新。2026-07-05 に合意した旧優先項目（H-1、M-1 / M-2、L-5）は対応済みであり、残作業は Observability の仕上げ・ブラウザ境界の hardening・CI/CD hardening・コスト精度・負荷設計に分かれる。
 
-1. **H-1**: IAM apply ロールの `AdministratorAccess` 縮小。prod 化の前提条件となる唯一の残存 High リスクのため最優先。
-2. **M-1 / M-2**: Valkey 前段フィルタの設計修正（requestId バイパス、`syncCounter` レース）。
-3. **L-8**: 高負荷時の DB 接続/容量設計（Issue #113）。想定トラフィックの確定後に着手。
-4. **L-5**: SLO 逸脱時の SNS 通知配線・アラート整備。
-5. **L-1**: GitHub Actions の SHA pin 化。
+1. **Observability 仕上げ（L-16 / L-19 / L-18 後続 TODO）**: dev / staging 向け Observability は SLI/SLO、burn-rate、内部アラーム、エッジアラーム、synthetic monitoring、Dashboard、runbook、severity / escalation 方針まで揃っている。一方で L-16 / L-19 は「Terraform 定義済み・plan 検証済み、実地確認は未実施」のため、まず AWS リソース作成を伴わない軽作業（全アラーム `alarm_description` への severity プレフィックス付与、synthetic monitoring 対応 runbook の追加または既存 runbook への統合）を片付ける。その後、dev または staging を実際に apply する機会に、SNS subscription confirm、edge alarm action 配線、synthetic check 成功、Dashboard 表示、destroy 後の残存リソースなしをまとめて確認する。
+2. **L-15**: CloudFront response headers policy による最小 security headers（HSTS / X-Content-Type-Options / Referrer-Policy / `frame-ancestors 'none'` + `X-Frame-Options: DENY`）の追加。Next.js 側へ手を入れずに CloudFront 境界で完結でき、prod 化前のブラウザ防御として効果が大きい。
+3. **M-6**: Interface VPC Endpoint 費用をコスト表へ反映する。実装リスクはないが、dev / staging の稼働判断・destroy 運用の前提に影響するため、見積りの正確性を先に戻す。
+4. **L-1 / L-2**: GitHub Actions の SHA pin 化と plan ロール sub スコープ縮小の検討。H-1 の apply ロール縮小後も、CI/CD supply chain と plan workflow の任意コード実行リスクは残るため、prod 化前の CI/CD hardening として扱う。
+5. **L-8**: 高負荷時の DB 接続 / 容量設計（Issue #113）。想定トラフィックが未確定のため、直ちに RDS Proxy や ACU 上限引き上げへ進まず、staging full の負荷検証条件・SLO/Dashboard の観測結果・想定同時接続数が揃ってから判断する。
+6. **L-6 / L-20**: データ層 SG egress の絞り込みと prod SRE 運用設計。どちらも prod 常設運用に近づいた段階で再評価する項目であり、現時点の dev / staging destroy 運用では Observability 仕上げ・security headers・CI/CD hardening より後に回す。
 
 ## 監査で「問題なし」と確認済みの観点
 
