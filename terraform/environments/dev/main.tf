@@ -1257,3 +1257,35 @@ resource "aws_cloudwatch_metric_alarm" "waf_block" {
   alarm_actions = aws_sns_topic.edge_alerts[*].arn
   ok_actions    = aws_sns_topic.edge_alerts[*].arn
 }
+
+# ---------- CloudWatch Dashboard（初動確認用。Issue #253） ----------
+# 入口（CloudFront / WAF）→ ALB → ECS（API / Worker / Frontend）→ Aurora →
+# Valkey fail-open / Worker lag / SQS DLQ → 購入 API SLO を 1 画面で横断確認する。
+# dev は module.cloudfront が count なしの必須リソースのため、edge widget は常に表示する。
+module "dashboard" {
+  source = "../../modules/dashboard"
+
+  name              = var.name
+  region            = var.region
+  metrics_namespace = local.metrics_namespace
+
+  alb_arn_suffix                       = module.alb.arn_suffix
+  alb_api_target_group_arn_suffix      = module.alb.target_group_arn_suffix
+  alb_frontend_target_group_arn_suffix = module.alb.frontend_target_group_arn_suffix
+
+  ecs_cluster_name          = aws_ecs_cluster.this.name
+  ecs_api_service_name      = module.api_service.service_name
+  ecs_worker_service_name   = module.worker_service.service_name
+  ecs_frontend_service_name = module.frontend_service.service_name
+
+  aurora_cluster_identifier = "${var.name}-aurora"
+
+  sqs_dlq_name = "${var.name}-search-projection-dlq"
+
+  cloudfront_distribution_id = module.cloudfront.distribution_id
+  waf_web_acl_name           = "${var.name}-app-waf"
+
+  # purchase_success_slo_percent / purchase_latency_slo_ms は明示的に渡さず、
+  # モジュール既定値（99.5% / 800ms）を使う。module.observability も同じ既定値を使用しており
+  # （ADR-0017）、root ではどちらも override していないため実質的な値は一致する。
+}

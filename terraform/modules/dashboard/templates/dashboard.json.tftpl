@@ -1,0 +1,241 @@
+{
+  "widgets": [
+    {
+      "type": "text",
+      "x": 0,
+      "y": 0,
+      "width": 24,
+      "height": 2,
+      "properties": {
+        "markdown": "# ${name} Observability Overview\n初動確認用ダッシュボード（Issue #253）。severity・エスカレーション方針は docs/architecture/observability.md、アラーム対応 runbook は docs/runbooks/ を参照。"
+      }
+    }
+%{ if has_edge ~}
+    ,{
+      "type": "metric",
+      "x": 0,
+      "y": 2,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "CloudFront: Requests / 5xxErrorRate",
+        "view": "timeSeries",
+        "region": "${edge_region}",
+        "period": 300,
+        "metrics": [
+          ["AWS/CloudFront", "Requests", "DistributionId", "${cloudfront_distribution_id}", "Region", "Global", {"stat": "Sum", "label": "Requests"}],
+          ["AWS/CloudFront", "5xxErrorRate", "DistributionId", "${cloudfront_distribution_id}", "Region", "Global", {"stat": "Average", "label": "5xxErrorRate (%)", "yAxis": "right"}]
+        ],
+        "yAxis": {
+          "right": {"label": "%", "min": 0}
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 2,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "CloudFront Origin Latency (p90) / WAF BlockedRequests",
+        "view": "timeSeries",
+        "region": "${edge_region}",
+        "period": 300,
+        "metrics": [
+          ["AWS/CloudFront", "OriginLatency", "DistributionId", "${cloudfront_distribution_id}", "Region", "Global", {"stat": "p90", "label": "OriginLatency p90 (ms)"}],
+          ["AWS/WAFV2", "BlockedRequests", "WebACL", "${waf_web_acl_name}", "Rule", "ALL", {"stat": "Sum", "label": "WAF BlockedRequests", "yAxis": "right"}]
+        ]
+      }
+    }
+%{ endif ~}
+    ,{
+      "type": "metric",
+      "x": 0,
+      "y": ${base_y},
+      "width": 24,
+      "height": 6,
+      "properties": {
+        "title": "ALB: 5xx / UnHealthyHostCount",
+        "view": "timeSeries",
+        "region": "${region}",
+        "period": 300,
+        "metrics": [
+          ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${alb_arn_suffix}", {"stat": "Sum", "label": "5xx (target)"}],
+          ["AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${alb_arn_suffix}", {"stat": "Sum", "label": "5xx (elb)"}],
+          ["AWS/ApplicationELB", "UnHealthyHostCount", "LoadBalancer", "${alb_arn_suffix}", "TargetGroup", "${alb_api_target_group_arn_suffix}", {"stat": "Maximum", "label": "UnHealthyHosts (api)", "yAxis": "right"}]
+%{ if has_frontend ~}
+          ,["AWS/ApplicationELB", "UnHealthyHostCount", "LoadBalancer", "${alb_arn_suffix}", "TargetGroup", "${alb_frontend_target_group_arn_suffix}", {"stat": "Maximum", "label": "UnHealthyHosts (frontend)", "yAxis": "right"}]
+%{ endif ~}
+        ],
+        "yAxis": {
+          "right": {"label": "hosts", "min": 0}
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": ${base_y + 6},
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "ECS CPUUtilization",
+        "view": "timeSeries",
+        "region": "${region}",
+        "period": 300,
+        "metrics": [
+          ["AWS/ECS", "CPUUtilization", "ClusterName", "${ecs_cluster_name}", "ServiceName", "${ecs_api_service_name}", {"stat": "Average", "label": "api"}],
+          ["AWS/ECS", "CPUUtilization", "ClusterName", "${ecs_cluster_name}", "ServiceName", "${ecs_worker_service_name}", {"stat": "Average", "label": "worker"}]
+%{ if has_frontend ~}
+          ,["AWS/ECS", "CPUUtilization", "ClusterName", "${ecs_cluster_name}", "ServiceName", "${ecs_frontend_service_name}", {"stat": "Average", "label": "frontend"}]
+%{ endif ~}
+        ],
+        "yAxis": {
+          "left": {"label": "%", "min": 0, "max": 100}
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": ${base_y + 6},
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "ECS MemoryUtilization",
+        "view": "timeSeries",
+        "region": "${region}",
+        "period": 300,
+        "metrics": [
+          ["AWS/ECS", "MemoryUtilization", "ClusterName", "${ecs_cluster_name}", "ServiceName", "${ecs_api_service_name}", {"stat": "Average", "label": "api"}],
+          ["AWS/ECS", "MemoryUtilization", "ClusterName", "${ecs_cluster_name}", "ServiceName", "${ecs_worker_service_name}", {"stat": "Average", "label": "worker"}]
+%{ if has_frontend ~}
+          ,["AWS/ECS", "MemoryUtilization", "ClusterName", "${ecs_cluster_name}", "ServiceName", "${ecs_frontend_service_name}", {"stat": "Average", "label": "frontend"}]
+%{ endif ~}
+        ],
+        "yAxis": {
+          "left": {"label": "%", "min": 0, "max": 100}
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": ${base_y + 12},
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Aurora: CPUUtilization / ServerlessDatabaseCapacity (ACU)",
+        "view": "timeSeries",
+        "region": "${region}",
+        "period": 300,
+        "metrics": [
+          ["AWS/RDS", "CPUUtilization", "DBClusterIdentifier", "${aurora_cluster_identifier}", {"stat": "Average", "label": "CPUUtilization (%)"}],
+          ["AWS/RDS", "ServerlessDatabaseCapacity", "DBClusterIdentifier", "${aurora_cluster_identifier}", {"stat": "Average", "label": "ACU", "yAxis": "right"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": ${base_y + 12},
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Aurora: FreeableMemory / DatabaseConnections",
+        "view": "timeSeries",
+        "region": "${region}",
+        "period": 300,
+        "metrics": [
+          ["AWS/RDS", "FreeableMemory", "DBClusterIdentifier", "${aurora_cluster_identifier}", {"stat": "Average", "label": "FreeableMemory (bytes)"}],
+          ["AWS/RDS", "DatabaseConnections", "DBClusterIdentifier", "${aurora_cluster_identifier}", {"stat": "Average", "label": "DatabaseConnections", "yAxis": "right"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": ${base_y + 18},
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "ValkeyFailOpen / WorkerProcessingLagMs (EMF)",
+        "view": "timeSeries",
+        "region": "${region}",
+        "period": 300,
+        "metrics": [
+          ["${metrics_namespace}", "ValkeyFailOpen", "Service", "api", {"stat": "Sum", "label": "ValkeyFailOpen"}],
+          ["${metrics_namespace}", "WorkerProcessingLagMs", "Service", "worker", {"stat": "p90", "label": "WorkerProcessingLagMs (p90)", "yAxis": "right"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": ${base_y + 18},
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "SQS DLQ: ApproximateNumberOfMessagesVisible",
+        "view": "timeSeries",
+        "region": "${region}",
+        "period": 300,
+        "metrics": [
+          ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${sqs_dlq_name}", {"stat": "Maximum", "label": "DLQ visible messages"}]
+        ],
+        "yAxis": {
+          "left": {"min": 0}
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": ${base_y + 24},
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "購入 API: 成功率 / technical_failure（ADR-0016 / ADR-0017）",
+        "view": "timeSeries",
+        "region": "${region}",
+        "period": 300,
+        "metrics": [
+          ["${metrics_namespace}", "PurchaseRequestOutcome", "Service", "api", "Outcome", "success", {"stat": "Sum", "id": "m1", "visible": false}],
+          ["${metrics_namespace}", "PurchaseRequestOutcome", "Service", "api", "Outcome", "technical_failure", {"stat": "Sum", "id": "m2", "label": "technical_failure", "yAxis": "right"}],
+          [{"expression": "IF((m1+m2)>0, (m1/(m1+m2))*100, 100)", "label": "success_rate (%)", "id": "e1"}]
+        ],
+        "annotations": {
+          "horizontal": [
+            {"label": "success SLO (${purchase_success_slo_percent}%)", "value": ${purchase_success_slo_percent}}
+          ]
+        },
+        "yAxis": {
+          "left": {"label": "%", "min": 0, "max": 100},
+          "right": {"label": "count", "min": 0}
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": ${base_y + 24},
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "購入 API: レイテンシ p95（Outcome=success。ADR-0017）",
+        "view": "timeSeries",
+        "region": "${region}",
+        "period": 300,
+        "metrics": [
+          ["${metrics_namespace}", "PurchaseRequestLatencyMs", "Service", "api", "Outcome", "success", {"stat": "p95", "label": "PurchaseRequestLatencyMs (p95)"}]
+        ],
+        "annotations": {
+          "horizontal": [
+            {"label": "latency SLO (${purchase_latency_slo_ms}ms)", "value": ${purchase_latency_slo_ms}}
+          ]
+        }
+      }
+    }
+  ]
+}
