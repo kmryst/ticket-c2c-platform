@@ -338,6 +338,10 @@ resource "aws_iam_policy" "apply_infra" {
         ]
         Resource = [
           "arn:aws:cloudwatch:${local.region}:${local.account_id}:alarm:${var.managed_resource_name_prefix}*",
+          # edge alarm（cloudfront-5xx-rate / cloudfront-origin-latency / waf-block、L-16 / Issue #252）と
+          # synthetic-check-failure alarm（Issue #256）は CloudFront / WAF / Synthetics のメトリクスと
+          # 同じ理由で us-east-1 に作成するため、Tokyo リージョン分のエントリとは別に us-east-1 分も必要。
+          "arn:aws:cloudwatch:us-east-1:${local.account_id}:alarm:${var.managed_resource_name_prefix}*",
           "arn:aws:ecr:${local.region}:${local.account_id}:repository/${var.managed_resource_name_prefix}*",
           "arn:aws:events:${local.region}:${local.account_id}:event-bus/${var.managed_resource_name_prefix}*",
           "arn:aws:events:${local.region}:${local.account_id}:rule/${var.managed_resource_name_prefix}*",
@@ -569,13 +573,45 @@ resource "aws_iam_policy" "apply_state_iam" {
       },
       {
         # CloudWatch Synthetics canary（Issue #256）は内部的に "cwsyn-<canary名>-<id>" という
-        # Lambda 関数を自動生成する。terraform-provider-aws は CreateCanary 後の待機処理で
-        # この Lambda の設定を参照するため、synthetics:CreateCanary 権限だけでは
-        # AccessDenied（lambda:GetFunctionConfiguration）になる（dev 実地 apply で判明）。
-        Sid      = "SyntheticsManagedLambdaRead"
-        Effect   = "Allow"
-        Action   = "lambda:GetFunctionConfiguration"
+        # Lambda 関数（と、依存関係がある場合は同名の Lambda layer）を自動生成・管理する。
+        # AWS 管理ポリシー CloudWatchSyntheticsFullAccess の Lambda 関連ステートメントと同じ
+        # アクション集合を、プロジェクトプレフィックス + us-east-1 のリソースへ限定して付与する
+        # （synthetics:CreateCanary だけでは CreateFunction や GetFunctionConfiguration が
+        # AccessDenied になり、1 アクションずつ後追いすると同じ失敗を繰り返すため一括で揃える）。
+        Sid    = "SyntheticsManagedLambdaWrite"
+        Effect = "Allow"
+        Action = [
+          "lambda:AddPermission",
+          "lambda:CreateFunction",
+          "lambda:DeleteFunction",
+          "lambda:GetFunction",
+          "lambda:GetFunctionConfiguration",
+          "lambda:ListTags",
+          "lambda:PublishVersion",
+          "lambda:TagResource",
+          "lambda:UntagResource",
+          "lambda:UpdateFunctionCode",
+          "lambda:UpdateFunctionConfiguration",
+        ]
         Resource = "arn:aws:lambda:us-east-1:${local.account_id}:function:cwsyn-${var.managed_resource_name_prefix}*"
+      },
+      {
+        # canary が依存関係を Lambda layer として持つ場合に自動生成される "cwsyn-<canary名>-<id>" layer
+        # と、AWS が提供する Synthetics ランタイム / Selenium layer（アカウント非依存の AWS 公開リソース）
+        # への参照。CloudWatchSyntheticsFullAccess と同じ Resource パターンを踏襲する。
+        Sid    = "SyntheticsManagedLambdaLayerAccess"
+        Effect = "Allow"
+        Action = [
+          "lambda:DeleteLayerVersion",
+          "lambda:GetLayerVersion",
+          "lambda:PublishLayerVersion",
+        ]
+        Resource = [
+          "arn:aws:lambda:us-east-1:${local.account_id}:layer:cwsyn-${var.managed_resource_name_prefix}*",
+          "arn:aws:lambda:*:*:layer:Synthetics:*",
+          "arn:aws:lambda:*:*:layer:Synthetics_Selenium:*",
+          "arn:aws:lambda:*:*:layer:AWS-CW-Synthetics*:*",
+        ]
       },
       {
         # canary（terraform/modules/synthetics-canary）の実行ロールを Synthetics の
