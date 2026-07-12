@@ -19,6 +19,41 @@ locals {
   frontend_origin_id = "frontend"
 }
 
+# L-15: CloudFront 境界で付与する最小 security headers。
+# Next.js App Router の inline script と衝突するため、script-src 等を含むフル CSP はここでは扱わない。
+resource "aws_cloudfront_response_headers_policy" "security_headers" {
+  name    = "${var.name}-security-headers"
+  comment = "Minimal browser security headers for ${var.name}"
+
+  security_headers_config {
+    strict_transport_security {
+      access_control_max_age_sec = 31536000
+      include_subdomains         = false
+      override                   = true
+      preload                    = false
+    }
+
+    content_type_options {
+      override = true
+    }
+
+    referrer_policy {
+      referrer_policy = "strict-origin-when-cross-origin"
+      override        = true
+    }
+
+    content_security_policy {
+      content_security_policy = "frame-ancestors 'none'"
+      override                = true
+    }
+
+    frame_options {
+      frame_option = "DENY"
+      override     = true
+    }
+  }
+}
+
 resource "aws_cloudfront_distribution" "this" {
   enabled         = true
   is_ipv6_enabled = true
@@ -73,8 +108,9 @@ resource "aws_cloudfront_distribution" "this" {
     cached_methods         = ["GET", "HEAD"]
     compress               = true
 
-    cache_policy_id          = local.caching_disabled_policy_id
-    origin_request_policy_id = local.all_viewer_except_host_policy_id
+    cache_policy_id            = local.caching_disabled_policy_id
+    origin_request_policy_id   = local.all_viewer_except_host_policy_id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security_headers.id
   }
 
   # ビルドハッシュ付き静的アセットは immutable なので edge で長期キャッシュする。
@@ -86,7 +122,8 @@ resource "aws_cloudfront_distribution" "this" {
     cached_methods         = ["GET", "HEAD"]
     compress               = true
 
-    cache_policy_id = local.caching_optimized_policy_id
+    cache_policy_id            = local.caching_optimized_policy_id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security_headers.id
   }
 
   # API はキャッシュ無効・Cookie / header 全転送（httpOnly Cookie 認証。ADR-0011 決定 3）。
@@ -98,8 +135,9 @@ resource "aws_cloudfront_distribution" "this" {
     cached_methods         = ["GET", "HEAD"]
     compress               = true
 
-    cache_policy_id          = local.caching_disabled_policy_id
-    origin_request_policy_id = local.all_viewer_except_host_policy_id
+    cache_policy_id            = local.caching_disabled_policy_id
+    origin_request_policy_id   = local.all_viewer_except_host_policy_id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security_headers.id
   }
 
   restrictions {

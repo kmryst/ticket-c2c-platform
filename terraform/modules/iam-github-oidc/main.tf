@@ -438,19 +438,23 @@ resource "aws_iam_policy" "apply_state_iam" {
         }
       },
       {
-        # CloudFront distribution の CRUD（ADR-0011 のフロントエンド統合オリジン）。
+        # CloudFront distribution と response headers policy の CRUD
+        # （ADR-0011 のフロントエンド統合オリジン、L-15 の security headers）。
         # distribution ARN はランダム ID のため名前プレフィックスで絞れない。
-        # グローバルサービスのためリージョン条件も付かないが、アクションを distribution 系に限定する。
+        # グローバルサービスのためリージョン条件も付かないが、アクションを必要な CloudFront リソース系に限定する。
         Sid    = "CloudFrontWrite"
         Effect = "Allow"
         Action = [
           "cloudfront:CreateDistribution",
           "cloudfront:CreateDistributionWithTags",
           "cloudfront:CreateInvalidation",
+          "cloudfront:CreateResponseHeadersPolicy",
           "cloudfront:DeleteDistribution",
+          "cloudfront:DeleteResponseHeadersPolicy",
           "cloudfront:TagResource",
           "cloudfront:UntagResource",
           "cloudfront:UpdateDistribution",
+          "cloudfront:UpdateResponseHeadersPolicy",
         ]
         Resource = "*"
       },
