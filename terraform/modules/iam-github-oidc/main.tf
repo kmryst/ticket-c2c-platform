@@ -284,6 +284,11 @@ resource "aws_iam_policy" "apply_infra" {
           "cloudwatch:PutMetricAlarm",
           "cloudwatch:TagResource",
           "cloudwatch:UntagResource",
+          # CloudWatch Dashboard（Issue #253）。dashboard ARN はリージョンを含まない形式
+          # （arn:aws:cloudwatch::<account-id>:dashboard/<name>）のため、Resource は別エントリで追加する。
+          # 読み取り（GetDashboard 等）は ReadInfraServices の cloudwatch:Get* で充足済み。
+          "cloudwatch:DeleteDashboards",
+          "cloudwatch:PutDashboard",
           "ecr:BatchDeleteImage",
           "ecr:CompleteLayerUpload",
           "ecr:Create*",
@@ -343,6 +348,11 @@ resource "aws_iam_policy" "apply_infra" {
           # SNS アラート通知トピック（L-5 / Issue #200）。subscription ARN は
           # <topic ARN>:<uuid> 形式のため、同じプレフィックスパターンで Unsubscribe も覆える。
           "arn:aws:sns:${local.region}:${local.account_id}:${var.managed_resource_name_prefix}*",
+          # edge-alerts SNS トピック（L-16 / Issue #252）は CloudFront / WAF のメトリクスと同じ理由で
+          # us-east-1 に作成するため、Tokyo リージョン分のエントリとは別に us-east-1 分も必要。
+          "arn:aws:sns:us-east-1:${local.account_id}:${var.managed_resource_name_prefix}*",
+          # CloudWatch Dashboard（Issue #253）。region を含まない ARN 形式。
+          "arn:aws:cloudwatch::${local.account_id}:dashboard/${var.managed_resource_name_prefix}*",
           "arn:aws:sqs:${local.region}:${local.account_id}:${var.managed_resource_name_prefix}*",
           # X-Ray group（ADR-0014 / Issue #203）。ARN は group/<name>/<id> で id は作成時採番のため
           # ワイルドカードで覆う。group_name は環境の var.name（ticket-c2c-dev 等）と一致させている。
@@ -455,6 +465,10 @@ resource "aws_iam_policy" "apply_state_iam" {
           "cloudfront:UntagResource",
           "cloudfront:UpdateDistribution",
           "cloudfront:UpdateResponseHeadersPolicy",
+          # CloudFront monitoring subscription（L-16 / Issue #252。追加の p90 origin latency
+          # メトリクス有効化に必要な有料アドオン API）。distribution ARN 前提のため CloudFrontWrite と同枠。
+          "cloudfront:CreateMonitoringSubscription",
+          "cloudfront:DeleteMonitoringSubscription",
         ]
         Resource = "*"
       },
@@ -552,6 +566,16 @@ resource "aws_iam_policy" "apply_state_iam" {
           "synthetics:UpdateCanary",
         ]
         Resource = "arn:aws:synthetics:us-east-1:${local.account_id}:canary:${var.managed_resource_name_prefix}*"
+      },
+      {
+        # CloudWatch Synthetics canary（Issue #256）は内部的に "cwsyn-<canary名>-<id>" という
+        # Lambda 関数を自動生成する。terraform-provider-aws は CreateCanary 後の待機処理で
+        # この Lambda の設定を参照するため、synthetics:CreateCanary 権限だけでは
+        # AccessDenied（lambda:GetFunctionConfiguration）になる（dev 実地 apply で判明）。
+        Sid      = "SyntheticsManagedLambdaRead"
+        Effect   = "Allow"
+        Action   = "lambda:GetFunctionConfiguration"
+        Resource = "arn:aws:lambda:us-east-1:${local.account_id}:function:cwsyn-${var.managed_resource_name_prefix}*"
       },
       {
         # canary（terraform/modules/synthetics-canary）の実行ロールを Synthetics の
