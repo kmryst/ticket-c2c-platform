@@ -14,12 +14,13 @@
 
 ## 現時点の技術的な未収束点
 
-2026-07-13 時点では、方針と docs は `idp-golden-path` の型へ寄せていますが、技術実装はまだ完全には収束していません。
+2026-07-13 時点では、方針と docs は `idp-golden-path` の型へ寄せています。CI ガードレール本体（PR Policy Check / Commitlint / Gitleaks / Sync Labels）の reusable workflow 化は完了しました（Issue #294 / #295 / #296 / #297）。
 
-- PR Policy Check / Commitlint / Gitleaks / Sync Labels は、`idp-golden-path` の reusable workflow を `@v1` で消費する薄い caller workflow ではなく、このリポジトリ内のローカル workflow として残っている。
-- required status check 名も、`idp-golden-path` の service baseline skeleton が想定する `PR Policy Check / PR Policy Check` などの合成名ではなく、既存の単体名を前提としている。
-- Markdown Lint / Issue Template Check など、service baseline skeleton が持つ共通 CI ガードレールは未導入または未整合である。導入や required 化は、運用負荷を見て別 Issue で判断する。
-- helper scripts は共通化途上であり、`idp-golden-path` の `scripts/github/lib/common.sh` 形式には揃っていない。
+- PR Policy Check / Commitlint / Gitleaks / Sync Labels は、`idp-golden-path` の reusable workflow を `@v1` で消費する薄い caller workflow に置き換え済み。ローカルのチェックロジック実装は削除した。
+- required status check 名は、caller/callee 合成名（`commitlint / Commitlint`、`pr-policy-check / PR Policy Check`、`gitleaks / Gitleaks Secret Scan`）に更新済み。ただし `idp-golden-path` の service baseline skeleton が例示する「caller/callee 同名」パターン（例: `Commitlint / Commitlint`）はそのまま採用していない。caller/callee で同一 job 名を使うと required check 名の文字列がそのまま重複し可読性を損なうと判明したため（Commitlint 移行 #294 で実測、idp-golden-path#106 に記録）、caller 側 job には `name:` を付けず job id にフォールバックさせている。
+- Sync Labels は本リポジトリの `scripts/github/sync-labels.sh` が `lib/common.sh` に依存しない自己完結実装だったため、前提条件の追加作業なしで移行できた。
+- Markdown Lint / Issue Template Check など、service baseline skeleton が持つ他の共通 CI ガードレールは未導入または未整合のまま。導入や required 化は、運用負荷を見て別 Issue で判断する（今回のスコープ外）。
+- helper scripts の共通化（`idp-golden-path` の `scripts/github/lib/common.sh` 形式への統一）は未着手（今回のスコープ外）。
 - backend / frontend build、DB migration、smoke test、deploy、Terraform apply / destroy などの業務・PoC 固有 workflow は、このリポジトリ固有の責務として残す。
 
 ## 目的
