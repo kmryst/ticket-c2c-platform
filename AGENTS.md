@@ -36,7 +36,7 @@
 作業内容に応じて、次の正本も読む。
 
 | 条件 | 読むファイル |
-|---|---|
+| --- | --- |
 | PR 作成 | `.github/pull_request_template.md` |
 | Issue 作成 | `docs/issue-templates/feature_request.md` または `.github/ISSUE_TEMPLATE/feature_request.yml` |
 | ラベル判断 | `.github/labels.yml` |
@@ -50,7 +50,7 @@
 Codex は GitHub 操作を手作業で再現せず、既存 helper を正規ルートとして使います。
 
 | 操作 | 正規ヘルパー |
-|---|---|
+| --- | --- |
 | Issue 作成 | `./scripts/github/create-issue-with-labels.sh` |
 | PR 作成 | `./scripts/github/create-pr-with-labels.sh` |
 | マージ後 cleanup | `./scripts/github/cleanup-merged-pr-branch.sh <PR番号>` |

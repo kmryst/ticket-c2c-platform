@@ -54,7 +54,7 @@ PoC script は seed / 集計のために DB も直接読む。
 ## 主要ファイル
 
 | ファイル | 役割 |
-|---|---|
+| --- | --- |
 | `scripts/poc/inventory-purchase-poc.ts` | PoC を外側から実行する検証ドライバー |
 | `src/purchases/purchases.controller.ts` | `POST /events/:eventId/purchases` の HTTP 入口 |
 | `src/purchases/purchases.service.ts` | 入力検証、在庫更新、購入履歴作成の本体 |

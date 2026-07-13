@@ -108,7 +108,7 @@ npm run poc:inventory
 環境変数:
 
 | 変数 | 既定値 | 説明 |
-|---|---:|---|
+| --- | ---: | --- |
 | `DATABASE_URL` | 必須 | PostgreSQL 接続先 |
 | `API_BASE_URL` | `http://localhost:3000` | API 接続先 |
 | `POC_TOTAL_QUANTITY` | `20` | 検証イベントの総在庫 |
@@ -137,7 +137,7 @@ npm run poc:inventory
 結果:
 
 | 指標 | 値 |
-|---|---:|
+| --- | ---: |
 | API concurrency | 9 |
 | API confirmed | 20 |
 | API rejected | 30 |
@@ -167,7 +167,7 @@ PostgreSQL の総 UPDATE 試行数は、結果テーブルの `PostgreSQL total 
 受け入れ観点と追加確認の判定:
 
 | 観点 | 結果 | 判定 |
-|---|---:|---|
+| --- | ---: | --- |
 | `confirmedQuantity <= totalQuantity` | 結果テーブル上で成立 | OK |
 | `remainingQuantity >= 0` | 結果テーブル上で成立 | OK |
 | `totalQuantity - remainingQuantity = confirmedQuantity` | 結果テーブル上で成立 | OK |

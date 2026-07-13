@@ -11,7 +11,7 @@ AWS dev 環境（[dev 環境設計](../architecture/dev-environment.md)）の初
 すべて GitHub Actions（AWS OIDC、長期アクセスキー不使用）で実施した。
 
 | フェーズ | workflow run | 結果 |
-|---|---|---|
+| --- | --- | --- |
 | terraform apply（初回） | 28580430318 | 失敗（下記「初回 apply の失敗」） |
 | terraform apply（再実行） | 28581245219 | 成功 |
 | deploy-app | 28582177153 | 成功（build → ECR push → ECS 2 サービス安定化） |
@@ -43,7 +43,7 @@ AWS dev 環境（[dev 環境設計](../architecture/dev-environment.md)）の初
 ### 並列購入（在庫超過防止 + 前段フィルタ）
 
 | 項目 | 値 |
-|---|---:|
+| --- | ---: |
 | 在庫 | 5 |
 | 並列購入リクエスト | 12（同時） |
 | confirmed | 5 |

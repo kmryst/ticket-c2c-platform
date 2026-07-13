@@ -50,13 +50,17 @@ aws application-autoscaling describe-scaling-activities \
 ## 復旧・緩和の判断
 
 1. **一時的な負荷（想定内のトラフィック増・負荷試験）**: autoscaling 対象（api）は自然にスケールアウトするため経過観察。worker / frontend は desired_count の一時引き上げを検討。
+
    ```bash
    aws ecs update-service --cluster <name> --service <name>-worker --desired-count <N>
    ```
+
 2. **メモリリーク疑い**: タスクの再起動で一時緩和しつつ、原因調査を別 Issue 化する。
+
    ```bash
    aws ecs update-service --cluster <name> --service <name>-worker --force-new-deployment
    ```
+
 3. **恒常的なリソース不足**: task definition の cpu/memory 引き上げ、または autoscaling の `autoscaling_max_capacity` 引き上げを検討（コスト増を伴うため設計判断として記録する）。
 4. **負荷試験・検証操作が原因と分かっている場合**: 負荷生成プロセスを直ちに停止する（過去の dev 実地検証と同じ運用。ECS CPU / Aurora CPU・ACU near max は ALARM 確認後即負荷停止する方針で合意済み）。
 

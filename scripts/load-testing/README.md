@@ -51,7 +51,7 @@ MODE=spike HOT_RATE=200 BG_RATE=20 DURATION=60s \
 ## 測定・判定の観点
 
 | 観点 | 見る場所 |
-|---|---|
+| --- | --- |
 | background の p50 / p95 / p99（baseline と spike の比較） | k6 summary の `http_req_duration{traffic:background}` |
 | hot の p50 / p95 / p99 | k6 summary の `http_req_duration{traffic:hot}` |
 | エラー率 | `http_req_failed{traffic:*}`、`purchase_http_error` |

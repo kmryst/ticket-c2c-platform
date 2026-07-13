@@ -1,0 +1,34 @@
+# Issue Template Check
+# 目的: Issue 本文の必須見出し（目的 / 対象 / 受け入れ条件）と必須 4 ラベルを検証し、
+# フォーム回答からのラベル自動補正・不備コメント投稿を行う
+# 実体は kmryst/idp-golden-path の reusable workflow（ADR-0008）。
+# 検証は GitHub API 経由で行うため、本リポジトリの checkout は不要
+
+name: Issue Template Check
+
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  # idp-golden-path 側の reusable workflow 自身も同名パターンの concurrency group
+  # （issue-template-check-<Issue番号>）を持つため、caller 側と同一名にすると
+  # 「top level workflow と呼び出し先の間でデッドロック」として GitHub にキャンセルされる
+  # （idp-golden-path#106参照）。caller 側は `-caller` を付けて衝突を避ける。
+  group: issue-template-check-caller-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  # caller job には name を付けない。job id（issue-template-check）にフォールバックさせる
+  # ことで、callee側 job 名（Issue Template Check）との文字列重複を避ける
+  # （idp-golden-path#106参照）。本ワークフローはPRのrequired status checkではないため、
+  # check名の合成はbranch protectionには影響しない。
+  issue-template-check:
+    uses: kmryst/idp-golden-path/.github/workflows/issue-template-check.yml@v1
+    permissions:
+      issues: write
+      contents: read

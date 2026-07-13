@@ -13,7 +13,7 @@ severity 分類・エスカレーション条件の全体方針は `docs/archite
 CloudFront 経由の代表 read-only 経路の外形監視（`terraform/modules/synthetics-canary`）が失敗している。単一の multi-step canary が `app_fqdn` に対して以下 3 step を順に GET しており、いずれか 1 つでも 2xx 以外を返すと canary 全体が失敗として記録される。
 
 | step | path | 内容 |
-|---|---|---|
+| --- | --- | --- |
 | `healthzCheck` | `/api/healthz` | 軽量到達確認（liveness） |
 | `frontendHtmlCheck` | `/` | frontend（Next.js SSR）の HTML 到達確認 |
 | `apiReadEndpointCheck` | `/api/events` | API の代表 read endpoint（認証不要） |

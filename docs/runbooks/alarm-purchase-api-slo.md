@@ -67,11 +67,13 @@ aws cloudwatch describe-alarms --alarm-names "<name>-valkey-fail-open" --state-v
 ## 復旧・緩和の判断
 
 1. **直近デプロイが原因と判断できる場合**: rollback を第一手段とする（severity Critical の初動目標どおり 1 時間以内）。
+
    ```bash
    aws ecs update-service --cluster <name> --service <name>-api \
      --task-definition <ロールバック先の task definition ARN>
    aws ecs wait services-stable --cluster <name> --services <name>-api
    ```
+
 2. **Aurora 側の高負荷が原因の場合**: `aurora-connections-high` / `aurora-acu-near-max` の runbook（`alarm-aurora.md`）へ切り替える。API 側の緊急対応としては、desired_count を一時的に下げて Aurora への負荷を減らすことも選択肢（トレードオフ: スループット低下）。
 3. **Valkey fail-open が原因の場合**: `alarm-valkey-fail-open.md` の runbook へ切り替える。
 4. 原因が特定できない場合は、まず影響範囲（どの operation・どのユーザー層か）を記録し、OK 復帰を待ちながら調査を継続する。
