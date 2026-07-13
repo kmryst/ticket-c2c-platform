@@ -2,6 +2,7 @@
 
 本プロジェクトへの貢献ガイドです。
 このファイルを Issue / Branch / Commit / PR / Label / 軽運用・厳密運用の共通運用ルールの正本とします。
+設計意図や未採用案、将来の再検討条件は [docs/operations/github-flow-guardrails.md](./docs/operations/github-flow-guardrails.md) を参照してください。
 
 このリポジトリは、C2C チケット販売プラットフォームのシステム設計と PoC を段階的に進めるためのプロジェクトです。
 
@@ -129,17 +130,19 @@ git commit -m "type: 変更内容の説明"
 git push -u origin <branch>
 ```
 
-ユーザーが明示的に `main` への直接 push を許可した場合のみ、`main` へ直接 push してよいです。
-その場合も、対象差分を確認し、明示的に stage してから commit / push します。
+`main` への direct push は branch protection で禁止しています。ユーザーから依頼があっても実行せず、必ず PR を経由します。
 
 ### 5. Pull Request 作成
 
 PR はテンプレートと helper を使って作成します。
 
+`--body-file` には `.github/pull_request_template.md` をそのまま渡さず、テンプレートを埋めたコピーを別ファイルとして作成して渡します。
+テンプレートをそのまま渡すと、未記入のプレースホルダ本文の末尾に helper が追記する `Closes #<issue番号>` が重複した、壊れた PR になります。
+
 ```bash
 ./scripts/github/create-pr-with-labels.sh \
   --title "feat: add inventory purchase endpoint" \
-  --body-file .github/pull_request_template.md \
+  --body-file /path/to/filled-pr-body.md \
   --issue <issue番号> \
   --type type:feature \
   --area area:backend \
@@ -175,13 +178,13 @@ PR 本文には、次のいずれかを必ず含めます。
 
 ### 6. マージ後 cleanup
 
-PR がマージされたら、次の Issue へ進む前にブランチを整理します。
+PR がマージされたら、次の Issue へ進む前に必ず cleanup helper でブランチを整理します。
 
 ```bash
 ./scripts/github/cleanup-merged-pr-branch.sh <PR番号>
 ```
 
-この helper は GitHub 上で PR が `MERGED` であることを確認し、base branch を最新化してから作業ブランチを削除します。
+この helper は GitHub 上で PR が `MERGED` であることを確認し、base branch を最新化してから作業ブランチを整理します。
 
 ## 運用モード
 
