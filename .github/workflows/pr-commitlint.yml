@@ -24,6 +24,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # caller job 名（Commitlint）と callee 側 job 名（Commitlint）が結合され、
+  # required status check 名は `Commitlint / Commitlint` になる（意図した挙動、ADR-0008）。
   commitlint:
     name: Commitlint
     # Dependabot の PR タイトルは可変長で header-max-length に抵触し得る。
