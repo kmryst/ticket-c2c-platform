@@ -172,15 +172,5 @@ jobs:
           path: frontend/test-results/
           retention-days: 7
 
-  gitleaks:
-    name: Gitleaks Secret Scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # Gitleaks Secret Scan は .github/workflows/gitleaks-secret-scan.yml に切り出した
+  # （idp-golden-path の reusable workflow 化、Issue #297 / ADR-0008）。
