@@ -24,10 +24,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # caller job 名（Commitlint）と callee 側 job 名（Commitlint）が結合され、
-  # required status check 名は `Commitlint / Commitlint` になる（意図した挙動、ADR-0008）。
+  # caller job には name を付けない。job id（commitlint）にフォールバックさせることで、
+  # required status check 名は `commitlint / Commitlint` になる。
+  # caller/callee 双方に `name: Commitlint` を付けると `Commitlint / Commitlint` という
+  # 完全に重複した名前になり、コピペミスに見えて可読性を損なうため避ける。
   commitlint:
-    name: Commitlint
     # Dependabot の PR タイトルは可変長で header-max-length に抵触し得る。
     # フォーマットは Dependabot 側が決定的に生成するため規約強制の対象外とする（Issue #63）。
     if: github.actor != 'dependabot[bot]'
