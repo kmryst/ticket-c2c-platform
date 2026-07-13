@@ -1,6 +1,7 @@
 # Sync Labels
 # 目的: ラベル定義の正本 .github/labels.yml を GitHub に自動同期する
-# 実体は既存 helper scripts/github/sync-labels.sh を呼ぶ（二重実装を避ける）
+# 実体は kmryst/idp-golden-path の reusable workflow（ADR-0008）。
+# このファイルはトリガー・permissions のみを持つ薄い caller workflow
 
 name: Sync Labels
 
@@ -17,14 +18,8 @@ permissions:
   issues: write
 
 jobs:
+  # caller job には name を付けない。job id（sync-labels）にフォールバックさせることで、
+  # callee側 job 名（Sync Labels）との完全な文字列重複を避ける
+  # （Commitlint移行 #294 で判明した可読性上の教訓。idp-golden-path#106参照）。
   sync-labels:
-    name: Sync Labels
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Sync labels
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/github/sync-labels.sh --repo "$GITHUB_REPOSITORY"
+    uses: kmryst/idp-golden-path/.github/workflows/sync-labels.yml@v1
