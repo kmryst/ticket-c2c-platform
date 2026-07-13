@@ -28,10 +28,12 @@
 
 ```yaml
 concurrency:
-  group: pr-policy-check-${{ github.event.pull_request.number }}
+  group: pr-policy-check-caller-${{ github.event.pull_request.number }}
   cancel-in-progress: false   # 実行中 run の cancel を防ぐ（Issue #61）
   queue: max                  # pending run を cancel せず FIFO 実行（Issue #220）
 ```
+
+2026-07-13、`.github/workflows/pr-policy-check.yml` は `idp-golden-path` の reusable workflow（`@v1`）を呼ぶ薄い caller workflow に移行した（Issue #296、ADR-0008）。`concurrency` はトリガー・permissions と同様に caller 側が持つ契約のため、この設定自体は caller workflow にそのまま残っている。ただし group 名は `pr-policy-check-caller-<PR番号>` に変更した。idp-golden-path 側の reusable workflow（callee）自身も同名パターンの `concurrency` group（`pr-policy-check-<PR番号>`）を持っており、caller と同一名にすると GitHub Actions が「top level workflow と呼び出し先の間のデッドロック」と判定し job を 1 つも起動せず run をキャンセルすることが Commitlint 移行（Issue #294）で実測判明したため（idp-golden-path#106 に記録）、`-caller` サフィックスで衝突を避けている。
 
 - `cancel-in-progress: false`: 実行中 run を cancel せず、CANCELLED check run を commit に残さない。
 - `queue: max`: pending run を cancel せず **FIFO で順次実行**する。古い pending run が捨てられなくなる。
