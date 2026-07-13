@@ -8,6 +8,7 @@
 - `CLAUDE.md`: Claude Code 向けの作業入口。このファイルを Claude Code の正本とする。
 - `AGENTS.md`: Codex 向けの作業入口。Claude Code の正本にはしない。
 - `CONTRIBUTING.md`: Issue / Branch / Commit / PR / Label / 軽運用・厳密運用の共通正本。
+- `docs/operations/github-flow-guardrails.md`: GitHub フローの設計意図、未採用案、再検討条件。
 - `.github/labels.yml`: ラベル一覧の正本。
 - `docs/requirements/system-requirements.md`: 課題要件、スコープ、制約の正本。
 - `docs/poc/technical-validation-plan.md`: PoC と技術検証計画の正本。
@@ -15,17 +16,18 @@
 - `docs/adr/README.md`: ADR の採番・形式・ステータス運用の正本。
 - `database/schema.sql`: ローカル PoC 用 PostgreSQL スキーマ。
 
-内容が衝突する場合は、共通運用は `CONTRIBUTING.md` を優先する。
+内容が衝突する場合は、共通運用は `CONTRIBUTING.md` を優先し、設計意図は `docs/operations/github-flow-guardrails.md` を参照する。
 要件は `docs/requirements/system-requirements.md`、PoC 方針は `docs/poc/technical-validation-plan.md`、DB 定義は `database/schema.sql` を優先する。
 
 ## 作業開始前に必ず読むファイル
 
 1. `CONTRIBUTING.md`
-2. `README.md`
-3. `docs/requirements/system-requirements.md`
-4. `docs/poc/technical-validation-plan.md`
-5. 対象 Issue がある場合は `gh issue view <issue番号>`
-6. 変更対象ファイル
+2. `docs/operations/github-flow-guardrails.md`
+3. `README.md`
+4. `docs/requirements/system-requirements.md`
+5. `docs/poc/technical-validation-plan.md`
+6. 対象 Issue がある場合は `gh issue view <issue番号>`
+7. 変更対象ファイル
 
 ## 作業内容別に追加で読むファイル
 
