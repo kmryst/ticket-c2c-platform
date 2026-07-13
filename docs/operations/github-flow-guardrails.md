@@ -14,12 +14,16 @@
 
 ## 現時点の技術的な未収束点
 
-2026-07-13 時点では、方針と docs は `idp-golden-path` の型へ寄せています。CI ガードレール本体（PR Policy Check / Commitlint / Gitleaks / Sync Labels）の reusable workflow 化は完了しました（Issue #294 / #295 / #296 / #297）。
+2026-07-13 時点では、方針と docs は `idp-golden-path` の型へ寄せています。CI ガードレール本体（PR Policy Check / Commitlint / Gitleaks / Sync Labels）の reusable workflow 化と、CodeQL / Dependency Audit / Markdown Lint / Issue Template Check の新規導入がすべて完了しました（Issue #294 / #295 / #296 / #297 / #305 / #307）。
 
 - PR Policy Check / Commitlint / Gitleaks / Sync Labels は、`idp-golden-path` の reusable workflow を `@v1` で消費する薄い caller workflow に置き換え済み。ローカルのチェックロジック実装は削除した。
 - required status check 名は、caller/callee 合成名（`commitlint / Commitlint`、`pr-policy-check / PR Policy Check`、`gitleaks / Gitleaks Secret Scan`）に更新済み。ただし `idp-golden-path` の service baseline skeleton が例示する「caller/callee 同名」パターン（例: `Commitlint / Commitlint`）はそのまま採用していない。caller/callee で同一 job 名を使うと required check 名の文字列がそのまま重複し可読性を損なうと判明したため（Commitlint 移行 #294 で実測、idp-golden-path#106 に記録）、caller 側 job には `name:` を付けず job id にフォールバックさせている。
 - Sync Labels は本リポジトリの `scripts/github/sync-labels.sh` が `lib/common.sh` に依存しない自己完結実装だったため、前提条件の追加作業なしで移行できた。
-- Markdown Lint / Issue Template Check など、service baseline skeleton が持つ他の共通 CI ガードレールは未導入または未整合のまま。導入や required 化は、運用負荷を見て別 Issue で判断する（今回のスコープ外）。
+- CodeQL / Dependency Audit / Markdown Lint / Issue Template Check は、`idp-golden-path` の reusable workflow を `@v1` で呼ぶ caller workflow として新規導入した（Issue #305 / #307、PR #306 / #308）。いずれも本リポジトリに存在しなかった新しいガードレールであり、branch protection の required status checks には追加していない。導入や required 化は、運用負荷を見て別 Issue で判断する。
+  - CodeQL: 導入直後、GitHub Code Scanning の自動差分比較チェックが「1 configuration not found」を出す不整合が判明した。原因は `security-scan.yml` 内の `sast-scan` job（週次のみ実行、PR 非トリガー）が、新規追加した `codeql.yml`（PR ごとに実行）と javascript-typescript の CodeQL 解析で重複していたこと。`sast-scan` job を削除し `codeql.yml` に一本化した（`dependency-scan` = Trivy はそのまま残す）。`sast-scan` の job 名は branch protection に登録されていなかったため影響はなかった
+  - Dependency Audit: 本リポジトリは root（`package-lock.json`）と `frontend/`（`frontend/package-lock.json`）が独立した 2 つの npm プロジェクトのため、`working-directory` を変えて 2 job 呼び出す構成にした
+  - Markdown Lint: 前提となる `lint:md` npm script・`markdownlint-cli2` 設定が本リポジトリになかったため新規追加した。既存 Markdown ファイル 31 件の書式修正（テーブル区切り記法・コードブロック言語タグ・空行）を伴うが、内容変更は `staging-environment.md` の未エスケープ pipe 文字修正（`capacity_profile=normal | full` が列区切りとして誤解釈されていた点）のみ
+  - Issue Template Check: 本リポジトリの旧ローカル実装が `idp-golden-path` 側 reusable workflow の移植元だったため、ロジック自体に変更はない
 - helper scripts の共通化（`idp-golden-path` の `scripts/github/lib/common.sh` 形式への統一）は未着手（今回のスコープ外）。
 - backend / frontend build、DB migration、smoke test、deploy、Terraform apply / destroy などの業務・PoC 固有 workflow は、このリポジトリ固有の責務として残す。
 
