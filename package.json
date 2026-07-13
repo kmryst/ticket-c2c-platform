@@ -11,6 +11,7 @@
     "start:worker": "node dist/src/worker.js",
     "worker:dev": "ts-node src/worker.ts",
     "commitlint": "commitlint",
+    "lint:md": "markdownlint-cli2",
     "test": "jest",
     "smoke:staging": "ts-node --project tsconfig.scripts.json scripts/staging/smoke-test.ts",
     "smoke:dev": "ts-node --project tsconfig.scripts.json scripts/staging/smoke-test.ts",
@@ -60,6 +61,7 @@
     "@types/node": "^26.1.0",
     "@types/pg": "^8.20.0",
     "jest": "^30.4.2",
+    "markdownlint-cli2": "^0.23.0",
     "ts-jest": "^29.4.11",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"

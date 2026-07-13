@@ -55,9 +55,11 @@ aws logs start-query \
 ## 復旧・緩和の判断
 
 1. **Worker のスループット不足が原因の場合**: `desired_count` を一時的に増やす。
+
    ```bash
    aws ecs update-service --cluster <name> --service <name>-worker --desired-count <N>
    ```
+
 2. **OpenSearch 側の負荷が原因の場合**: OpenSearch のメトリクス（CPUUtilization / JVMMemoryPressure 等、本アラーム群の対象外だが AWS/ES namespace で確認可能）を確認し、必要であればインスタンスタイプ・台数の見直しを検討。
 3. **一時的なイベント急増が原因の場合**: 経過観察で自然回復するか確認する（Worker は SQS ベースのため、詰まりが解消すれば自動的に追いつく）。
 4. lag が解消しない場合、検索結果の鮮度が劣化した状態が続くことをユーザー影響として記録する（データ損失ではなく遅延のため、緊急停止等は不要）。

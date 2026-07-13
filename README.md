@@ -11,7 +11,7 @@ staging 環境での検証まで完了。prod 化は未着手。
 ## ドキュメント
 
 | パス | 目的 |
-|---|---|
+| --- | --- |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Issue / Branch / Commit / PR / Label の運用ルール |
 | [AGENTS.md](AGENTS.md) | Codex 向け作業ルール |
 | [CLAUDE.md](CLAUDE.md) | Claude Code 向け作業ルール |

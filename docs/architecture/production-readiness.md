@@ -17,7 +17,7 @@
 ## High
 
 | ID | カテゴリ | 現状の挙動と実害シナリオ | 対応コスト | ステータス |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | H-1 | IAM / CI-CD | apply IAM ロールが `AdministratorAccess` のまま。write 権限が漏れた場合、任意ブランチに `environment: dev` を書いた workflow を workflow_dispatch するだけで Admin 級クレデンシャルを取得できる。GitHub Environment `dev` / `dev-destroy` の required reviewer・ブランチ制限は対応済み（2026-07-03、Issue #65、PR #66）だが、IAM ロールの `AdministratorAccess` 縮小は未着手のまま残る。 | IAM ロールのスコープ縮小。dev で先に検証。 | 対応済み（2026-07-05、Issue #125、PR #126 + #127。`AdministratorAccess` を撤去し、bootstrap / dev / staging の全管理リソースを洗い出したうえでカスタム最小権限ポリシー 2 本（read 系はサービス単位で広め、write 系はリージョン条件またはプロジェクトプレフィックス ARN で限定。apply ロール自身・tfstate バケット・OIDC provider への自己管理権限を含む）へ置き換え。実地検証: bootstrap apply 1 回目（旧 Admin 権限下）成功 → 縮小後ポリシーで dev apply 実行時に Aurora の管理シークレット作成（`secretsmanager:CreateSecret`）権限漏れで失敗 → 追加コミット（PR #127）で是正 → bootstrap apply 2 回目で反映 → 縮小後ポリシー下で dev apply / deploy-app-dev / terraform-destroy-dev すべて成功し自己ロックアウトなしを確認。staging は `terraform plan` のみ確認（PR #126 / #127 の CI で pass）。検証後 dev は destroy 済み、staging は元々未構築） |
 | H-2 | CI-CD | `terraform-destroy.yml` の「三重ゲート」のうち、`confirm` 入力一致チェックは workflow 定義ごと改変されれば回避できる。IAM trust は environment 名しか見ないため、H-1 と同じ対策（reviewer + ブランチ制限）で塞がる。 | H-1 と同一対応で解消。 | 対応済み（2026-07-03、Issue #65、PR #66） |
 | H-3 | Reliability / Secrets | Aurora の RDS 管理マスターシークレットは既定で 7 日ごとに自動ローテーションされるが、ECS への注入はタスク起動時 1 回きり。7 日以上連続稼働（例: 長時間の負荷検証）させると、ローテーション後に認証エラーで API/Worker が静かに壊れる。`dev-environment.md` にこの落とし穴の記載がない。 | ローテーション時の運用手順明記、またはアプリ側の再接続実装。 | 対応済み（PR #32） |
@@ -26,7 +26,7 @@
 ## Medium
 
 | ID | カテゴリ | 現状の挙動と実害シナリオ | 対応コスト | ステータス |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | M-1 | Data-integrity | `requestId` 付きリクエストは Valkey 前段フィルタを常時バイパスする。悪意あるクライアントがランダムな `requestId` を送れば、売り切れ後もフィルタを素通りして Aurora に直接負荷をかけられる（在庫超過は起きないが、影響隔離が破れる）。 | 前段フィルタの設計見直し。 | 対応済み（2026-07-05、Issue #129、PR #130。requestId の有無にかかわらず前段フィルタ（reserve）を必ず通し、売り切れ時は「DB 確定済み requestId」マーカー（COMMIT 後に Valkey へ記録、buyer/event/requestId scope、TTL 24h）がある場合のみ idempotent replay 候補として DB 判定へ流す方式へ変更。replay が在庫を消費しない場合の reserve 補償（release）も追加。dev 実環境で検証: 売り切れ後のランダム requestId 200 並行が 200/200 `sold_out_precheck`（Aurora 未到達）、正規 replay は元の confirmed row（同一 purchaseId・当時の snapshot）を返却、別 buyer の同一 requestId は前段拒否。既知のトレードオフ: マーカー書き込み失敗・TTL 失効後の売り切れ後再送は前段拒否される（Valkey を正本にしない fail-open 設計の許容範囲）） |
 | M-2 | Data-integrity | `syncCounter` は DB の残在庫でカウンタを無条件 SET するため、並行する `reserve`（DECRBY）とのレースで、在庫があるのに `sold_out_precheck` と誤って拒否され得る（超過ではなく機会損失方向）。`release()` の INCRBY もキー不在時に新規キーを作り、誤拒否の温床になる。 | `syncCounter` / `release` の Lua 化。 | 対応済み（2026-07-05、Issue #129、PR #130。カウンタ変更（init/reserve/release/sync）を version キー付き Lua script に統一し、`syncCounter` は「DB 判定前に控えた version」との CAS（不一致なら上書き見送り）へ変更。`release` はカウンタ不在時に no-op（キー捏造防止）。レース再現を含む単体テスト（jest + 実 Valkey、22 tests）を新設し pr-check で常時実行。dev 実環境で検証: 在庫 100 に 200 並行購入で confirmed ちょうど 100・最終 remaining 0（在庫超過 0、誤 sold_out による機会損失 0）。検証後 dev は destroy 済み） |
 | M-3 | Network / Secrets | OpenSearch のアクセスポリシーが `Principal: "*"` + `es:*`、クライアントは無署名 HTTPS。VPC 内 SG（app SG からのみ）で dev では成立するが、staging/prod で IAM 認証を有効化するにはアプリ側の SigV4 署名実装が必須になる。 | staging 前に SigV4 署名実装。 | 対応済み（PR #75 でクライアント側 SigV4 署名を実装、PR #95（Issue #88）でアクセスポリシーを API/Worker task role に限定。2026-07-04、Issue #93 の staging full 検証で実地確認済み: `describe-domain-config` で Principal 限定、smoke test の検索アサーション成功で SigV4 疎通を確認） |
@@ -39,7 +39,7 @@
 ## Low
 
 | ID | カテゴリ | 現状の挙動と実害シナリオ | 対応コスト | ステータス |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | L-1 | CI-CD | GitHub Actions がタグ pin（`@v4` 等）で SHA pin でない。Admin 級ロールを扱う workflow としてはサプライチェーン改竄の影響が大きい。 | commit SHA pin への切り替え。 | 未着手 |
 | L-2 | CI-CD | `terraform-plan.yml`（pull_request トリガー）は、同一リポジトリの PR で悪意ある provider/external data source を仕込むと plan ロール（ReadOnlyAccess）で任意コード実行が可能。フォーク PR からは `id-token: write` が付与されないため悪用不可（現状はコラボレータ本人のみのため許容）。 | 将来的な plan ロール sub のスコープ縮小。 | 未着手 |
 | L-3 | Reliability | ECS サービスに `deployment_circuit_breaker` 未設定。壊れたイメージを push すると `aws ecs wait services-stable` がタイムアウトまでハングし、タスクが起動ループする。 | circuit breaker 設定の追加。 | 対応済み（Issue #88。ecs-service モジュールで rollback 付き circuit breaker を共通有効化。dev へは次回 apply で反映） |
@@ -67,7 +67,7 @@
 現時点の Observability は、dev / staging の destroy 運用と対応者 1 名を前提に、Terraform 定義・SLO/SLI・アラーム・Dashboard・runbook・severity/escalation 方針までを整備している。prod 常設運用へ進む場合は、次の運用項目を別途決める。
 
 | 項目 | 現状 | prod 化前に決めること |
-|---|---|---|
+| --- | --- | --- |
 | オンコール体制 | 対応者 1 名前提。夜間・休日・不在時の一次対応は未定義。 | 対応者、確認時間帯、一次対応責任、エスカレーション先。 |
 | 通知ルーティング | SNS email 1 系統。severity は alarm description と手動判断で区別。 | critical / non-critical 分割、Slack / PagerDuty / SNS 分割の採用条件。 |
 | 閾値調整 | dev / staging 検証ベースの初期閾値。 | 実ユーザートラフィックを見たうえで、p95 / error rate / burn-rate 閾値を再調整する基準。 |

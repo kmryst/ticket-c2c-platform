@@ -48,9 +48,11 @@ aws logs start-query \
 ## 復旧・緩和の判断
 
 1. **原因を特定し、恒久修正をデプロイ済みの場合**: DLQ から本体キューへ redrive する。
+
    ```bash
    aws sqs start-message-move-task --source-arn <DLQ の ARN>
    ```
+
    redrive 後、DLQ のメッセージが本体キューに戻り Worker が再処理する。処理内容は eventId を doc ID とする OpenSearch upsert のため冪等（再配信による二重処理も収束する。`search-projection.worker.spec.ts` で担保）。
 2. **原因が一時的な依存障害（OpenSearch の瞬断等）だった場合**: 依存サービスの復旧を確認したうえで redrive する。
 3. **原因がコードバグの場合**: 修正をデプロイしてから redrive する（修正前に redrive すると同じ理由で再度 DLQ へ落ちる）。

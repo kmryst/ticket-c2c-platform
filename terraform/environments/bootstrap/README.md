@@ -42,7 +42,7 @@ rm terraform.tfstate terraform.tfstate.backup
 ## 出力
 
 | output | 用途 |
-|---|---|
+| --- | --- |
 | `state_bucket_name` | 各環境の backend 設定に使う |
 | `plan_role_arn` | GitHub Variables `AWS_PLAN_ROLE_ARN` |
 | `apply_role_arn` | GitHub Variables `AWS_APPLY_ROLE_ARN` |

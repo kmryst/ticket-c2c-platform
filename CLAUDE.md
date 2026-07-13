@@ -32,7 +32,7 @@
 ## 作業内容別に追加で読むファイル
 
 | 条件 | 読むファイル |
-|---|---|
+| --- | --- |
 | Issue 起票 | `docs/issue-templates/feature_request.md` / `.github/ISSUE_TEMPLATE/feature_request.yml` |
 | PR 作成 | `.github/pull_request_template.md` |
 | ラベル判断 | `.github/labels.yml` |
@@ -201,7 +201,7 @@ AWS 環境（dev / staging）の DDL は起動時適用ではなく TypeORM vers
 以下は必ず事前にプランを提示し、ユーザーの確認を得てから実行する。
 
 | 操作 | 確認のタイミング |
-|---|---|
+| --- | --- |
 | Issue 起票 | 本文・ラベル案とコマンドを提示してから |
 | 実装着手 | 変更対象・変更内容・影響範囲を提示してから |
 | コミット | コミット前サマリを提示して停止してから |
