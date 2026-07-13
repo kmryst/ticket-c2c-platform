@@ -14,7 +14,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: commitlint-${{ github.event.pull_request.number }}
+  # idp-golden-path 側の reusable workflow 自身も同名パターンの concurrency group
+  # （commitlint-<PR番号>）を持つため、caller 側と同一名にすると
+  # 「top level workflow と呼び出し先の間でデッドロック」として GitHub にキャンセルされる。
+  # caller 側は `-caller` を付けて callee の group と衝突しないようにする。
+  group: commitlint-caller-${{ github.event.pull_request.number }}
   # 実行中 run のキャンセルは CANCELLED check run を commit に残し、
   # required status checks の判定に混入して PR を恒久的にブロックする（Issue #61）。
   cancel-in-progress: false
