@@ -144,7 +144,6 @@ printf '\n\nCloses #%s\n' "$linked_issue" >>"$tmp_body"
 
 create_args=(
 	pr create
-	--draft
 	--title "$title"
 	--body-file "$tmp_body"
 	--base "$base_branch"
@@ -170,4 +169,4 @@ done
 
 gh "${edit_args[@]}"
 
-printf 'Created draft PR #%s\n%s\n' "$pr_number" "$pr_url"
+printf 'Created PR #%s\n%s\n' "$pr_number" "$pr_url"
