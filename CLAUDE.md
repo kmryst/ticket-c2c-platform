@@ -101,7 +101,8 @@ PR は通常 PR として作成する。draft PR にはしない。
 
 ### マージ後 cleanup
 
-PR がマージされた後、次の Issue へ進む前に原則として実行する。
+PR がマージされた後、次の Issue へ進む前に必ず実行する。
+このヘルパーは PR が `MERGED` であることを確認し、base branch を最新化してから作業ブランチを整理する。
 
 ```bash
 ./scripts/github/cleanup-merged-pr-branch.sh <PR番号>

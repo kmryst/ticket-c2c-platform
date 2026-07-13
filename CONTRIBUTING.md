@@ -177,13 +177,13 @@ PR 本文には、次のいずれかを必ず含めます。
 
 ### 6. マージ後 cleanup
 
-PR がマージされたら、次の Issue へ進む前にブランチを整理します。
+PR がマージされたら、次の Issue へ進む前に必ず cleanup helper でブランチを整理します。
 
 ```bash
 ./scripts/github/cleanup-merged-pr-branch.sh <PR番号>
 ```
 
-この helper は GitHub 上で PR が `MERGED` であることを確認し、base branch を最新化してから作業ブランチを削除します。
+この helper は GitHub 上で PR が `MERGED` であることを確認し、base branch を最新化してから作業ブランチを整理します。
 
 ## 運用モード
 
