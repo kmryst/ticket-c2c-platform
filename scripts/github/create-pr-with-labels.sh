@@ -34,6 +34,7 @@ Notes:
   - Repeat --area for multiple area labels.
   - The script appends Closes #<issue> to the PR body automatically.
   - The script creates the PR first, then applies labels with gh issue edit.
+  - Pass a filled copy of the PR template as --body-file, not the template itself.
 EOF
 }
 
@@ -170,4 +171,3 @@ done
 gh "${edit_args[@]}"
 
 printf 'Created draft PR #%s\n%s\n' "$pr_number" "$pr_url"
-
