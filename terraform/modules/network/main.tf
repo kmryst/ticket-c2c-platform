@@ -127,45 +127,12 @@ resource "aws_route_table_association" "private" {
   route_table_id = var.nat_gateway_mode == "per_az" && count.index > 0 ? aws_route_table.private_extra[count.index - 1].id : aws_route_table.private.id
 }
 
-# ECR / Logs へのアクセスを NAT 経由にしないための VPC endpoints
-resource "aws_security_group" "vpc_endpoints" {
-  name_prefix = "${var.name}-vpce-"
-  vpc_id      = aws_vpc.this.id
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = { Name = "${var.name}-vpce" }
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_vpc_endpoint" "interface" {
-  for_each = toset(["ecr.api", "ecr.dkr", "logs"])
-
-  vpc_id              = aws_vpc.this.id
-  service_name        = "com.amazonaws.${var.region}.${each.key}"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
-  private_dns_enabled = true
-
-  tags = { Name = "${var.name}-vpce-${each.key}" }
-}
-
+# ECR API / Logs は NAT Gateway 経由にする（ADR-0019）。イメージレイヤー本体は
+# 元々この S3 Gateway Endpoint（無料）経由で配信されており、Interface Endpoint
+# （ecr.api / ecr.dkr / logs）が担っていたのは認証・マニフェスト等の制御プレーン
+# 通信のみだった。dev/staging の実測トラフィックは損益分岐点（1.355 GB/稼働時間）
+# の約 1/100 で、Interface Endpoint の固定費がその制御プレーン分の NAT 転送費を
+# 大きく上回っていたため撤去した（Issue #313 / #315）。
 resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.this.id
   service_name      = "com.amazonaws.${var.region}.s3"

@@ -89,3 +89,4 @@ YYYY-MM-DD
 | [0016](./0016-purchase-api-sli-definition.md) | 購入 API の SLI（成功率・レイテンシ）を定義する | Accepted |
 | [0017](./0017-purchase-api-slo-burn-rate.md) | 購入 API の SLO 目標値と burn-rate アラートを実装する | Accepted |
 | [0018](./0018-ecs-autoscaling-scoped-to-staging-full.md) | ECS Auto Scaling policy は staging-full にのみ実装し、frontend は desired_count のみで冗長化する | Accepted |
+| [0019](./0019-remove-ecr-logs-interface-endpoints.md) | dev / staging から ECR / Logs の Interface VPC Endpoint を撤去する | Accepted |
