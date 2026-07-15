@@ -35,7 +35,7 @@
 
 - VPC: 2 AZ。public subnet に ALB、private subnet に ECS / Aurora / Valkey / OpenSearch。
 - API 入口は HTTPS（[ADR-0007](../adr/0007-alb-https-with-acm-and-ingress-variable.md)）。`ticket-api-dev.ticket-c2c.click`（プロジェクト専用ドメイン。[ADR-0009](../adr/0009-migrate-to-project-domain.md)）の ACM 証明書（DNS 検証）を ALB:443 で終端し、HTTP:80 は 443 への 301 リダイレクト専用。ingress は `alb_allowed_ingress_cidrs` 変数（既定 `0.0.0.0/0`）で絞り込み可能。
-- NAT Gateway は dev では 1 つ（コスト優先。prod では AZ ごとに配置）。ECR / S3 / CloudWatch Logs は VPC endpoint 経由にして NAT 転送量を抑える。
+- NAT Gateway は dev では 1 つ（コスト優先。prod では AZ ごとに配置）。ECR / S3 / CloudWatch Logs は VPC endpoint 経由にして NAT 転送量を抑える（ただし M-6 / Issue #313 の比較試算で、Interface Endpoint 固定費が NAT 経由の実データ転送費を約 100 倍上回ることが判明し、ecr.api / ecr.dkr / logs の Interface Endpoint 撤去を検討中。S3 Gateway Endpoint は無料のため維持）。
 - 書き込み経路（購入）: API → Valkey 前段フィルタ → Aurora 条件付き更新 → EventBridge 発行。
 - 読み取り経路（検索・一覧）: API → OpenSearch。正本確認が必要な場合のみ Aurora。
 - 人気イベントの影響隔離は、(1) Valkey による売り切れ後の即時拒否、(2) Worker 分離による非同期処理の隔離、(3) API の DB コネクションプール上限、の 3 層で行う。SQS FIFO によるイベント単位直列化は測定データが出るまで導入しない（[ADR-0004](../adr/0004-defer-sqs-fifo.md)）。
@@ -134,16 +134,17 @@ GitHub Environments / Variables:
 | リソース | 月額目安 |
 | --- | --- |
 | OpenSearch t3.small ×1 + EBS 10GB | ~$30 |
-| NAT Gateway ×1 | ~$35 + 転送量 |
+| NAT Gateway ×1 | ~$35 + 転送量（$0.062/GB） |
+| Interface VPC Endpoint（ecr.api / ecr.dkr / logs × 2AZ = 6 ENI） | ~$61（$0.014/ENI-hour × 6 ENI × 730h ≒ $61.32。ほかに処理 $0.01/GB。S3 Gateway Endpoint は無料） |
 | ALB | ~$20 |
 | Valkey cache.t4g.micro | ~$12 |
 | Fargate（API + Worker + Frontend 各 0.25vCPU/0.5GB） | ~$30 |
 | Aurora Serverless v2（auto-pause） | アイドル時ほぼ $0 |
 | CloudFront | 従量課金（検証トラフィックのみ、ほぼ $0） |
 | WAFv2 WebACL（L-12。マネージドルール 3 種） | ~$8（WebACL $5 + ルール 3 本 $3 + リクエスト従量） |
-| 合計 | **~$140/月** |
+| 合計 | **~$200/月** |
 
-常駐コストの主因は OpenSearch / NAT / ALB。検証しない期間は destroy workflow で環境ごと削除する。
+常駐コストの主因は Interface VPC Endpoint / OpenSearch / NAT / ALB。検証しない期間は destroy workflow で環境ごと削除するため、実際の月額は稼働時間に比例する（Interface Endpoint も稼働時間課金）。Interface Endpoint の固定費は NAT 経由の実データ転送費を大きく上回ることが実測で判明しており、撤去を検討中（M-6 / Issue #313。試算は [production-readiness.md](./production-readiness.md) の M-6 行を参照）。
 
 ## 関連ドキュメント
 
