@@ -144,7 +144,7 @@ GitHub Environments / Variables:
 | WAFv2 WebACL（L-12。マネージドルール 3 種） | ~$8（WebACL $5 + ルール 3 本 $3 + リクエスト従量） |
 | 合計 | **~$200/月** |
 
-常駐コストの主因は Interface VPC Endpoint / OpenSearch / NAT / ALB。検証しない期間は destroy workflow で環境ごと削除するため、実際の月額は稼働時間に比例する（Interface Endpoint も稼働時間課金）。Interface Endpoint の固定費は NAT 経由の実データ転送費を大きく上回ることが実測で判明しており、撤去を検討中（M-6 / Issue #313。試算は [production-readiness.md](./production-readiness.md) の M-6 行を参照）。
+常駐コストの主因は Interface VPC Endpoint / OpenSearch / NAT / ALB。検証しない期間は destroy workflow で環境ごと削除するため、実際の月額は稼働時間に比例する（Interface Endpoint も稼働時間課金）。Interface Endpoint 固定費と NAT 転送費の損益分岐点は 1.355 GB/稼働時間（$0.084/時間 ÷ $0.062/GB）で、dev/staging の実測転送量（約 0.00225 GB/稼働時間）はこれを大きく下回るため撤去（NAT 一本化）を検討中（M-6 / Issue #313。損益分岐点の算出根拠と本番規模での位置づけは [production-readiness.md](./production-readiness.md) の M-6 行を参照）。
 
 ## 関連ドキュメント
 
