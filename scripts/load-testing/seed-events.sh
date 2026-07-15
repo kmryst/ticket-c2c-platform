@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ファイル概要:
-# purchase-spike.js 用のイベントと在庫を dev API 経由で作成する seed スクリプトです。
+# purchase-spike.js 用のイベントと在庫を対象環境（dev / staging）の API 経由で作成する seed スクリプトです。
 # 人気イベント（hot）1 件と分散負荷用イベント（background）N 件を作成し、
 # k6 実行に必要な環境変数（HOT_EVENT_ID / BG_EVENT_IDS）を標準出力へ export 形式で出します。
 #
