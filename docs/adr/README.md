@@ -90,3 +90,5 @@ YYYY-MM-DD
 | [0017](./0017-purchase-api-slo-burn-rate.md) | 購入 API の SLO 目標値と burn-rate アラートを実装する | Accepted |
 | [0018](./0018-ecs-autoscaling-scoped-to-staging-full.md) | ECS Auto Scaling policy は staging-full にのみ実装し、frontend は desired_count のみで冗長化する | Accepted |
 | [0019](./0019-remove-ecr-logs-interface-endpoints.md) | dev / staging から ECR / Logs の Interface VPC Endpoint を撤去する | Accepted |
+| [0020](./0020-reframe-as-b2c-primary-ticketing.md) | 既存リポジトリを B2C 一次販売プラットフォームへ転換する | Accepted |
+| [0021](./0021-protected-zone-purchase-flow.md) | Protected Zone 内の購入フローと疑似決済境界を定義する | Accepted |

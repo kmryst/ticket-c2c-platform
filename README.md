@@ -1,12 +1,14 @@
 # ticket-c2c-platform
 
-チケット購入者と販売者の両方の機能を提供する、C2C チケット販売プラットフォームのシステム設計プロジェクトです。
+人気イベントの販売開始時に発生するアクセス集中へ対応し、イベント主催者（Organizer）が購入者（Customer）へ一次販売チケットを提供する B2C チケット販売プラットフォームのシステム設計プロジェクトです。
 
 ## ステータス
 
-staging 環境での検証まで完了。prod 化は未着手。
+既存の C2C 在庫購入基盤は staging 環境での検証まで完了。B2C 一次販売への転換方針と目標設計を確定し、実装は未着手です。prod 化も未着手です。
 
-システム要件、技術選定、アーキテクチャ方針の整理とローカル在庫 PoC を経て、AWS 上の dev 環境を構築し、staging 環境（本番寄せ構成 `capacity_profile=full`）で k6 負荷検証・Aurora / Valkey / OpenSearch の failover 検証まで実施済みです。検証で見つかった課題や残作業は [docs/architecture/production-readiness.md](docs/architecture/production-readiness.md) にバックログとして記録しています。
+転換前の C2C 構成では、システム要件、技術選定、アーキテクチャ方針の整理とローカル在庫 PoC を経て、AWS 上の dev 環境を構築し、staging 環境（本番寄せ構成 `capacity_profile=full`）で k6 負荷検証・Aurora / Valkey / OpenSearch の failover 検証まで実施済みです。既存の実測値と ADR は歴史的記録として保持し、B2C 目標構成の実装済み証拠とは区別します。検証で見つかった課題や残作業は [docs/architecture/production-readiness.md](docs/architecture/production-readiness.md) にバックログとして記録しています。
+
+GitHub リポジトリ名と AWS リソース名は、GitHub OIDC、IAM、Terraform state を安全に移行するまで `ticket-c2c-platform` のまま維持します。
 
 ## ドキュメント
 
@@ -17,6 +19,7 @@ staging 環境での検証まで完了。prod 化は未着手。
 | [CLAUDE.md](CLAUDE.md) | Claude Code 向け作業ルール |
 | [docs/requirements/system-requirements.md](docs/requirements/system-requirements.md) | 課題要件、スコープ、制約の整理 |
 | [docs/architecture/technology-stack.md](docs/architecture/technology-stack.md) | 技術スタックと設計方針のドラフト |
+| [docs/architecture/primary-ticket-sales.md](docs/architecture/primary-ticket-sales.md) | B2C 一次販売フローの仕様と構成の正本 |
 | [docs/poc/technical-validation-plan.md](docs/poc/technical-validation-plan.md) | PoC と技術検証の計画 |
 | [docs/architecture/dev-environment.md](docs/architecture/dev-environment.md) | AWS dev 環境設計の正本 |
 | [docs/architecture/staging-environment.md](docs/architecture/staging-environment.md) | AWS staging 環境設計の正本候補 |
@@ -26,21 +29,25 @@ staging 環境での検証まで完了。prod 化は未着手。
 | [docs/poc/inventory-purchase-poc.md](docs/poc/inventory-purchase-poc.md) | 在庫購入 PoC の実行手順 |
 | [docs/poc/inventory-purchase-reading-guide.md](docs/poc/inventory-purchase-reading-guide.md) | 在庫購入 PoC の構成図と読み解きメモ |
 
-## 現在のスコープ
+## 目標スコープ
 
-- 購入者（Buyer）/ 販売者（Seller）ロールを持つユーザー設計
+- イベント主催者（Organizer）によるイベントと Ticket Type の登録
+- 購入者（Customer）によるイベント検索と一次販売チケットの購入
 - イベント検索
 - イベント一覧表示
-- チケット購入
-- 人気イベントへのトラフィック集中対策
-- 在庫超過予約の防止
+- Waiting Room と Protected Zone の流入制御
+- Purchase Session、Ticket Hold、Purchase の段階的な購入フロー
+- General Admission の数量在庫と、将来の Reserved Seating 拡張境界
+- 在庫超過販売の防止
+- local / staging 限定の Fake Payment API による決済依存障害の検証
 
 ## スコープ外
 
-- 決済管理
-- 購入キャンセル
+- 実際の Payment Service Provider とカード情報の処理
+- 購入確定後のキャンセル、返金
 - 料金や収容人数による検索
-- 購入者（Buyer）/ 販売者（Seller）間メッセージ
+- 個人によるチケット再出品、個人間取引、売上金精算、チケット譲渡
+- チケットの二次流通
 
 ## リポジトリ方針
 
