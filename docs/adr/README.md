@@ -93,3 +93,4 @@ YYYY-MM-DD
 | [0020](./0020-reframe-as-b2c-primary-ticketing.md) | 既存リポジトリを B2C 一次販売プラットフォームへ転換する | Accepted |
 | [0021](./0021-protected-zone-purchase-flow.md) | Protected Zone 内の購入フローと疑似決済境界を定義する | Accepted |
 | [0022](./0022-b2c-purchase-journey-success-sli.md) | B2C 購入ジャーニーの技術的成功率 SLI を定義する | Accepted |
+| [0023](./0023-split-b2c-purchase-journey-latency-sli.md) | B2C 購入ジャーニーのレイテンシ SLI を 2 つに分ける | Accepted |
