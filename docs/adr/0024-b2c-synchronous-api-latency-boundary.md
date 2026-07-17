@@ -89,7 +89,7 @@ health check、未知 route の 404、および B2C 購入フロー以外の API
 - 現行の NestJS Interceptor と異なる Fastify 固有の計測実装が必要になる。
 - `onRequestAbort` は Customer 起因の切断と、サーバー遅延に耐えられず切断した場合を単独では区別できない。
 - Application Load Balancer が先に 504 を返し、ターゲットが処理を継続する場合は、サーバー側 Outcome と Customer が受け取った結果が一致しない。Application Load Balancer の 5xx 監視で補完する必要がある。
-- 4 つの API を個別の分布として扱うか、ジャーニー単位で合算するかは、この ADR では決定しない。
+- 4 つの API を個別の分布として扱うか、ジャーニー単位で合算するかは、この ADR では決定せず、[ADR-0025](./0025-b2c-synchronous-purchase-latency-slo.md) で決定する。
 - server timeout と Application Load Balancer の idle timeout の整合値は、API 実装と負荷試験条件を踏まえて別途決定する。
 
 ## 再検討のトリガー

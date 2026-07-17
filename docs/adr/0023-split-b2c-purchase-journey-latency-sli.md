@@ -18,7 +18,7 @@ B2C 目標フローでは、Protected Zone Access Token の交換、Purchase Ses
 
 ## 決定
 
-B2C 購入ジャーニーのレイテンシを単一の SLI にせず、次の 2 つへ分ける。具体的なメトリクス名、対象 Outcome、percentile、SLO 目標値、保存方式、emit 主体は後続の設計で決定する。
+B2C 購入ジャーニーのレイテンシを単一の SLI にせず、次の 2 つへ分ける。具体的なメトリクス名、対象 Outcome、percentile、SLO 目標値、保存方式、emit 主体は後続の設計で決定する。同期購入処理時間の正式な SLO と集計方式は [ADR-0025](./0025-b2c-synchronous-purchase-latency-slo.md) で決定する。
 
 ### 同期購入処理時間
 
@@ -38,7 +38,7 @@ Customer が購入フローの各同期 API の応答を待つ、プラットフ
 - Session / Hold 期限切れまでの idle time。
 - `payment_processing` 以降の非同期な結果確定待ち。
 
-各 API のレイテンシ SLI は、同期購入処理時間が悪化したときに原因となる段階を特定する診断指標として別に維持する。
+各 API のレイテンシ SLI は、同期購入処理時間が悪化したときに原因となる段階を特定できる形で別に維持する。後続の ADR-0025 では、この個別 SLI を正式な SLO の正本にも使用する。
 
 ### 決済結果解決時間
 
