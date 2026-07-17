@@ -46,7 +46,7 @@ jobs:
           echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
           echo "base URL: $BASE_URL" >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
