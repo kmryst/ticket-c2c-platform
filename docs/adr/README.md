@@ -94,3 +94,4 @@ YYYY-MM-DD
 | [0021](./0021-protected-zone-purchase-flow.md) | Protected Zone 内の購入フローと疑似決済境界を定義する | Accepted |
 | [0022](./0022-b2c-purchase-journey-success-sli.md) | B2C 購入ジャーニーの技術的成功率 SLI を定義する | Accepted |
 | [0023](./0023-split-b2c-purchase-journey-latency-sli.md) | B2C 購入ジャーニーのレイテンシ SLI を 2 つに分ける | Accepted |
+| [0024](./0024-b2c-synchronous-api-latency-boundary.md) | B2C 同期 API のサーバー側レイテンシ計測境界を定義する | Accepted |
