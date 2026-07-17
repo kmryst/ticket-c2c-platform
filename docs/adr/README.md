@@ -96,3 +96,4 @@ YYYY-MM-DD
 | [0023](./0023-split-b2c-purchase-journey-latency-sli.md) | B2C 購入ジャーニーのレイテンシ SLI を 2 つに分ける | Accepted |
 | [0024](./0024-b2c-synchronous-api-latency-boundary.md) | B2C 同期 API のサーバー側レイテンシ計測境界を定義する | Accepted |
 | [0025](./0025-b2c-synchronous-purchase-latency-slo.md) | B2C 同期購入レイテンシの SLO と集計方式を定義する | Accepted |
+| [0026](./0026-measure-payment-resolution-per-attempt.md) | 決済結果解決時間を決済試行単位で計測する | Accepted |

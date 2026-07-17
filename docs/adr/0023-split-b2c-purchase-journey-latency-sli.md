@@ -18,7 +18,7 @@ B2C 目標フローでは、Protected Zone Access Token の交換、Purchase Ses
 
 ## 決定
 
-B2C 購入ジャーニーのレイテンシを単一の SLI にせず、次の 2 つへ分ける。具体的なメトリクス名、対象 Outcome、percentile、SLO 目標値、保存方式、emit 主体は後続の設計で決定する。同期購入処理時間の正式な SLO と集計方式は [ADR-0025](./0025-b2c-synchronous-purchase-latency-slo.md) で決定する。
+B2C 購入ジャーニーのレイテンシを単一の SLI にせず、次の 2 つへ分ける。具体的なメトリクス名、対象 Outcome、percentile、SLO 目標値、保存方式、emit 主体は後続の設計で決定する。同期購入処理時間の正式な SLO と集計方式は [ADR-0025](./0025-b2c-synchronous-purchase-latency-slo.md)、決済結果解決時間の計測単位と SLO 構造は [ADR-0026](./0026-measure-payment-resolution-per-attempt.md) で決定する。
 
 ### 同期購入処理時間
 
@@ -42,7 +42,7 @@ Customer が購入フローの各同期 API の応答を待つ、プラットフ
 
 ### 決済結果解決時間
 
-Aurora PostgreSQL で Hold が `payment_processing` へ遷移した時点から、決済結果に基づく終端状態が Aurora PostgreSQL で確定するまでの経過時間を扱う。これは API 処理時間の合計ではなく、サーバー側の wall-clock time とする。
+Aurora PostgreSQL で Hold が `payment_processing` へ遷移した時点から、その決済試行の確定結果が Aurora PostgreSQL へ記録されるまでの経過時間を扱う。確定結果には決済拒否後の `held` への復帰を含む。これは API 処理時間の合計ではなく、サーバー側の wall-clock time とする。payment attempt 単位の詳細は ADR-0026 に従う。
 
 - 通常の同期決済と、`payment_unknown` を経由して最大 15 分以内に解決する処理を同じ決済結果解決経路として計測する。
 - `payment_unknown` の件数と滞留時間に対する Amazon CloudWatch Alarm は、結果確定後に集計される SLI より早く異常を検知するため別に維持する。
