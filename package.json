@@ -27,7 +27,7 @@
     "@aws-sdk/client-secrets-manager": "^3.1084.0",
     "@aws-sdk/client-sqs": "^3.1089.0",
     "@aws-sdk/credential-provider-node": "^3.972.62",
-    "@fastify/cookie": "^11.0.2",
+    "@fastify/cookie": "^11.1.2",
     "@nestjs/common": "^11.1.27",
     "@nestjs/core": "^11.1.28",
     "@nestjs/jwt": "^11.0.2",
