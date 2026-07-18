@@ -4,7 +4,7 @@
 このファイルを Issue / Branch / Commit / PR / Label / 軽運用・厳密運用の共通運用ルールの正本とします。
 設計意図や未採用案、将来の再検討条件は [docs/operations/github-flow-guardrails.md](./docs/operations/github-flow-guardrails.md) を参照してください。
 
-このリポジトリは、C2C チケット販売プラットフォームのシステム設計と PoC を段階的に進めるためのプロジェクトです。
+このリポジトリは、B2C 一次チケット販売プラットフォームのシステム設計と PoC を段階的に進めるためのプロジェクトです。リポジトリ名は GitHub OIDC、IAM、Terraform state の移行方針を確定するまで `ticket-c2c-platform` のまま維持します。
 
 ## 開発フロー
 
