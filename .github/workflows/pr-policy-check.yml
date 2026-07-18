@@ -33,7 +33,8 @@ jobs:
   # callee側 job 名（PR Policy Check）との完全な文字列重複を避ける
   # （Commitlint移行 #294 で判明した可読性上の教訓。idp-golden-path#106参照）。
   pr-policy-check:
-    if: github.actor != 'dependabot[bot]'
+    # Dependabot の免除判定は called workflow の step で行う。caller workflow は常に呼び出し、
+    # required status check の `pr-policy-check / PR Policy Check` を作成させる。
     uses: kmryst/idp-golden-path/.github/workflows/pr-policy-check.yml@v1
     with:
       strict-paths-regex: '^(terraform/|\.github/workflows/|scripts/(github|deployment|validation)/|database/schema\.sql$|docker-compose\.yml$)'
