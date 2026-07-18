@@ -90,3 +90,11 @@ YYYY-MM-DD
 | [0017](./0017-purchase-api-slo-burn-rate.md) | 購入 API の SLO 目標値と burn-rate アラートを実装する | Accepted |
 | [0018](./0018-ecs-autoscaling-scoped-to-staging-full.md) | ECS Auto Scaling policy は staging-full にのみ実装し、frontend は desired_count のみで冗長化する | Accepted |
 | [0019](./0019-remove-ecr-logs-interface-endpoints.md) | dev / staging から ECR / Logs の Interface VPC Endpoint を撤去する | Accepted |
+| [0020](./0020-reframe-as-b2c-primary-ticketing.md) | 既存リポジトリを B2C 一次販売プラットフォームへ転換する | Accepted |
+| [0021](./0021-protected-zone-purchase-flow.md) | Protected Zone 内の購入フローと疑似決済境界を定義する | Accepted |
+| [0022](./0022-b2c-purchase-journey-success-sli.md) | B2C 購入ジャーニーの技術的成功率 SLI を定義する | Accepted |
+| [0023](./0023-split-b2c-purchase-journey-latency-sli.md) | B2C 購入ジャーニーのレイテンシ SLI を 2 つに分ける | Accepted |
+| [0024](./0024-b2c-synchronous-api-latency-boundary.md) | B2C 同期 API のサーバー側レイテンシ計測境界を定義する | Accepted |
+| [0025](./0025-b2c-synchronous-purchase-latency-slo.md) | B2C 同期購入レイテンシの SLO と集計方式を定義する | Accepted |
+| [0026](./0026-measure-payment-resolution-per-attempt.md) | 決済結果解決時間を決済試行単位で計測する | Accepted |
+| [0027](./0027-payment-timeout-boundaries.md) | 決済依存の timeout 境界と結果不明遷移を定義する | Accepted |
