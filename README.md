@@ -18,12 +18,18 @@ GitHub リポジトリ名と AWS リソース名は、GitHub OIDC、IAM、Terraf
 | [AGENTS.md](AGENTS.md) | Codex 向け作業ルール |
 | [CLAUDE.md](CLAUDE.md) | Claude Code 向け作業ルール |
 | [docs/requirements/system-requirements.md](docs/requirements/system-requirements.md) | 課題要件、スコープ、制約の整理 |
-| [docs/architecture/technology-stack.md](docs/architecture/technology-stack.md) | 技術スタックと設計方針のドラフト |
+| [docs/architecture/technology-stack.md](docs/architecture/technology-stack.md) | 現行実装と B2C 目標構成の技術スタック方針 |
 | [docs/architecture/primary-ticket-sales.md](docs/architecture/primary-ticket-sales.md) | B2C 一次販売フローの仕様と構成の正本 |
+| [docs/architecture/observability.md](docs/architecture/observability.md) | 現行 dev / staging の可観測性・アラーム・運用方針の正本 |
+| [docs/architecture/b2c-purchase-journey-observability.md](docs/architecture/b2c-purchase-journey-observability.md) | 未実装の B2C 購入ジャーニーに対する可観測性の目標設計 |
+| [docs/architecture/observability-verification-log.md](docs/architecture/observability-verification-log.md) | 可観測性の実地検証記録 |
 | [docs/poc/technical-validation-plan.md](docs/poc/technical-validation-plan.md) | PoC と技術検証の計画 |
 | [docs/architecture/dev-environment.md](docs/architecture/dev-environment.md) | AWS dev 環境設計の正本 |
-| [docs/architecture/staging-environment.md](docs/architecture/staging-environment.md) | AWS staging 環境設計の正本候補 |
-| [docs/architecture/production-readiness.md](docs/architecture/production-readiness.md) | dev 環境の本番化ギャップ一覧（未対応課題バックログ） |
+| [docs/architecture/staging-environment.md](docs/architecture/staging-environment.md) | AWS staging 環境設計の正本 |
+| [docs/architecture/staging-environment-verification-log.md](docs/architecture/staging-environment-verification-log.md) | AWS staging 環境の構築・負荷・failover・機能検証記録 |
+| [docs/architecture/capacity-planning.md](docs/architecture/capacity-planning.md) | 負荷シナリオと容量・コスト見積りの作業文書 |
+| [docs/architecture/production-readiness.md](docs/architecture/production-readiness.md) | dev / staging / B2C / prod の未対応課題バックログ |
+| [docs/architecture/production-readiness-log.md](docs/architecture/production-readiness-log.md) | Production Readiness 対応済み項目の実装・検証記録 |
 | [docs/adr/README.md](docs/adr/README.md) | ADR（設計判断の記録）一覧と運用ルール |
 | [docs/poc/dev-environment-verification.md](docs/poc/dev-environment-verification.md) | dev 環境の初回構築・検証記録 |
 | [docs/poc/inventory-purchase-poc.md](docs/poc/inventory-purchase-poc.md) | 在庫購入 PoC の実行手順 |
@@ -51,7 +57,7 @@ GitHub リポジトリ名と AWS リソース名は、GitHub OIDC、IAM、Terraf
 
 ## リポジトリ方針
 
-- 設計判断は必要に応じて `docs/architecture/` または ADR として記録する。
+- 現行の仕様・構成・運用手順は領域ごとの `docs/architecture/` 正本に記録し、トレードオフを伴う重要な設計判断の背景・理由・再検討条件は ADR に記録する。
 - 秘密情報、`.env`、認証情報はコミットしない。
 
 ## ローカル在庫 PoC
@@ -63,6 +69,8 @@ npm install
 cp .env.example .env
 docker compose up -d
 docker compose exec -T postgres psql -U ticket_poc -d ticket_poc < database/schema.sql
+AUTH_RATE_LIMIT_PURCHASE_IP=10000 \
+AUTH_RATE_LIMIT_PURCHASE_SECONDARY=10000 \
 npm run start:dev
 ```
 
@@ -71,3 +79,5 @@ npm run start:dev
 ```bash
 npm run poc:inventory
 ```
+
+レート制限の上書きは、同じ検証ユーザーから購入を繰り返す在庫 PoC 専用です。通常の dev / staging 設定には適用しません。

@@ -2,7 +2,7 @@
 
 ## ステータス
 
-初期実装。初回ローカル検証結果を整理済み。
+実装済み。現行スクリプトの実行手順と、2026-06-29 の初回ローカル検証結果を記録する。
 
 この PoC は、PostgreSQL の条件付き更新で同時購入時の在庫超過を防げるかを確認するための最小検証です。
 
@@ -10,12 +10,13 @@
 
 ## 対象
 
-- NestJS API。
+- JWT 認証を含む NestJS API。
 - PostgreSQL。
+- Valkey 前段フィルタ（PoC script は DB へ直接 seed するためカウンタ未初期化となり、現行実行では fail-open の DB 判定経路を通る）。
 - `ticket_inventory.remaining_quantity` の条件付き更新。
 - API 経由の並列購入検証。
 
-Valkey 前段フィルタ、k6 負荷テスト、SQS FIFO、OpenSearch は、現行 PoC の初期結果を整理するこの Issue（#8）では対象外です。
+k6 負荷テスト、SQS FIFO、OpenSearch はこの PoC の対象外です。Valkey による売り切れ後の前段拒否そのものは別の単体テストと dev / staging の負荷検証で扱います。
 
 ## 購入 API
 
@@ -23,11 +24,12 @@ Valkey 前段フィルタ、k6 負荷テスト、SQS FIFO、OpenSearch は、現
 POST /events/:eventId/purchases
 ```
 
-リクエスト例:
+有効な access token を `Authorization: Bearer <token>` で付けます。購入者 ID は JWT の `sub` claim からサーバー側で決めるため、body では受け付けません。
+
+リクエスト body 例:
 
 ```json
 {
-  "buyerId": "00000000-0000-4000-8000-000000000001",
   "quantity": 1,
   "requestId": "optional-idempotency-key"
 }
@@ -35,10 +37,12 @@ POST /events/:eventId/purchases
 
 処理概要:
 
-1. イベントの存在を確認する。
-2. トランザクション内で `ticket_inventory` を条件付き更新する。
-3. 更新成功時は `purchases.status = confirmed` を記録する。
-4. 更新失敗時は `purchases.status = rejected` と `insufficient_inventory` を記録する。
+1. JWT を検証し、購入者 ID を `sub` claim から取得する。
+2. user ID / IP の dual-key レート制限を確認する。
+3. Valkey 前段フィルタを通す。カウンタ不在・障害時は DB へ fail-open する。
+4. トランザクション内で再送確認と `ticket_inventory` の条件付き更新を行う。
+5. 更新成功時は `purchases.status = confirmed`、更新失敗時は `rejected` と拒否理由を記録する。
+6. 確定後に EventBridge 用イベントを発行する。ローカル PoC では `EVENT_BUS_NAME` 未設定のため no-op。
 
 `requestId` は任意です。指定した場合、同じ購入者・同じイベントの確定購入（`confirmed`）では `purchases_request_id_uq` により一意になります。同じ buyer / event / requestId の確定済み購入を再試行した場合は、元の確定結果を返します。拒否された購入（`rejected`）は同じ buyer / event / requestId で重複記録しないようにしつつ、在庫補充後に確定購入として再試行できます。省略した場合は冪等性チェックを行いません。
 
@@ -81,11 +85,15 @@ docker compose ps
 docker compose exec -T postgres psql -U ticket_poc -d ticket_poc < database/schema.sql
 ```
 
-API を起動する。
+API を起動する。この PoC は既定で同じ検証ユーザーから 50 回購入を試みるため、通常運用の user ID 単位レート制限（15 分に 10 回）へ先に到達しないよう、ローカル PoC 実行時だけ上限を試行数以上へ引き上げます。
 
 ```bash
+AUTH_RATE_LIMIT_PURCHASE_IP=10000 \
+AUTH_RATE_LIMIT_PURCHASE_SECONDARY=10000 \
 npm run start:dev
 ```
+
+この上書きは、短時間に PoC を繰り返しても 15 分窓のカウンターへ先に到達しないよう十分に大きくしたローカル限定設定です。dev / staging の通常運用値は変更しません。`POC_PURCHASE_ATTEMPTS` と実行回数の積が 10000 を超える場合は、両方をそれ以上へ引き上げます。
 
 別ターミナルで検証スクリプトを実行する。
 
@@ -99,6 +107,7 @@ npm run poc:inventory
 
 - 検証用イベントを 1 件作成する。
 - 同じイベントに初期在庫を作成する。
+- signup API で検証用ユーザーを作成し、access token を取得する。
 - API 経由で在庫数を超える購入リクエストを、設定した concurrency で並列送信する。
 - 成功数、拒否数、API エラー数、残在庫、確定購入数、p50 / p95 / p99 レイテンシを出力する。
 - 在庫超過、または API エラーがあれば終了コード `1` にする。
@@ -116,6 +125,8 @@ npm run poc:inventory
 | `POC_PURCHASE_CONCURRENCY` | `9` | 同時に送る購入リクエスト数 |
 | `POC_PURCHASE_QUANTITY` | `1` | 1 リクエストあたりの購入枚数 |
 
+API 側の `AUTH_RATE_LIMIT_PURCHASE_IP` / `AUTH_RATE_LIMIT_PURCHASE_SECONDARY` は、上記のとおり `POC_PURCHASE_ATTEMPTS` 以上にしてから API を起動します。これは検証スクリプト自身の環境変数ではなく、NestJS API のレート制限設定です。
+
 受け入れ確認の観点:
 
 - `database.confirmedQuantity <= database.totalQuantity`。
@@ -123,9 +134,11 @@ npm run poc:inventory
 - `database.totalQuantity - database.remainingQuantity = database.confirmedQuantity`。
 - `oversold = false`。
 
-## 初回ローカル検証結果
+## 初回ローカル検証結果（歴史的記録）
 
 実行日: 2026-06-29
+
+この結果は認証・レート制限・Valkey 前段フィルタの現行実装より前の初回測定であり、現在の性能値として読み替えません。在庫条件付き更新の基礎検証記録として保持します。
 
 条件:
 

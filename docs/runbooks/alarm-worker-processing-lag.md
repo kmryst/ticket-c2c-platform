@@ -54,7 +54,9 @@ aws logs start-query \
 
 ## 復旧・緩和の判断
 
-1. **Worker のスループット不足が原因の場合**: `desired_count` を一時的に増やす。
+以下の `aws ecs update-service` は AWS リソースを変更する。対象環境、変更前の desired count、復旧値を記録し、実行承認を得てから使用する。staging full では Worker が Application Auto Scaling 対象のため、手動変更前に scaling activity と max capacity 到達有無を確認する。
+
+1. **Worker のスループット不足が原因の場合**: dev / staging normal では `desired_count` の一時的な増加を検討する。staging full では先に target tracking が max capacity まで動作したか確認し、上限不足なら恒久設定の見直しへつなげる。
 
    ```bash
    aws ecs update-service --cluster <name> --service <name>-worker --desired-count <N>
@@ -67,7 +69,7 @@ aws logs start-query \
 ## エスカレーション条件
 
 - **Warning**: 24 時間以内に確認。24 時間 OK 復帰しない場合は Critical 相当として扱う。
-- 同一アラームが 1 週間に 3 回以上発報する場合は、Worker のキャパシティ設計（desired_count・autoscaling 導入要否）を Issue 化する。
+- 同一アラームが 1 週間に 3 回以上発報する場合は、Worker のキャパシティ設計（dev / staging normal の desired count、staging full の target / max capacity、Queue backlog を使う scaling policy の要否）を Issue 化する。
 
 ## 関連
 

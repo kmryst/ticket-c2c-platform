@@ -66,7 +66,8 @@ export class DomainEventsService {
         }),
       );
     } catch (error) {
-      // イベント発行失敗で API 応答を失敗させない。検索プロジェクションは次のイベントで追いつきます。
+      // イベント発行失敗で API 応答を失敗させない。次のイベントで追いつく場合はあるが、
+      // 最終イベントが欠損すると projection は古いまま残る。
       // detailType / trace id を構造化フィールドで残し、発行元リクエストの trace へ辿れるようにします（Issue #255）。
       console.error(
         'EventBridge publish failed',

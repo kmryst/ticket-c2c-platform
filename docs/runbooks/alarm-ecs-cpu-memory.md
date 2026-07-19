@@ -18,15 +18,15 @@ CPU / Memory の逼迫はスケール不足・OOM kill の前兆（Saturation）
 
 1. CloudWatch Dashboard（`<name>-overview`）の「ECS CPUUtilization」「ECS MemoryUtilization」widget でどのサービス（api / worker / frontend）が逼迫しているかを確認する。
 2. 同時刻に `alb-5xx` / `unhealthy-hosts` / 購入 API 系アラームが発報していないか確認する（実害が出始めているかの判断材料）。
-3. autoscaling が効いているサービス（api）であれば、`runningCount` が `desiredCount`（autoscaling 上限）に張り付いていないか確認する。
+3. autoscaling が効いている staging full の API / Worker では、Application Auto Scaling の activity と max capacity 到達有無を確認する。
 
 ## 主な原因候補
 
-- 実トラフィック増（想定内のスケールアウトで自然回復する可能性がある。api は autoscaling 対象）。
+- 実トラフィック増（staging full の API / Worker は想定内のスケールアウトで自然回復する可能性がある）。
 - 負荷試験・意図的な高負荷操作の実施中（本番運用ではなく検証中の誤発火でないか確認）。
 - 特定エンドポイントの高負荷処理（bcrypt を伴う signup、`GET /events` の DB 直読みなど、過去の実地検証（`docs/architecture/observability.md` dev 実地検証節）で CPU 高負荷の実例あり）。
 - メモリリーク（時間経過とともに単調増加している場合は再起動での一時緩和 + 調査が必要）。
-- worker / frontend は autoscaling 対象外（frontend は Issue #234 により対象外、worker も同様）のため、desired_count 固定下での負荷変動がそのまま反映される。
+- dev と staging normal は autoscaling 対象外。staging full は API / Worker が CPU 60% の target tracking 対象で、Frontend は全 profile で autoscaling 対象外（ADR-0018 / Issue #234）。
 
 ## 確認コマンド
 
@@ -34,22 +34,24 @@ CPU / Memory の逼迫はスケール不足・OOM kill の前兆（Saturation）
 # CPU / Memory の推移
 aws cloudwatch get-metric-statistics \
   --namespace AWS/ECS --metric-name CPUUtilization \
-  --dimensions Name=ClusterName,Value=<name> Name=ServiceName,Value=<name>-api \
+  --dimensions Name=ClusterName,Value=<name> Name=ServiceName,Value=<service-name> \
   --start-time "$(date -u -d '-1 hour' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
   --period 300 --statistics Average
 
 # 現在の running/desired タスク数（autoscaling が働いているか）
-aws ecs describe-services --cluster <name> --services <name>-api \
+aws ecs describe-services --cluster <name> --services <service-name> \
   --query 'services[].{running:runningCount,desired:desiredCount}'
 
 # autoscaling のアクティビティ履歴
 aws application-autoscaling describe-scaling-activities \
-  --service-namespace ecs --resource-id service/<name>/<name>-api
+  --service-namespace ecs --resource-id service/<name>/<service-name>
 ```
 
 ## 復旧・緩和の判断
 
-1. **一時的な負荷（想定内のトラフィック増・負荷試験）**: autoscaling 対象（api）は自然にスケールアウトするため経過観察。worker / frontend は desired_count の一時引き上げを検討。
+以下の `aws ecs update-service` は AWS リソースを変更する。対象環境、変更前の desired count / task definition、復旧値を記録し、実行承認を得てから使用する。手動 desired count は Application Auto Scaling や次回 Terraform apply で再変更され得る。
+
+1. **一時的な負荷（想定内のトラフィック増・負荷試験）**: staging full の API / Worker は target tracking の activity を確認しながら経過観察する。dev / staging normal、または Frontend では desired count の一時引き上げを検討する。
 
    ```bash
    aws ecs update-service --cluster <name> --service <name>-worker --desired-count <N>

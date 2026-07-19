@@ -42,6 +42,8 @@ aws ec2 describe-security-groups --group-ids <valkey security group id>
 
 ## 復旧・緩和の判断
 
+Security Group、ECS desired count、Valkey 構成を変更する場合は、対象環境、変更前の値、復旧値、ユーザー影響を記録し、実行承認を得てから Terraform / deploy workflow または AWS CLI を使用する。staging full の API は Application Auto Scaling 対象のため、手動 task 数変更前に scaling activity を確認する。
+
 1. **Valkey ノード障害の場合**: ElastiCache 側の自動フェイルオーバー（`automatic_failover_enabled`。staging の capacity profile 次第）を待つか、AWS 側の状態を確認する。dev は単一ノード構成（`num_cache_clusters=1`）のため自動フェイルオーバーがなく、ノード復旧を待つ必要がある。
 2. **ネットワーク変更が原因の場合**: security group の変更履歴を確認し、意図しない変更であれば復元する。
 3. **fail-open が継続している間の緩和**: Aurora 側の負荷（`aurora-connections-high` 等）が同時に上昇している場合は、`alarm-aurora.md` の runbook に従い一時的に API の desired_count を絞ることも選択肢（トレードオフ: スループット低下）。

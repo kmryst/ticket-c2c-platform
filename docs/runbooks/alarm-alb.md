@@ -60,17 +60,19 @@ aws cloudwatch describe-alarms --alarm-names "<name>-alb-5xx" --state-value ALAR
 
 ## 復旧・緩和の判断
 
+以下の `aws ecs update-service` は AWS リソースを変更する。対象環境、対象サービス、変更前の task definition / desired count、復旧値を記録し、実行承認を得てから使用する。
+
 1. **直近デプロイが原因の場合**: rollback（`deployment_circuit_breaker` により壊れたデプロイは自動 rollback される設計だが、`/healthz` 自体は 200 を返しつつ機能不全のケースは自動検知されないため手動 rollback を検討）。
 
    ```bash
-   aws ecs update-service --cluster <name> --service <name>-api \
+   aws ecs update-service --cluster <name> --service <service-name> \
      --task-definition <ロールバック先の task definition ARN>
    ```
 
 2. **タスク数不足（縮退）の場合**: `desired_count` を一時的に増やす、または `force-new-deployment` でタスクを再起動する。
 
    ```bash
-   aws ecs update-service --cluster <name> --service <name>-api --force-new-deployment
+   aws ecs update-service --cluster <name> --service <service-name> --force-new-deployment
    ```
 
 3. **依存サービス障害が原因の場合**: 該当サービス（Aurora / Valkey / OpenSearch）の runbook へ切り替える。

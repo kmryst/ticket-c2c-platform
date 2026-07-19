@@ -28,6 +28,7 @@ Accepted
 
 - 人気イベントのスパイク時、Valkey フィルタを通過したリクエストが Aurora のホット行（同一 eventId の在庫行）に集中し、ロック競合でレイテンシが悪化する可能性がある。dev でのスパイク検証（k6）でこれを測定する。
 - 後から FIFO を入れる場合、購入 API の応答設計変更がアプリ側に波及する。導入判断は早めに（スパイク検証の直後に）行う。
+- SQS Standard を使う検索 projection では、重複・順序入れ替わりを consumer 側で吸収する必要がある。staging で在庫表示の巻き戻りを 2 回観測したため、version 付き条件更新を [Production Readiness M-10](../architecture/production-readiness.md) で追跡する。これは購入パスの FIFO 導入とは独立した課題である。
 
 ## 再検討のトリガー
 

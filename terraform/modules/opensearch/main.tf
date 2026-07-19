@@ -66,9 +66,9 @@ resource "aws_opensearch_domain" "this" {
     tls_security_policy = "Policy-Min-TLS-1-2-2019-07"
   }
 
-  # アクセスポリシー（production-readiness M-3）:
+  # アクセスポリシー:
   # - allowed_principal_arns 指定時は、SigV4 署名済みリクエストの principal を task role 等に限定する（staging 以降）。
-  # - null の場合は VPC 内ドメイン + SG 制限を前提に、アカウント内から自由にアクセス可とする（dev 互換）。
+  # - null の場合は VPC 内ドメイン + SG 制限だけを認可境界とし、到達可能な workload の IAM principal は制限しない（dev 互換）。
   access_policies = var.allowed_principal_arns == null ? jsonencode({
     Version = "2012-10-17"
     Statement = [

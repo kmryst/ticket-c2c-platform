@@ -110,7 +110,7 @@ module "ecr" {
   force_delete = true
 }
 
-# ECS タスク（API / Worker）が共用する SG。
+# ECS タスク（API / Worker / Frontend）が共用する SG。
 # データ層の ingress はこの SG からのみ許可する
 resource "aws_security_group" "app" {
   name_prefix = "${var.name}-app-"

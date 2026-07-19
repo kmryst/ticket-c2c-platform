@@ -49,5 +49,5 @@ rm terraform.tfstate terraform.tfstate.backup
 
 ## 注意
 
-- apply ロールは dev 構築期間中 `AdministratorAccess`。staging 追加前に最小権限へ絞る。
+- apply ロールは `AdministratorAccess` を使用せず、bootstrap / dev / staging と deploy / migration / destroy に必要なカスタムポリシー 2 本へ限定している（Production Readiness H-1、Issue #125）。ポリシー変更時は自己ロックアウトを避けるため、bootstrap plan と対象環境の apply / deploy / destroy 経路を確認する。
 - バケット名はグローバル一意性のためランダム suffix を含む（`ticket-c2c-platform-tfstate-<8桁hex>`）。public リポジトリでの AWS アカウント ID 露出を避けるため、アカウント ID は含めない（Issue #27）。

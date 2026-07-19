@@ -77,5 +77,5 @@ AWS dev 環境（[dev 環境設計](../architecture/dev-environment.md)）の初
 
 ## 運用メモ
 
-- 検証しない期間は destroy 済みが定常状態。再開手順: `terraform-apply-dev.yml`（dev）→ `deploy-app-dev.yml`（dev）。
+- 検証しない期間は destroy 済みが定常状態。再開時は `terraform-apply-dev.yml` → `deploy-backend-dev.yml`（初回・スキーマ変更時は `run_migrations=true`）→ `deploy-frontend-dev.yml` → `dev-smoke-test.yml` の順に実行する。初回検証時に使った `deploy-app-dev.yml` は backend / frontend 分離後に廃止済み。
 - GitHub Environments `dev` / `dev-destroy` は branch restriction（`main` 固定）設定済み（Issue #65、PR #66）。required reviewer は `dev-destroy` のみに設定されている（`dev` は branch policy のみ）。

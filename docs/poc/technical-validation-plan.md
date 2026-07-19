@@ -2,7 +2,7 @@
 
 ## ステータス
 
-ドラフト。
+既存の C2C Purchase API を対象とした初期計画と検証結果は歴史的記録として維持する。B2C 目標フローの追加検証は未着手。
 
 このドキュメントは、チケット販売プラットフォーム設計における高リスク領域を検証するための初期 PoC 計画を定義するものです。プロダクト全体の実装計画ではありません。
 
@@ -11,6 +11,8 @@
 この計画の既存フェーズと実測結果は、C2C として開始した現行の単一 Purchase API を対象とする歴史的記録です。[ADR-0020](../adr/0020-reframe-as-b2c-primary-ticketing.md) により、今後の対象を B2C 一次チケット販売へ再定義しました。
 
 今後の検証では、既存の在庫正確性、Valkey 前段拒否、検索 projection、人気イベント隔離の成果を基盤として再利用し、Waiting Room、Protected Zone、Purchase Session、Ticket Hold、Fake Payment API を含む Customer journey を追加します。新しいフローの正本は [B2C 一次チケット販売フロー](../architecture/primary-ticket-sales.md) とし、本ドキュメントの過去の数値を目標構成の実測値として読み替えません。
+
+B2C 実装へ着手し、想定トラフィック、SLO、検証対象の Customer journey が具体化した時点で、`b2c-technical-validation-plan.md` を別途作成する。それまでは内容のない将来計画を先に作らず、本ドキュメントを既存 C2C PoC の計画・結果として維持する。B2C の本格的な負荷・可観測性検証方式も、その時点の条件から設計する。
 
 なお、AWS 上の dev 環境は本計画のフェーズ 4（クラウド PoC）としてではなく、staging / prod へ育てる本番系トラックの最初の環境として別途構築する（[ADR-0002](../adr/0002-dev-environment-as-first-prod-track-environment.md)、[dev 環境設計](../architecture/dev-environment.md)）。本計画のローカル検証（フェーズ 2〜3）は dev 環境と並行して継続する。
 
@@ -262,4 +264,4 @@ PoC 作業から期待する成果物:
 ## 関連ドキュメント
 
 - [システム要件](../requirements/system-requirements.md)
-- [技術スタックドラフト](../architecture/technology-stack.md)
+- [技術スタック](../architecture/technology-stack.md)

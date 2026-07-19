@@ -59,11 +59,16 @@ aws rds describe-db-clusters --db-cluster-identifier <name>-aurora \
 
 # 併発エスカレーション判定
 aws cloudwatch describe-alarms \
-  --alarm-names "<name>-alb-5xx" "<name>-purchase-error-burn-rate-fast" "<name>-synthetic-check-failure" \
+  --alarm-names "<name>-alb-5xx" "<name>-purchase-error-burn-rate-fast" \
+  --state-value ALARM
+aws cloudwatch describe-alarms --region us-east-1 \
+  --alarm-names "<name>-synthetic-check-failure" \
   --state-value ALARM
 ```
 
 ## 復旧・緩和の判断
+
+ACU 上限、ECS task 数、接続プール、task definition を変更する場合は、対象環境、変更前の値、復旧値、コスト影響を記録し、実行承認を得てから Terraform / deploy workflow または AWS CLI を使用する。staging full の API / Worker は Application Auto Scaling 対象のため、手動 task 数変更前に scaling activity と max capacity 到達有無を確認する。
 
 1. **ACU 上限到達が原因の場合**: `max_capacity` の一時的な引き上げを検討（コスト増を伴うため、prod 化前の恒久対応は Issue 化する）。
 2. **接続数超過が原因の場合**: API タスク数を一時的に減らす、または接続プールサイズを見直す（production-readiness L-8 の恒久対応と同じ論点）。

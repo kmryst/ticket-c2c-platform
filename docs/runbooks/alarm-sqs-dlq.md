@@ -47,6 +47,8 @@ aws logs start-query \
 
 ## 復旧・緩和の判断
 
+`start-message-move-task` は DLQ のメッセージを本体キューへ戻して再処理させる状態変更である。原因、対象 DLQ、移動対象件数、Worker の稼働状態、再失敗時の停止条件を記録し、実行承認を得てから使用する。redrive 後は業務 DB と OpenSearch projection の収束を確認する。
+
 1. **原因を特定し、恒久修正をデプロイ済みの場合**: DLQ から本体キューへ redrive する。
 
    ```bash

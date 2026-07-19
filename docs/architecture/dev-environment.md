@@ -2,46 +2,43 @@
 
 ## ステータス
 
-設計確定・構築中。
+設計確定・実装済み・検証済み。検証しない期間は destroy 済みを定常状態とする。
 
 このドキュメントは、AWS 上の dev 環境構成の正本です。dev 環境は PoC ではなく、staging / prod へ育てる本番系トラックの最初の環境です（[ADR-0002](../adr/0002-dev-environment-as-first-prod-track-environment.md)）。
 
 ## 運用方針
 
 - 使わない期間は destroy workflow で環境ごと削除し、必要なときに Terraform で再構築する。
-- deploy / destroy は GitHub Actions（AWS OIDC、長期アクセスキー不使用）で行う。
+- apply / deploy / destroy は GitHub Actions（AWS OIDC、長期アクセスキー不使用）で行う。
 - リージョンは `ap-northeast-1`。AWS アカウントは当面単一で、staging 追加時にアカウント分離を判断する（[ADR-0003](../adr/0003-terraform-state-and-environment-isolation.md)）。
 
 ## 構成
 
-```text
-                       ┌─────────────────────────────────────────────┐
- Internet ──► ALB ──►  │ ECS Fargate (API / NestJS)                  │
-              (public) │  - events / search / purchases / health     │
-                       └──┬───────────┬───────────┬──────────────────┘
-                          │           │           │
-              ┌───────────▼──┐ ┌──────▼──────┐ ┌──▼──────────────┐
-              │ Aurora        │ │ ElastiCache │ │ OpenSearch      │
-              │ PostgreSQL    │ │ Valkey      │ │ (検索プロジェク  │
-              │ Serverless v2 │ │ (前段フィルタ)│ │  ション・読取専用)│
-              │ (正本)        │ └─────────────┘ └──▲──────────────┘
-              └───────┬───────┘                    │ index 更新
-                      │ 購入確定後                  │
-                      ▼                            │
-              EventBridge (domain bus) ──► SQS Standard + DLQ ──► ECS Fargate Worker
-               EventListed / EventUpdated /                        (API と同一イメージ)
-               InventoryChanged / TicketPurchased
+```mermaid
+flowchart LR
+  internet[Internet] --> edge[CloudFront + WAF]
+  edge -->|"/api/*"| alb[ALB]
+  edge -->|"SSR / static"| alb
+  alb --> api[ECS Fargate API / NestJS]
+  alb --> frontend[ECS Fargate Frontend / Next.js]
+  api --> aurora[(Aurora PostgreSQL\n正本)]
+  api --> valkey[(ElastiCache Valkey\n前段フィルタ)]
+  api --> opensearch[(OpenSearch\n検索プロジェクション)]
+  api --> eventbridge[EventBridge]
+  eventbridge --> sqs[SQS Standard + DLQ]
+  sqs --> worker[ECS Fargate Worker]
+  worker --> opensearch
 ```
 
 - VPC: 2 AZ。public subnet に ALB、private subnet に ECS / Aurora / Valkey / OpenSearch。
-- API 入口は HTTPS（[ADR-0007](../adr/0007-alb-https-with-acm-and-ingress-variable.md)）。`ticket-api-dev.ticket-c2c.click`（プロジェクト専用ドメイン。[ADR-0009](../adr/0009-migrate-to-project-domain.md)）の ACM 証明書（DNS 検証）を ALB:443 で終端し、HTTP:80 は 443 への 301 リダイレクト専用。ingress は `alb_allowed_ingress_cidrs` 変数（既定 `0.0.0.0/0`）で絞り込み可能。
+- 公開入口は `ticket-app-dev.ticket-c2c.click` の CloudFront + WAF。CloudFront origin の ALB も HTTPS（[ADR-0007](../adr/0007-alb-https-with-acm-and-ingress-variable.md)）で、`ticket-api-dev.ticket-c2c.click` の ACM 証明書を ALB:443 で終端する。ALB ingress は CloudFront origin-facing managed prefix list のみに限定し、`alb_allowed_ingress_cidrs` の既定は空。API alias は CloudFront origin 名として維持するが、通常のクライアントは CloudFront の `/api/*` を使う（[ADR-0013](../adr/0013-restrict-alb-ingress-to-cloudfront-prefix-list.md)）。
 - NAT Gateway は dev では 1 つ（コスト優先。prod では AZ ごとに配置）。ECR (`ecr.api` / `ecr.dkr`) 認証・マニフェスト取得・CloudWatch Logs 送信は NAT Gateway 経由（[ADR-0019](../adr/0019-remove-ecr-logs-interface-endpoints.md)）。S3 は無料の Gateway VPC Endpoint 経由（ECR イメージレイヤー本体もここを通る）。当初あった ecr.api / ecr.dkr / logs の Interface VPC Endpoint（月額約 $61）は、損益分岐点分析（M-6 / Issue #313）で dev/staging の実測トラフィックが損益分岐点の約 1/100 と判明したため撤去した（Issue #315）。
 - 書き込み経路（購入）: API → Valkey 前段フィルタ → Aurora 条件付き更新 → EventBridge 発行。
 - 読み取り経路（検索・一覧）: API → OpenSearch。正本確認が必要な場合のみ Aurora。
 - 人気イベントの影響隔離は、(1) Valkey による売り切れ後の即時拒否、(2) Worker 分離による非同期処理の隔離、(3) API の DB コネクションプール上限、の 3 層で行う。SQS FIFO によるイベント単位直列化は測定データが出るまで導入しない（[ADR-0004](../adr/0004-defer-sqs-fifo.md)）。
 - フロントエンド（[ADR-0011](../adr/0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md)）: `ticket-app-dev.ticket-c2c.click` → CloudFront（us-east-1 ACM 証明書）→ 同一 ALB を 2 origin（api / frontend、custom header で識別）とする統合オリジン。`/api/*` は API target group、その他は frontend target group（ECS Fargate 上の Next.js SSR、専用 ECR イメージ）へ。ALB の default action は API のまま。`/_next/static/*` のみ edge で長期キャッシュ、SSR / API はキャッシュ無効 + Cookie 全転送。
-- CloudFront security headers（L-15）: response headers policy で HSTS / `X-Content-Type-Options` / `Referrer-Policy` / `frame-ancestors 'none'` / `X-Frame-Options: DENY` を全 behavior に付与する。Next.js App Router の inline script と衝突する `script-src` 等のフル CSP は prod 化時の別課題として扱う。
-- 定期バッチ（Issue #195）: EventBridge Scheduler（日次 03:30 JST）→ ECS RunTask で、API と同一イメージを command override（`node dist/src/database/cleanup-refresh-tokens.js`）起動し、`refresh_tokens` の期限切れ（猶予 30 日超過）ファミリーを削除する。新規 Lambda・専用イメージは持たず、DB migration（`run-db-migration.sh`）と同じ「既存イメージ・別コマンド」パターン。Terraform は `terraform/modules/scheduled-task`。ログは API のロググループへ出力し、専用アラームは持たない。
+- CloudFront security headers（L-15）: response headers policy で HSTS / `X-Content-Type-Options` / `Referrer-Policy` / `frame-ancestors 'none'` / `X-Frame-Options: DENY` を全 behavior に付与する。Next.js App Router の inline script と衝突する `script-src` 等のフル CSP は [Production Readiness L-27](./production-readiness.md) で追跡する。
+- 定期バッチ（Issue #195）: EventBridge Scheduler（日次 03:30 JST）→ ECS RunTask で、API と同一イメージを command override（`node dist/src/database/cleanup-refresh-tokens.js`）起動し、`refresh_tokens` の期限切れ（猶予 30 日超過）ファミリーを削除する。新規 Lambda・専用イメージは持たず、DB migration（`run-db-migration.sh`）と同じ「既存イメージ・別コマンド」パターン。Terraform は `terraform/modules/scheduled-task`。ログは API のロググループへ出力し、専用アラームは持たない。Scheduler の失敗 / 成功監視は [Production Readiness L-29](./production-readiness.md) で追跡する。
 - アラート通知（L-5 / Issue #200）: SQS DLQ 滞留の CloudWatch アラーム（滞留 1 件以上で ALARM。Issue #100）の action を、環境共通のアラート用 SNS トピック（`<name>-alerts`、observability モジュール）→ email subscription（`alert_email` 変数、既定は運用者宛）へ配線する。ALARM / OK 両遷移を通知する。email subscription は受信者の Confirm が必要で、destroy 前提運用の dev では apply のたびに confirm が発生する。Issue #218 で ALB 5xx / unhealthy hosts、ECS CPU / Memory、Aurora（CPU / メモリ / 接続数 / ACU 上限接近）、EMF（ValkeyFailOpen / WorkerProcessingLagMs）の Golden Signal アラームを追加し、同じ SNS トピックへ配線した。アラーム一覧と閾値は [observability.md](./observability.md) を参照。
 - 分散トレーシング・ビジネスメトリクス（[ADR-0014](../adr/0014-xray-distributed-tracing-with-adot-sidecar.md) / Issue #203）: API / Worker のタスクに ADOT collector sidecar を同居させ、OpenTelemetry SDK（opt-in、`OTEL_TRACING_ENABLED`）のトレースを OTLP → X-Ray へ転送する。EventBridge detail の `_traceContext` で API → Worker の trace を継続する。購入判定・Valkey fail-open・Worker 処理遅延は EMF で `TicketC2C/dev` 名前空間へ出す。詳細は [observability.md](./observability.md)。
 - ALB 直叩き遮断（[ADR-0013](../adr/0013-restrict-alb-ingress-to-cloudfront-prefix-list.md)）: ALB セキュリティグループの ingress を CloudFront origin-facing managed prefix list に限定し、CloudFront を経由しない直接アクセスを遮断する。これにより WAF（L-12）の迂回経路と、認証レート制限の IP 判定バイパス（ADR-0012）を同時に塞ぐ。SSR のサーバー側 API fetch も ALB 直参照をやめ、CloudFront 経由（`ticket-app-dev.ticket-c2c.click/api`）にする。
@@ -53,19 +50,22 @@
 | ALB | 採用 | [ADR-0005](../adr/0005-alb-as-api-entry.md) |
 | ECS Fargate（API / Worker） | 採用 | Worker は [ADR-0006](../adr/0006-ecs-fargate-worker.md)。同一イメージ・command 差し替え |
 | Aurora PostgreSQL Serverless v2 | 採用 | 正本 DB。min 0 ACU の auto-pause でアイドルコストを抑える |
-| ElastiCache Valkey | 採用 | cache.t4g.micro ×1。購入前段フィルタ |
-| OpenSearch | 採用 | t3.small.search ×1（シングルノード）。検索プロジェクション |
+| ElastiCache Valkey | 採用 | cache.t4g.micro ×1。購入前段フィルタ。サービス別 SG と Valkey RBAC は [Production Readiness L-24 / L-26](./production-readiness.md) で追跡する |
+| OpenSearch | 採用 | t3.small.search ×1（シングルノード）。検索プロジェクション。dev のアクセスポリシーは `Principal: "*"` を維持し、VPC / Security Group で到達元を app SG に限定する。staging は API / Worker task role に限定済みで、dev の IAM 制限への移行は [Production Readiness L-23](./production-readiness.md)、API / Worker / Frontend の共有 SG 分離は [L-24](./production-readiness.md) に記録している |
 | EventBridge | 採用 | ドメインイベントバス |
 | SQS Standard + DLQ | 採用 | EventBridge → Worker のバッファ・リトライ |
 | SQS FIFO | 後回し | [ADR-0004](../adr/0004-defer-sqs-fifo.md)。モジュールは `fifo` フラグで対応済みにする |
 | CloudWatch Logs / Metrics | 採用 | ログ保持 30 日 |
-| SNS | 採用 | CloudWatch アラーム（DLQ 滞留）のメール通知（L-5 / Issue #200） |
-| ECR | 採用 | 1 リポジトリ（API / Worker 共用イメージ） |
-| Secrets Manager | 採用 | DB 認証情報（Aurora マネージドローテーション統合） |
-| SSM Parameter Store | 採用 | 非秘密の設定値 |
-| CloudFront / WAF / API Gateway | 後回し | prod で CloudFront + WAF を ALB の前段に追加 |
-| X-Ray / ADOT | 後回し | まず CloudWatch のみ |
-| Cognito 等の認証 | 後回し | 未決事項のまま。ADR 候補 |
+| SNS | 採用 | 東京リージョンのリソースアラームと us-east-1 の edge / synthetic アラームをリージョン別 2 topic から同じ email へ通知 |
+| ECR | 採用 | backend（API / Worker 共用）と frontend の 2 リポジトリ。artifact 不変性・digest deploy・scan gate は [Production Readiness M-13](./production-readiness.md) で追跡する |
+| Secrets Manager | 採用 | DB 認証情報（Aurora マネージドローテーション統合）と JWT 署名シークレット |
+| SSM Parameter Store | 現行未使用 | 非秘密設定は ECS task definition の environment で渡す |
+| CloudFront | 採用 | Next.js SSR / static と `/api/*` の統合入口（ADR-0011） |
+| WAFv2 | 採用 | CloudFront に WebACL と managed rule 3 種を関連付け、ログを S3 へ保存。認証 header の redaction は [M-14](./production-readiness.md)、B2C 向け rate / bot 制御は [L-28](./production-readiness.md) で追跡する |
+| API Gateway | 不採用 | ALB + CloudFront を入口として採用（ADR-0005） |
+| X-Ray / ADOT | 採用 | OpenTelemetry SDK + ADOT sidecar から X-Ray へ送信（ADR-0014） |
+| CloudWatch Synthetics | 採用 | CloudFront 経由の read-only 3 step canary（Issue #256） |
+| 認証 | 採用 | メール+パスワード、JWT access token、opaque refresh token を自前実装。Cognito は不採用（ADR-0010 / ADR-0012） |
 
 ## Terraform 構成
 
@@ -74,7 +74,7 @@
 ```text
 terraform/
   modules/
-    network/           VPC, subnet, NAT, VPC endpoints
+    network/           VPC, subnet, NAT, S3 Gateway Endpoint
     alb/
     ecs-service/       API / Worker 共用（ALB 接続はオプション）
     aurora/
@@ -84,6 +84,9 @@ terraform/
     sqs/               fifo フラグで FIFO 化に対応
     ecr/
     observability/
+    cloudfront/
+    synthetics-canary/
+    scheduled-task/
     iam-github-oidc/
   environments/
     bootstrap/         tfstate S3 バケット + OIDC + CI 用 IAM ロール
@@ -102,7 +105,7 @@ terraform/
 | workflow | トリガー | 内容 |
 | --- | --- | --- |
 | `terraform-plan.yml` | PR（`terraform/**`） | fmt / validate / plan。plan 専用ロール |
-| `terraform-apply-dev.yml` | workflow_dispatch | plan → Environment `dev` の承認 → apply |
+| `terraform-apply-dev.yml` | workflow_dispatch | plan → Environment `dev` の branch restriction を通して apply |
 | `terraform-destroy-dev.yml` | workflow_dispatch | `confirm` 入力（`destroy-dev` 完全一致）+ Environment `dev-destroy` の承認 |
 | `deploy-backend-dev.yml` | workflow_dispatch | backend（api + worker）の Docker build → ECR push → ECS サービス更新。`run_migrations` 入力あり（L-11 / Issue #182 で `deploy-app-dev.yml` から分離） |
 | `deploy-frontend-dev.yml` | workflow_dispatch | frontend（Next.js SSR）の Docker build → ECR push → ECS サービス更新 |
@@ -114,7 +117,7 @@ GitHub Environments / Variables:
 
 | 種別 | 名前 | 用途 |
 | --- | --- | --- |
-| Environment | `dev` | apply / deploy。required reviewer 必須 |
+| Environment | `dev` | apply / deploy。`main` branch restriction を設定し、required reviewer は設定しない |
 | Environment | `dev-destroy` | destroy 専用。required reviewer 必須 |
 | Environment | `dev-readonly` | smoke test 専用（Issue #192）。dev state file の S3 read-only ロールのみ引き受け、apply / destroy 権限は持たない。権限が最小のため required reviewer は必須にしない（staging-readonly と同じ方針） |
 | Variable | `AWS_REGION` | `ap-northeast-1` |
@@ -129,7 +132,7 @@ GitHub Environments / Variables:
 - Aurora は dev では `deletion_protection = false` / `skip_final_snapshot = true`（変数化し、staging / prod では必ず有効化する）。
 - state バケットは bootstrap state 管理 + `prevent_destroy` で destroy 対象外。
 
-## コスト目安（常時稼働時・月額概算）
+## コスト目安（2026-07-15 時点、常時稼働時・月額概算）
 
 | リソース | 月額目安 |
 | --- | --- |
@@ -149,6 +152,6 @@ GitHub Environments / Variables:
 ## 関連ドキュメント
 
 - [システム要件](../requirements/system-requirements.md)
-- [技術スタックドラフト](./technology-stack.md)
+- [技術スタック](./technology-stack.md)
 - [技術検証計画](../poc/technical-validation-plan.md)
 - [ADR 一覧](../adr/README.md)
