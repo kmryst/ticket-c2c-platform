@@ -13,9 +13,11 @@
 
 severity 分類・初動目標・エスカレーション条件の全体方針は `docs/architecture/observability.md`「アラームの severity と escalation 方針（Issue #257）」節を正本とする。本 runbook はこのアラーム群固有の初動確認・原因切り分け手順を記録する。
 
+`purchase-latency-burn-rate-*` は既存の物理名であり、実体は成功リクエストの p95 を 800ms で割った閾値倍率アラームである。error budget の消費速度ではない。評価方式の正本は `docs/architecture/observability.md`「購入 API の SLO 目標値と閾値アラーム」節を参照する。
+
 ## 影響範囲
 
-`POST /events/:eventId/purchases`（購入確定 API）のユーザー体験。C2C チケット販売の中核フローであり、失敗はそのまま「購入できない」というユーザー影響に直結する。error 系（burn-rate / technical_failure）は成功率 SLO（99.5%）の逸脱、latency 系はレイテンシ SLO（p95 < 800ms、`Outcome=success` のみ）の逸脱を示す。
+`POST /events/:eventId/purchases`（現行の購入確定 API）のユーザー体験。B2C 目標フロー実装前の現行中核フローであり、失敗はそのまま「購入できない」というユーザー影響に直結する。error 系（burn-rate / technical_failure）は成功率 SLO（99.5%）の逸脱、latency 系はレイテンシ SLO（p95 < 800ms、`Outcome=success` のみ）の逸脱を示す。B2C Purchase Session / Ticket Hold / 決済解決までのジャーニー SLI は本 runbook の対象外で、`b2c-purchase-journey-observability.md` の実装時に別途整備する。
 
 - `-weak` は低頻度時の早期シグナル（単発では対応不要。ADR-0017）。
 - `-normal` / `-fast` / `-slow` は持続的な逸脱で、実際にユーザーが購入に失敗している状態。
@@ -66,6 +68,8 @@ aws cloudwatch describe-alarms --alarm-names "<name>-valkey-fail-open" --state-v
 
 ## 復旧・緩和の判断
 
+以下の `aws ecs update-service` は AWS リソースを変更する。対象環境、変更前の task definition / desired count、復旧値を記録し、実行承認を得てから使用する。
+
 1. **直近デプロイが原因と判断できる場合**: rollback を第一手段とする（severity Critical の初動目標どおり 1 時間以内）。
 
    ```bash
@@ -88,5 +92,5 @@ aws cloudwatch describe-alarms --alarm-names "<name>-valkey-fail-open" --state-v
 ## 関連
 
 - ADR-0016（SLI 定義）、ADR-0017（SLO / burn-rate 設計）
-- `docs/architecture/observability.md`「購入 API の SLO 目標値と burn-rate アラート」節
+- `docs/architecture/observability.md`「購入 API の SLO 目標値と閾値アラーム」節
 - `src/observability/request-outcome.interceptor.ts`（`PurchaseRequestOutcome` / `PurchaseRequestLatencyMs` の計測実装）

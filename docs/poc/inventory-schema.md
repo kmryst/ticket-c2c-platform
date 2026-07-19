@@ -2,7 +2,7 @@
 
 ## ステータス
 
-ドラフト。
+実装済み。実際のローカル DB 定義は `database/schema.sql` を正本とし、このドキュメントはその構造と制約を説明する。
 
 このドキュメントは、在庫 PoC で使う最小 DB スキーマを記録するものです。本番用の完全なデータモデルではありません。
 
@@ -15,6 +15,7 @@
 | テーブル | 目的 |
 | --- | --- |
 | `users` | 購入者アカウント（メール+パスワード認証。ADR-0010） |
+| `refresh_tokens` | opaque リフレッシュトークンの hash・ローテーション系譜・失効状態（ADR-0012） |
 | `events` | イベント本体 |
 | `ticket_inventory` | イベントごとの在庫 |
 | `purchases` | 購入結果 |
@@ -33,6 +34,28 @@
 
 `purchases.buyer_id -> users.id` の FK は、購入 API の認証必須化（Issue #135）で追加済みです。認証導入前のローカル DB に残る過去データを壊さないよう、FK は `NOT VALID`（既存 row は未検査、新規書き込みには強制）で付与しています。
 
+## `refresh_tokens`
+
+リフレッシュトークンは生値を保存せず、SHA-256 hash とローテーション系譜を保存します。
+
+| 列 | 型 | 説明 |
+| --- | --- | --- |
+| `id` | `UUID` | トークン row の主キー |
+| `user_id` | `UUID` | `users.id` への FK。ユーザー削除時は cascade |
+| `family_id` | `UUID` | login / signup から始まるトークンファミリーの失効単位 |
+| `token_hash` | `TEXT` | opaque トークンの SHA-256 hash。unique index 付き |
+| `parent_token_id` | `UUID` | rotate 元の `refresh_tokens.id` |
+| `replaced_by_token_id` | `UUID` | rotate 後の `refresh_tokens.id` |
+| `issued_at` | `TIMESTAMPTZ` | 発行日時 |
+| `expires_at` | `TIMESTAMPTZ` | 絶対有効期限 |
+| `used_at` | `TIMESTAMPTZ` | rotate-on-use で消費した日時 |
+| `revoked_at` | `TIMESTAMPTZ` | logout / reuse detection で失効した日時 |
+| `revoked_reason` | `TEXT` | 失効理由 |
+| `created_ip` | `TEXT` | 発行元 IP。調査用 |
+| `created_user_agent` | `TEXT` | 発行元 User-Agent。調査用 |
+
+`family_id` は reuse detection / logout のファミリー一括失効、`user_id` はユーザー単位の調査に使うため、それぞれ index を持ちます。
+
 ## `events`
 
 イベント本体を表します。
@@ -45,6 +68,7 @@
 | `starts_at` | `TIMESTAMPTZ` | 開催日時 |
 | `location_latitude` | `NUMERIC(9, 6)` | 開催地の緯度 |
 | `location_longitude` | `NUMERIC(9, 6)` | 開催地の経度 |
+| `created_by` | `UUID` | イベント作成者。`users.id` への FK（`NOT VALID`）。JWT の `sub` claim 由来 |
 | `created_at` | `TIMESTAMPTZ` | 作成日時 |
 
 緯度経度は、後続の検索 PoC で使い回せるように入れています。

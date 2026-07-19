@@ -87,7 +87,7 @@ YYYY-MM-DD
 | [0014](./0014-xray-distributed-tracing-with-adot-sidecar.md) | X-Ray 分散トレーシングを ADOT collector sidecar で導入し、EMF でビジネスメトリクスを出す | Accepted |
 | [0015](./0015-purchase-rate-limit-dual-key.md) | 購入エンドポイントのレート制限を user_id 主体の dual-key 方式で導入する | Accepted |
 | [0016](./0016-purchase-api-sli-definition.md) | 購入 API の SLI（成功率・レイテンシ）を定義する | Accepted |
-| [0017](./0017-purchase-api-slo-burn-rate.md) | 購入 API の SLO 目標値と burn-rate アラートを実装する | Accepted |
+| [0017](./0017-purchase-api-slo-burn-rate.md) | 購入 API の SLO 目標値と閾値アラームを実装する | Accepted |
 | [0018](./0018-ecs-autoscaling-scoped-to-staging-full.md) | ECS Auto Scaling policy は staging-full にのみ実装し、frontend は desired_count のみで冗長化する | Accepted |
 | [0019](./0019-remove-ecr-logs-interface-endpoints.md) | dev / staging から ECR / Logs の Interface VPC Endpoint を撤去する | Accepted |
 | [0020](./0020-reframe-as-b2c-primary-ticketing.md) | 既存リポジトリを B2C 一次販売プラットフォームへ転換する | Accepted |

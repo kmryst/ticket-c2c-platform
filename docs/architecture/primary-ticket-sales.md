@@ -199,13 +199,12 @@ payment_unknown
 - connect 失敗、connect timeout、response timeout、Fake Payment API の HTTP 5xx を含め、3 秒以内に結果を確定できない場合は、安全側に `payment_unknown` として tx2 で commit します。結果を推測して在庫を戻しません。
 - `payment_unknown` の commit 成功後、Purchase 確定 API は Customer へ HTTP `202 Accepted` で結果確認中であることを返します。これは契約どおりの同期応答であり、その時点では購入ジャーニーの `technical_failure` にしません。
 - 同じ Idempotency Key の再送では新しい payment attempt を作らず、既存 attempt の現在状態を返します。`payment_processing` または `payment_unknown` が未解決の間は、新しい Idempotency Key でも同じ Purchase Session の新しい attempt を受理しません。
-- API と Worker は遷移元の状態を条件にした UPDATE で競合を排除し、affected rows が 1 になり commit に成功した主体だけが状態遷移後の処理とメトリクス出力を行います。状態遷移と stale 判定の時刻には Aurora PostgreSQL の時刻を使用します。
+- API と Worker は遷移元の状態を条件にした UPDATE で競合を排除し、affected rows が 1 になり commit に成功した主体だけが状態遷移後の処理を行います。状態遷移と stale 判定の時刻には Aurora PostgreSQL の時刻を使用します。メトリクス出力の信頼性境界は [B2C 購入ジャーニーの可観測性](b2c-purchase-journey-observability.md) を正本とします。
 - API が tx1 の後に停止して `payment_processing` が 60 秒を超えた場合、決済結果確認 Worker（Payment Reconciliation Worker）が stale attempt として回収します。この 60 秒は Customer の同期待ち時間または通信 timeout ではありません。
 - Worker は Idempotency Key で Fake Payment API の結果と Aurora の状態を突き合わせます。照会先に Key の記録がない場合も初期方針では結果不明として扱い、遅延して記録が現れる可能性を考慮して 15 分の照会窓内で照会を継続します。
 - 自動照会は最大 15 分間、間隔を徐々に延ばして実行します。
-- 15 分の自動照会は `payment_unknown` へ遷移した時点から数えます。attempt 全体の滞留は `payment_processing` の滞留時間でも監視します。
-- `payment_unknown` の件数は Amazon CloudWatch Alarm で監視します。閾値と severity は、3 秒 cutoff による通常時の発生率を staging full で測定して決定します。
-- 15 分後も不明なら在庫を隔離したまま運用対応とし、滞留時間の Amazon CloudWatch Alarm でエスカレーションします。
+- 15 分の自動照会は `payment_unknown` へ遷移した時点から数えます。
+- 15 分後も不明なら在庫を隔離したまま運用対応とします。監視指標、Alarm、severity は [B2C 購入ジャーニーの可観測性](b2c-purchase-journey-observability.md) を正本とします。
 
 ### timeout と deadline の境界
 
@@ -219,8 +218,6 @@ payment_unknown
 | stale `payment_processing` 回収閾値 | 60 秒 | API 停止などで残った attempt を Worker が回収し始める基準。通信 timeout ではない |
 
 Purchase 確定 API の 5 秒は socket を切断する server timeout ではなく、アプリケーションが HTTP 応答を返すための処理期限です。3 秒で結果を確定できなければ、残りの処理時間で `payment_unknown` を commit して HTTP `202 Accepted` を返します。5 秒以内に状態を commit して応答できなければ、Customer 可視の 5xx / timeout として `technical_failure` に計上し、残った `payment_processing` は Worker が回収します。
-
-5 秒の通常終端は Fastify `onTimeout` に依存せず、応答できた場合は `onResponse`、Customer が切断した場合は `onRequestAbort` で計測を閉じます。将来 server timeout を有効化した場合に備え、`onTimeout` は防御的な終端として維持します。
 
 DB connection の取得待ちは、その時点で残っている application processing deadline より短くします。現行の `connectionTimeoutMillis=5000` は 5 秒の処理期限と同値であり、この制約を満たさないため、B2C Purchase 確定 API の実装時に変更します。具体値、Worker の走査間隔、Reconciliation backoff は実装と staging full の測定結果から決定します。
 
@@ -238,85 +235,23 @@ Amazon CloudFront の 30 秒、Application Load Balancer の 60 秒、Fastify ta
 
 ## 可観測性と負荷試験
 
-### 購入ジャーニーの技術的成功率 SLI
+B2C の SLI / SLO、計測境界、メトリクス、Alarm、EMF の信頼性境界、負荷試験で記録する指標は [B2C 購入ジャーニーの可観測性](b2c-purchase-journey-observability.md) を正本とします。この文書には同じ詳細を重複して持ちません。
 
-購入ジャーニーは、Protected Zone Access Token の発行成功時から、仕様上の終端状態が確定するまでとします。入場権回復による Access Token 再発行は同じジャーニーとして扱い、Outcome は終端確定時に 1 回だけ記録します。
-
-```text
-技術的成功率 = success / (success + technical_failure)
-```
-
-| 分類 | 対象 |
+| 領域 | 正本 |
 | --- | --- |
-| `success` | Purchase 確定、正常な在庫拒否、3 回の決済拒否、15 分以内に解決した `payment_unknown` のうち利用者可視の技術障害がないもの |
-| `technical_failure` | Customer へ返した 5xx / timeout、状態不整合、入場権喪失、正規入場後の 429、15 分後も未解決の `payment_unknown`、技術障害後の期限切れ・キャンセル |
-| 除外 | 未使用 Token 失効、技術障害を伴わない放置期限切れ・本人キャンセル、防御的な 429、クライアント起因の 4xx |
+| 購入フロー、状態遷移、API の責務、3 秒・5 秒・15 分の処理境界 | この文書 |
+| B2C の SLI / SLO、メトリクス、計測境界、Alarm、負荷試験の観測項目 | [B2C 購入ジャーニーの可観測性](b2c-purchase-journey-observability.md) |
+| 判断理由とトレードオフ | [ADR-0022〜ADR-0027](../adr/README.md) |
 
-内部再試行で回復し、Customer にエラーを返さず応答契約を満たした処理は `technical_failure` に含めず、再試行回数と回復時間を別指標にします。Bot または未入場利用者への防御的な 429 は除外しますが、Protected Zone へ正規入場した Customer への 429 は許可流量が処理容量を超えた結果として `technical_failure` に含めます。
-
-`payment_unknown` は最大 15 分間の自動照会が終わるまで Outcome を確定しません。購入ジャーニー全体を一律に遅延評価せず、該当 Outcome だけを終端確定時に記録します。リアルタイム検知は `payment_unknown` の件数と滞留時間に対する Amazon CloudWatch Alarm が担います。
-
-API と Worker を跨いで同じジャーニーを追跡する識別子を持ちますが、高カーディナリティになるため Amazon CloudWatch メトリクスの dimension には使用しません。識別子は Aurora の状態、構造化ログ、trace の相関に使用します。
-
-現行 Purchase API の成功率 99.5%・p95 800ms は、B2C 目標フローへ切り替えるまで現役 SLO として維持します。切り替え後は旧 API 限定の履歴とし、新しい各 API またはジャーニー全体へ数値を自動的に流用しません。分類と判断根拠は [ADR-0022](../adr/0022-b2c-purchase-journey-success-sli.md) を参照してください。
-
-### 購入ジャーニーのレイテンシ SLI
-
-購入ジャーニーのレイテンシは、単一の合算値にせず次の 2 つへ分けます。
-
-| SLI | 計測する時間 | 主な除外 |
-| --- | --- | --- |
-| 同期購入処理時間 | Session 交換、Ticket Hold 作成、Purchase 確定、結果確認の同期 API でプラットフォームが処理する時間。Fake Payment API の同期応答待ちは Purchase 確定処理に含める | Waiting Room、Customer の選択・入力・放置、API 間の idle time、非同期の決済結果待ち |
-| 決済結果解決時間 | Aurora PostgreSQL で受理した 1 payment attempt の `payment_processing` 遷移から、その attempt の結果が確定するまでの wall-clock time | Waiting Room、Customer の操作時間、決済開始前の処理、決済試行間の idle time |
-
-4 つの同期 API は、技術的成功 request のレイテンシ p95 を SLI とし、API ごとの正式な SLO を定義します。`confirmed` 正常系の 4 API を各 1 回呼び出す経路には、各 API の目標値を導くレイテンシ予算を設けますが、予算自体は SLO または Amazon CloudWatch Alarm の対象にはしません。API 個別 p95 の達成はジャーニー全体の p95 を保証せず、各 API の p99 は API 単体の tail latency を確認する検証指標として扱います。具体的な秒数は staging full の実測後に決定します。
-
-ジャーニー識別子付きログによるサーバー側処理時間の合算は、同期フェーズの終端 Outcome である `confirmed`、`sold_out`、`payment_failed`、`payment_unknown` ごとに分け、`abandoned` は除外します。終端までの再試行、idempotent replay、`client_aborted` となった試行を含む全 request と API 呼び出し回数を対象にし、同期フェーズの終端 Outcome が確定した時点で集計を閉じます。`payment_unknown` 確定後の結果確認 request は各 API の SLI と決済結果解決時間 SLI で扱います。
-
-この合算値は Customer の実待ち時間ではなく、容量試験、受入判定、診断に使うプラットフォームのサーバー側処理時間です。Customer 側の時間は k6、将来の Amazon CloudWatch RUM などで別に計測します。現行 Purchase API の p95 800ms は新しい各 API またはジャーニー予算へ流用しません。詳細は [ADR-0023](../adr/0023-split-b2c-purchase-journey-latency-sli.md) と [ADR-0025](../adr/0025-b2c-synchronous-purchase-latency-slo.md) を参照してください。
-
-#### 同期 API ごとのサーバー側計測境界
-
-B2C の同期 API は、Fastify の `onRequest` から計測を開始し、`onResponse`、`onRequestAbort`、`onTimeout` のうち最初の終端で 1 回だけ記録します。認証、レート制限、body parse、入力検証、Controller / Service、Valkey、Aurora PostgreSQL、Fake Payment API の同期応答待ち、レスポンスのシリアライズと送信を含めます。
-
-SLO 用のレイテンシ percentile には技術的成功だけを含めます。クライアント起因 4xx と防御的な 429 は除外し、正規入場後の 429、5xx、server timeout は技術的失敗、`client_aborted` は診断指標として別に記録します。health check と将来の Server-Sent Events / long polling は対象外です。
-
-Amazon CloudFront、Application Load Balancer、Amazon CloudWatch Synthetics、k6、将来の Amazon CloudWatch RUM は、エッジ、外形、クライアント側を別レイヤーから監視します。詳細は [ADR-0024](../adr/0024-b2c-synchronous-api-latency-boundary.md) を参照してください。
-
-#### 決済結果解決時間の計測単位と SLO
-
-決済結果解決時間は、サーバーが原子的に受理した 1 payment attempt を単位にします。開始と終了は別々の transaction で記録し、状態遷移を記録する UPDATE 文の実行時点に Aurora PostgreSQL が生成する時刻を使用します。
-
-同期確定した `authorized` / `declined` は `Service=api`、`ResolutionPath=sync` の p95 を正式な SLO とします。`payment_unknown` から Worker が解決した `ResolutionPath=reconciled` は検証指標とし、15 分後も未解決の `unresolved_timeout` はレイテンシ percentile へ含めません。具体的なメトリクス名、SLO 目標値、Alarm 閾値は staging full の実測後に決定します。
-
-Amazon CloudWatch Embedded Metric Format は、結果を確定する条件付き状態遷移の commit に成功した API または Worker が at-most-once で出力します。計測専用の recorded flag と transactional outbox は追加せず、commit 後の稀な欠損とログ配送層の稀な重複を許容します。決済試行の識別子はログ属性にだけ含め、決済方法の識別子は dimension、通常ログ、trace 属性へ出力しません。
-
-`payment_unknown` の件数 Alarm は、3 秒 cutoff により遅い attempt が sync p95 の母集団から抜ける盲点を補います。Alarm 自体は維持し、閾値と severity は staging full の通常時発生率から決定します。Payment Reconciliation Worker の停止は `payment_processing` / `payment_unknown` の滞留時間 Alarm、15 分後も未解決の attempt は `unresolved_timeout` 件数と購入ジャーニーの `technical_failure` で検知します。詳細は [ADR-0026](../adr/0026-measure-payment-resolution-per-attempt.md) と [ADR-0027](../adr/0027-payment-timeout-boundaries.md) を参照してください。
-
-### 計測項目
-
-次の指標を段階別に記録します。
-
-- Protected Zone Access Token の発行、交換、失効、重複拒否。
-- Active Purchase Session 数、作成時間、期限切れ数。
-- Ticket Hold の作成、拒否、キャンセル、期限切れ、在庫復帰遅延。
-- Fake Payment API の結果別件数、p50 / p95 / p99、timeout、5xx。
-- `payment_processing` と `payment_unknown` の件数、滞留時間、自動解決時間。
-- Purchase の技術的成功率、業務結果、p50 / p95 / p99。
-- Aurora connection 使用量、lock 待ち、query latency。
-- Amazon ECS Service の CPU / memory、task 数、Application Auto Scaling の scaling activity。
-
-k6 の rate は API request 数ではなく、原則として 1 秒あたりに開始する Customer journey 数として定義し直します。各段階の request 数と Customer の操作待ち時間を script で明示します。
+負荷試験はこの文書の Customer journey、再試行、操作待ち、決済結果比率を再現し、その実測結果を Protected Zone の入場レート、最大同時利用者数、各コンポーネントの容量判断へ使います。
 
 ## 未決定事項
 
+SLI / SLO、メトリクス、Alarm、負荷試験の観測方法に関する未決定事項は [B2C 購入ジャーニーの可観測性](b2c-purchase-journey-observability.md) で管理し、次の表には重複して記載しません。
+
 | 項目 | 決定に必要な情報 |
 | --- | --- |
-| 同期購入レイテンシの具体値と運用 | `confirmed` 正常系のレイテンシ予算、各 API の p95 目標値と p99 検証値、メトリクス名、低トラフィック評価、burn-rate アラーム、ログ集計方法 |
-| 決済結果解決時間の具体値と運用 | メトリクス正式名、同期解決の p95 目標値、低トラフィック評価、Alarm 閾値、EMF 欠損の突き合わせ方法 |
 | timeout の実装詳細 | DB connection 取得 timeout、Worker 走査間隔、Reconciliation backoff、Fastify keep-alive の具体値と実装方式 |
-| B2C 購入ジャーニーの成功率 SLO 目標値 | Product 要件、staging full の実測結果、低トラフィック時の評価方法 |
-| 各 API の SLO 目標値 | 段階別のエラー率・レイテンシ実測と、同期購入ジャーニーのレイテンシ予算からの配分 |
 | Protected Zone 入場レート | staging full で SLO を満たす Customer journey 開始率 |
 | Protected Zone 最大同時利用者数 | Active Session / Hold 数と Aurora / Amazon ECS の余力 |
 | Waiting Room 開始時刻 | Product policy と販売開始前の参加行動 |

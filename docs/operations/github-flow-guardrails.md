@@ -101,6 +101,16 @@ PR では次の観点を GitHub Actions で検査します。
 - `Playwright E2E`
 - `Gitleaks Secret Scan`
 
+2026-07-19 に GitHub の branch protection を確認した時点で、required status check は次の 5 つ。
+
+- `Backend Build`
+- `Terraform Format & Validate`
+- `commitlint / Commitlint`
+- `pr-policy-check / PR Policy Check`
+- `gitleaks / Gitleaks Secret Scan`
+
+`Frontend Build` と `Playwright E2E` は全 PR で実行されるが required ではなく、失敗だけではマージをブロックしない。これは [Production Readiness L-22](../architecture/production-readiness.md) の未対応ギャップとして扱う。CodeQL / Dependency Audit / Markdown Lint / Issue Template Check も required ではない。
+
 required status check として扱う check 名は、workflow の job `name` と揃えます。workflow 名や job 名を変える場合は、GitHub 側の branch protection / ruleset 設定との整合を確認します。
 
 ## 未採用案と理由
