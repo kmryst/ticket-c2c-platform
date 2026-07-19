@@ -13,7 +13,7 @@
 
 severity 分類・初動目標・エスカレーション条件の全体方針は `docs/architecture/observability.md`「アラームの severity と escalation 方針（Issue #257）」節を正本とする。本 runbook はこのアラーム群固有の初動確認・原因切り分け手順を記録する。
 
-`purchase-latency-burn-rate-*` は既存の物理名であり、実体は成功リクエストの p95 を 800ms で割った閾値倍率アラームである。error budget の消費速度ではない。評価方式の正本は `docs/architecture/observability.md`「購入 API の SLO 目標値と閾値アラーム」節を参照する。
+`purchase-latency-burn-rate-*` の物理名と評価方式の意味は、`docs/architecture/observability.md`「購入 API の SLO 目標値と閾値アラーム」節を正本とする。
 
 ## 影響範囲
 

@@ -59,7 +59,6 @@ module "ecr" {
 
 # ECS タスク（API / Worker / Frontend）が共用する SG。
 # データ層の ingress はこの SG からのみ許可する
-# サービス別の SG 分離は Production Readiness L-24 で追跡する。
 resource "aws_security_group" "app" {
   name_prefix = "${var.name}-app-"
   vpc_id      = module.network.vpc_id

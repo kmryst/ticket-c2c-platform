@@ -33,7 +33,7 @@ ADR-0007 で dev の ALB を HTTPS 化した際、hosted zone には兄弟リポ
 
 ## 反対材料・トレードオフ
 
-- ドメイン維持費（.click の年額、約 $3）が追加でかかる。AutoRenew は意図的に無効のまま維持し、手動更新を [Production Readiness M-11](../architecture/production-readiness.md) で管理する。2026-07-19 の確認時点の有効期限は 2027-07-04 10:08:53 JST、手動更新期限は 2027-06-04 とする（放置するとドメイン失効で dev / staging と将来の prod の公開入口が壊れる）。
+- ドメイン維持費（.click の年額、約 $3）が追加でかかる。AutoRenew は意図的に無効のまま維持し、現在の有効期限と手動更新期限は [Production Readiness M-11](../architecture/production-readiness.md) で管理する（放置するとドメイン失効で dev / staging と将来の prod の公開入口が壊れる）。
 - hosted zone が Terraform 管理外の手動リソースとして残る（bootstrap 同様の「土台」扱い。prod 化の際に IaC 管理へ移すか再検討する）。
 
 ## 再検討のトリガー
