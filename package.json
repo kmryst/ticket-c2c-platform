@@ -41,7 +41,7 @@
     "@opentelemetry/instrumentation-ioredis": "^0.68.0",
     "@opentelemetry/instrumentation-pg": "^0.72.0",
     "@opentelemetry/propagator-aws-xray": "^2.2.0",
-    "@opentelemetry/resources": "^2.9.0",
+    "@opentelemetry/resources": "^2.10.0",
     "@opentelemetry/sdk-node": "^0.220.0",
     "bcrypt": "^6.0.0",
     "dotenv": "^17.4.2",
