@@ -13,10 +13,13 @@
     "commitlint": "commitlint",
     "lint:md": "markdownlint-cli2",
     "test": "jest",
+    "test:migration:ticket-type-expand": "jest src/database/migrations/1785128190273-add-ticket-type-expand-schema.spec.ts --runInBand",
     "smoke:staging": "ts-node --project tsconfig.scripts.json scripts/staging/smoke-test.ts",
     "smoke:dev": "ts-node --project tsconfig.scripts.json scripts/staging/smoke-test.ts",
     "migration:run": "node dist/src/database/run-migrations.js",
     "migration:run:local": "ts-node src/database/run-migrations.ts",
+    "migration:check:ticket-type-expand": "ts-node src/database/check-ticket-type-expand-readiness.ts",
+    "migration:check:ticket-type-expand:prod": "node dist/src/database/check-ticket-type-expand-readiness.js",
     "migration:create": "typeorm migration:create"
   },
   "engines": {

@@ -12,6 +12,7 @@ import { AddUsers1783251707172 } from './migrations/1783251707172-add-users';
 import { AddPurchasesBuyerFk1783252676631 } from './migrations/1783252676631-add-purchases-buyer-fk';
 import { AddRefreshTokens1783307740648 } from './migrations/1783307740648-add-refresh-tokens';
 import { AddEventsCreatedBy1783342791808 } from './migrations/1783342791808-add-events-created-by';
+import { AddTicketTypeExpandSchema1785128190273 } from './migrations/1785128190273-add-ticket-type-expand-schema';
 
 // migrations は glob ではなく明示 import で列挙する。
 // ts-node（ローカル）と dist（ECS）のどちらで実行してもパス解決が壊れないようにするため。
@@ -27,6 +28,7 @@ export const dataSource = new DataSource({
     AddPurchasesBuyerFk1783252676631,
     AddRefreshTokens1783307740648,
     AddEventsCreatedBy1783342791808,
+    AddTicketTypeExpandSchema1785128190273,
   ],
   // 適用履歴 table 名。既定の "migrations" は汎用的すぎるため明示する。
   migrationsTableName: 'typeorm_migrations',

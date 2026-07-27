@@ -21,9 +21,22 @@ jobs:
   backend-build:
     name: Backend Build
     runs-on: ubuntu-latest
-    # InventoryCacheService の単体テストは Lua script の実挙動を検証するため、
-    # ローカルの docker compose と同じ Valkey を service container として起動する（Issue #129）。
+    # Valkey Lua script と populated PostgreSQL migration の実挙動を required check で検証するため、
+    # ローカルの docker compose と同じ service container を起動する（Issue #129 / #336）。
     services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ticket_poc
+          POSTGRES_USER: ticket_poc
+          POSTGRES_PASSWORD: ticket_poc_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ticket_poc -d ticket_poc"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
       valkey:
         image: valkey/valkey:8-alpine
         ports:
@@ -46,6 +59,11 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Validate populated Ticket Type migration
+        run: npm run test:migration:ticket-type-expand
+        env:
+          TEST_DATABASE_URL: postgresql://ticket_poc:ticket_poc_password@127.0.0.1:5432/ticket_poc
 
       - name: Unit tests
         run: npm test
@@ -159,6 +177,9 @@ jobs:
 
       - name: Apply DB schema (TypeORM migrations)
         run: npm run migration:run:local
+
+      - name: Check Ticket Type expand readiness
+        run: npm run migration:check:ticket-type-expand
 
       - name: Run Playwright E2E
         working-directory: frontend

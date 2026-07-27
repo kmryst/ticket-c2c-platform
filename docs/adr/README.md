@@ -98,3 +98,4 @@ YYYY-MM-DD
 | [0025](./0025-b2c-synchronous-purchase-latency-slo.md) | B2C 同期購入レイテンシの SLO と集計方式を定義する | Accepted |
 | [0026](./0026-measure-payment-resolution-per-attempt.md) | 決済結果解決時間を決済試行単位で計測する | Accepted |
 | [0027](./0027-payment-timeout-boundaries.md) | 決済依存の timeout 境界と結果不明遷移を定義する | Accepted |
+| [0028](./0028-use-db-trigger-bridge-for-ticket-type-expand.md) | Ticket Type 移行の expand 段階に DB trigger bridge を採用する | Accepted |

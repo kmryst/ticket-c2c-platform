@@ -68,7 +68,7 @@ PostgreSQL の条件付き更新で在庫超過を防ぐ最小 PoC を実行で�
 npm install
 cp .env.example .env
 docker compose up -d
-docker compose exec -T postgres psql -U ticket_poc -d ticket_poc < database/schema.sql
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ticket_poc -d ticket_poc < database/schema.sql
 AUTH_RATE_LIMIT_PURCHASE_IP=10000 \
 AUTH_RATE_LIMIT_PURCHASE_SECONDARY=10000 \
 npm run start:dev

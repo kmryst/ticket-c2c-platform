@@ -1,0 +1,47 @@
+# Issue #335 Rollout Gate A の dev 専用 readiness workflow。
+# 現行 API task definition を ECS RunTask で流用し、private Aurora 上の
+# Ticket Type expand schema を読み取り専用で検査する。DB schema / data は変更しない。
+name: ticket-type-expand-readiness-dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_definition_arn:
+        description: "通常は空欄。migration後のservice更新だけ失敗した場合は、そのdeploy logに記録された新task definition ARNを指定"
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  # backend rollout、DB migration、Gate A readinessを同一環境で直列化する。
+  group: backend-database-operation-dev
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (apply role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Check Ticket Type expand readiness
+        shell: bash
+        env:
+          TASK_DEFINITION_ARN: ${{ inputs.task_definition_arn }}
+        run: |
+          set -o pipefail
+          task_definition="${TASK_DEFINITION_ARN:-current}"
+          ./scripts/deployment/run-db-migration.sh \
+            ticket-c2c-dev \
+            ticket-c2c-dev-api \
+            "$task_definition" \
+            ticket-type-readiness 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
