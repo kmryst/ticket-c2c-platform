@@ -8,6 +8,7 @@ import { buildDatabaseUrl, getDatabaseSslConfig } from '../config';
 import {
   checkTicketTypeExpandReadiness,
   hasTicketTypeExpandViolations,
+  TICKET_TYPE_EXPAND_READINESS_CATEGORIES,
 } from './ticket-type-expand-readiness';
 
 async function main(): Promise<void> {
@@ -20,7 +21,9 @@ async function main(): Promise<void> {
 
   try {
     // 1つのsnapshotで全categoryを照合し、このCLIからDB変更できないこともDB側で強制する。
-    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await client.query(
+      'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY',
+    );
     transactionStarted = true;
     await client.query("SET LOCAL statement_timeout = '60s'");
     await client.query("SET LOCAL lock_timeout = '5s'");
@@ -28,9 +31,20 @@ async function main(): Promise<void> {
     const results = await checkTicketTypeExpandReadiness(client);
     await client.query('COMMIT');
     transactionStarted = false;
-    console.log(JSON.stringify({ results }, null, 2));
+    const hasViolations = hasTicketTypeExpandViolations(results);
+    console.log(
+      JSON.stringify(
+        {
+          complete: true,
+          categoryCount: TICKET_TYPE_EXPAND_READINESS_CATEGORIES.length,
+          results,
+        },
+        null,
+        2,
+      ),
+    );
 
-    if (hasTicketTypeExpandViolations(results)) {
+    if (hasViolations) {
       process.exitCode = 1;
     }
   } catch (error) {
@@ -54,6 +68,8 @@ async function main(): Promise<void> {
 
 main().catch((error) => {
   console.error('Ticket Type expand readiness check failed');
-  console.error(error instanceof Error ? (error.stack ?? error.message) : error);
+  console.error(
+    error instanceof Error ? (error.stack ?? error.message) : error,
+  );
   process.exitCode = 1;
 });

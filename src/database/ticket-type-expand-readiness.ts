@@ -3,14 +3,36 @@
 // 旧 Event 単位在庫と expand 後の shadow data を読み取り専用 SQL で照合します。
 // 1 category でも violation_count > 0 なら、呼び出し側は fail closed で切替を停止します。
 
+export const TICKET_TYPE_EXPAND_READINESS_CATEGORIES = [
+  'event_without_exactly_one_default',
+  'event_without_exactly_one_ticket_type_before_cutover',
+  'event_without_legacy_inventory',
+  'legacy_inventory_without_default_shadow',
+  'legacy_shadow_remaining_mismatch',
+  'legacy_shadow_total_mismatch',
+  'legacy_shadow_updated_at_mismatch',
+  'legacy_shadow_version_mismatch',
+  'non_default_inventory_before_cutover',
+  'purchase_ticket_type_event_mismatch',
+  'purchase_without_ticket_type',
+  'required_bridge_trigger_missing_or_disabled',
+  'required_ticket_type_fk_missing_or_unvalidated',
+  'required_ticket_type_not_null_missing',
+  'required_unique_index_missing_or_invalid',
+  'ticket_type_inventory_event_mismatch',
+] as const;
+
+export type TicketTypeExpandReadinessCategory =
+  (typeof TICKET_TYPE_EXPAND_READINESS_CATEGORIES)[number];
+
 export interface TicketTypeExpandReadinessResult {
-  category: string;
+  category: TicketTypeExpandReadinessCategory;
   violationCount: number;
 }
 
 interface ReadinessQueryRow {
-  category: string;
-  violation_count: string;
+  category: unknown;
+  violation_count: unknown;
 }
 
 interface ReadinessQueryable {
@@ -448,23 +470,97 @@ export async function checkTicketTypeExpandReadiness(
 ): Promise<TicketTypeExpandReadinessResult[]> {
   const result = await database.query(TICKET_TYPE_EXPAND_READINESS_SQL);
   const rows = Array.isArray(result) ? result : result.rows;
+  const expectedCategories = new Set<string>(
+    TICKET_TYPE_EXPAND_READINESS_CATEGORIES,
+  );
+  const countsByCategory = new Map<TicketTypeExpandReadinessCategory, number>();
 
-  return rows.map((row) => {
-    const violationCount = Number(row.violation_count);
-    if (!Number.isSafeInteger(violationCount) || violationCount < 0) {
+  for (const row of rows) {
+    if (
+      typeof row.category !== 'string' ||
+      !expectedCategories.has(row.category)
+    ) {
       throw new Error(
-        `invalid Ticket Type readiness count for ${row.category}: ${row.violation_count}`,
+        `unexpected Ticket Type readiness category: ${String(row.category)}`,
       );
     }
-    return {
-      category: row.category,
-      violationCount,
-    };
-  });
+    const category = row.category as TicketTypeExpandReadinessCategory;
+    if (countsByCategory.has(category)) {
+      throw new Error(`duplicate Ticket Type readiness category: ${category}`);
+    }
+    if (
+      typeof row.violation_count !== 'string' ||
+      !/^(0|[1-9]\d*)$/.test(row.violation_count)
+    ) {
+      throw new Error(
+        `invalid Ticket Type readiness count for ${category}: ${String(row.violation_count)}`,
+      );
+    }
+    const violationCount = Number(row.violation_count);
+    if (!Number.isSafeInteger(violationCount)) {
+      throw new Error(
+        `invalid Ticket Type readiness count for ${category}: ${row.violation_count}`,
+      );
+    }
+    countsByCategory.set(category, violationCount);
+  }
+
+  const results = TICKET_TYPE_EXPAND_READINESS_CATEGORIES.flatMap(
+    (category) => {
+      const violationCount = countsByCategory.get(category);
+      return violationCount === undefined ? [] : [{ category, violationCount }];
+    },
+  );
+  assertTicketTypeExpandReadinessComplete(results);
+  return results;
+}
+
+export function assertTicketTypeExpandReadinessComplete(
+  results: readonly TicketTypeExpandReadinessResult[],
+): void {
+  const expectedCategories = new Set<string>(
+    TICKET_TYPE_EXPAND_READINESS_CATEGORIES,
+  );
+  const seenCategories = new Set<string>();
+
+  for (const result of results) {
+    if (
+      typeof result.category !== 'string' ||
+      !expectedCategories.has(result.category)
+    ) {
+      throw new Error(
+        `unexpected Ticket Type readiness category: ${String(result.category)}`,
+      );
+    }
+    if (seenCategories.has(result.category)) {
+      throw new Error(
+        `duplicate Ticket Type readiness category: ${result.category}`,
+      );
+    }
+    if (
+      !Number.isSafeInteger(result.violationCount) ||
+      result.violationCount < 0
+    ) {
+      throw new Error(
+        `invalid Ticket Type readiness count for ${result.category}: ${String(result.violationCount)}`,
+      );
+    }
+    seenCategories.add(result.category);
+  }
+
+  const missingCategories = TICKET_TYPE_EXPAND_READINESS_CATEGORIES.filter(
+    (category) => !seenCategories.has(category),
+  );
+  if (missingCategories.length > 0) {
+    throw new Error(
+      `missing Ticket Type readiness categories: ${missingCategories.join(', ')}`,
+    );
+  }
 }
 
 export function hasTicketTypeExpandViolations(
-  results: TicketTypeExpandReadinessResult[],
+  results: readonly TicketTypeExpandReadinessResult[],
 ): boolean {
+  assertTicketTypeExpandReadinessComplete(results);
   return results.some((result) => result.violationCount > 0);
 }

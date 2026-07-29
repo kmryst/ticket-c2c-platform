@@ -141,7 +141,9 @@ for log_attempt in {1..10}; do
 		[[ -n $task_log && $task_log != "None" ]]; then
 		log_available=true
 		if [[ $mode != "ticket-type-readiness" ||
-			($task_log == *'"event_without_exactly_one_default"'* &&
+			($task_log == *'"complete": true'* &&
+				$task_log == *'"categoryCount": 16'* &&
+				$task_log == *'"event_without_exactly_one_default"'* &&
 				$task_log == *'"required_unique_index_missing_or_invalid"'*) ]]; then
 			break
 		fi
@@ -160,6 +162,8 @@ fi
 echo "--- end of log ---"
 
 if [[ $log_available == "true" &&
+	$task_log == *'"complete": true'* &&
+	$task_log == *'"categoryCount": 16'* &&
 	$task_log == *'"event_without_exactly_one_default"'* &&
 	$task_log == *'"required_unique_index_missing_or_invalid"'* ]]; then
 	readiness_evidence_available=true
