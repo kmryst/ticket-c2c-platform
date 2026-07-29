@@ -271,6 +271,33 @@ CREATE INDEX purchases_event_ticket_type_created_at_idx
   ON purchases (event_id, ticket_type_id, created_at);
 `;
 
+// up後のassertとdown前のguardで、legacy正本とdefault Type shadowの
+// 同じ不変条件を使う。片方だけの条件変更でrollback可否を誤判定させない。
+const LEGACY_SHADOW_INVENTORY_MISMATCH_PREDICATE_SQL = `EXISTS (
+  SELECT 1
+  FROM ticket_inventory AS legacy
+  FULL JOIN (
+    SELECT
+      ticket_type.event_id,
+      shadow.total_quantity,
+      shadow.remaining_quantity,
+      shadow.version,
+      shadow.updated_at
+    FROM ticket_types AS ticket_type
+    JOIN ticket_type_inventory AS shadow
+      ON shadow.event_id = ticket_type.event_id
+     AND shadow.ticket_type_id = ticket_type.id
+    WHERE ticket_type.is_default
+  ) AS expanded
+    ON expanded.event_id = legacy.event_id
+  WHERE legacy.event_id IS NULL
+     OR expanded.event_id IS NULL
+     OR expanded.total_quantity IS DISTINCT FROM legacy.total_quantity
+     OR expanded.remaining_quantity IS DISTINCT FROM legacy.remaining_quantity
+     OR expanded.version IS DISTINCT FROM legacy.version
+     OR expanded.updated_at IS DISTINCT FROM legacy.updated_at
+)`;
+
 const ASSERT_EXPAND_SCHEMA_SQL = `
 DO $$
 BEGIN
@@ -287,30 +314,7 @@ BEGIN
       'ticket type expand migration aborted: default ticket type count is not exactly one';
   END IF;
 
-  IF EXISTS (
-    SELECT 1
-    FROM ticket_inventory AS legacy
-    FULL JOIN (
-      SELECT
-        ticket_type.event_id,
-        shadow.total_quantity,
-        shadow.remaining_quantity,
-        shadow.version,
-        shadow.updated_at
-      FROM ticket_types AS ticket_type
-      JOIN ticket_type_inventory AS shadow
-        ON shadow.event_id = ticket_type.event_id
-       AND shadow.ticket_type_id = ticket_type.id
-      WHERE ticket_type.is_default
-    ) AS expanded
-      ON expanded.event_id = legacy.event_id
-    WHERE legacy.event_id IS NULL
-       OR expanded.event_id IS NULL
-       OR expanded.total_quantity IS DISTINCT FROM legacy.total_quantity
-       OR expanded.remaining_quantity IS DISTINCT FROM legacy.remaining_quantity
-       OR expanded.version IS DISTINCT FROM legacy.version
-       OR expanded.updated_at IS DISTINCT FROM legacy.updated_at
-  ) OR EXISTS (
+  IF ${LEGACY_SHADOW_INVENTORY_MISMATCH_PREDICATE_SQL} OR EXISTS (
     SELECT 1
     FROM ticket_type_inventory AS shadow
     JOIN ticket_types AS ticket_type
@@ -372,30 +376,7 @@ BEGIN
   END IF;
 
   -- shadow にしかない在庫や値の差があれば、drop による情報消失を防いで停止する。
-  IF EXISTS (
-    SELECT 1
-    FROM ticket_inventory AS legacy
-    FULL JOIN (
-      SELECT
-        ticket_type.event_id,
-        shadow.total_quantity,
-        shadow.remaining_quantity,
-        shadow.version,
-        shadow.updated_at
-      FROM ticket_types AS ticket_type
-      JOIN ticket_type_inventory AS shadow
-        ON shadow.event_id = ticket_type.event_id
-       AND shadow.ticket_type_id = ticket_type.id
-      WHERE ticket_type.is_default
-    ) AS expanded
-      ON expanded.event_id = legacy.event_id
-    WHERE legacy.event_id IS NULL
-       OR expanded.event_id IS NULL
-       OR expanded.total_quantity IS DISTINCT FROM legacy.total_quantity
-       OR expanded.remaining_quantity IS DISTINCT FROM legacy.remaining_quantity
-       OR expanded.version IS DISTINCT FROM legacy.version
-       OR expanded.updated_at IS DISTINCT FROM legacy.updated_at
-  ) THEN
+  IF ${LEGACY_SHADOW_INVENTORY_MISMATCH_PREDICATE_SQL} THEN
     RAISE EXCEPTION
       'ticket type expand rollback blocked: ticket type inventory does not match legacy inventory';
   END IF;

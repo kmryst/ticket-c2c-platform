@@ -1120,6 +1120,7 @@ describeWithPostgres(
           `
             UPDATE ticket_inventory
             SET
+              total_quantity = total_quantity + 1,
               remaining_quantity = remaining_quantity - 1,
               version = version + 1,
               updated_at = now()
@@ -1138,6 +1139,7 @@ describeWithPostgres(
         expect(
           driftedCounts.get('required_bridge_trigger_missing_or_disabled'),
         ).toBe(1);
+        expect(driftedCounts.get('legacy_shadow_total_mismatch')).toBe(1);
         expect(driftedCounts.get('legacy_shadow_remaining_mismatch')).toBe(1);
         expect(driftedCounts.get('legacy_shadow_version_mismatch')).toBe(1);
         expect(driftedCounts.get('legacy_shadow_updated_at_mismatch')).toBe(1);
@@ -1272,6 +1274,53 @@ describeWithPostgres(
         );
         const readiness = await checkTicketTypeExpandReadiness(dataSource);
         expect(hasTicketTypeExpandViolations(readiness)).toBe(false);
+      });
+    });
+
+    it('legacyとshadowの在庫差分がある場合はdownをDDLより先に停止する', async () => {
+      await withLegacyDatabase(async (dataSource) => {
+        const fixture = await seedPopulatedLegacyData(dataSource);
+        await applyMigration(
+          dataSource,
+          new AddTicketTypeExpandSchema1785128190273(),
+          'up',
+        );
+
+        await dataSource.query(
+          `
+            UPDATE ticket_type_inventory
+            SET version = version + 1
+            WHERE event_id = $1
+          `,
+          [fixture.eventIds[0]],
+        );
+        const stateBefore = await selectCatalogState(dataSource);
+
+        await expect(
+          applyMigration(
+            dataSource,
+            new AddTicketTypeExpandSchema1785128190273(),
+            'down',
+          ),
+        ).rejects.toThrow(
+          'ticket type expand rollback blocked: ticket type inventory does not match legacy inventory',
+        );
+
+        // guard失敗後もexpand table・column・bridge triggerを削除しない。
+        expect(await selectCatalogState(dataSource)).toEqual(stateBefore);
+        const versionDrift = await dataSource.query<
+          Array<{ difference: number }>
+        >(
+          `
+            SELECT shadow.version - legacy.version AS difference
+            FROM ticket_type_inventory AS shadow
+            JOIN ticket_inventory AS legacy
+              ON legacy.event_id = shadow.event_id
+            WHERE shadow.event_id = $1
+          `,
+          [fixture.eventIds[0]],
+        );
+        expect(versionDrift).toEqual([{ difference: 1 }]);
       });
     });
 
