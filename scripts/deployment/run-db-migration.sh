@@ -15,6 +15,10 @@
 
 set -euo pipefail
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=scripts/deployment/ticket-type-readiness-evidence.sh
+source "${script_dir}/ticket-type-readiness-evidence.sh"
+
 usage="usage: run-db-migration.sh <cluster> <api-service> [task-definition-arn] [migration|ticket-type-readiness]"
 if (( $# > 4 )); then
 	echo "$usage" >&2
@@ -130,21 +134,23 @@ stopped_reason=$(jq -r '.stoppedReason // "-"' <<<"$task_json")
 # ECS task のログを表示する（awslogs stream: <prefix>/<container>/<task-id>）
 task_id="${task_arn##*/}"
 task_log=""
+task_log_messages_json="[]"
+fetched_task_log_messages_json=""
 log_available=false
 readiness_evidence_available=false
 for log_attempt in {1..10}; do
-	if task_log=$(aws logs get-log-events --region "$region" \
+	if fetched_task_log_messages_json=$(aws logs get-log-events --region "$region" \
 		--log-group-name "$log_group" \
 		--log-stream-name "${log_prefix}/${container}/${task_id}" \
 		--start-from-head \
-		--query 'events[].message' --output text 2>/dev/null) &&
-		[[ -n $task_log && $task_log != "None" ]]; then
+		--query 'events[].message' --output json 2>/dev/null) &&
+		jq -e 'type == "array" and length > 0' \
+			<<<"$fetched_task_log_messages_json" >/dev/null 2>&1; then
+		task_log_messages_json=$fetched_task_log_messages_json
+		task_log=$(jq -r '.[]' <<<"$task_log_messages_json")
 		log_available=true
-		if [[ $mode != "ticket-type-readiness" ||
-			($task_log == *'"complete": true'* &&
-				$task_log == *'"categoryCount": 16'* &&
-				$task_log == *'"event_without_exactly_one_default"'* &&
-				$task_log == *'"ticket_type_inventory_event_mismatch"'*) ]]; then
+		if [[ $mode != "ticket-type-readiness" ]] ||
+			ticket_type_readiness_evidence_complete "$task_log_messages_json"; then
 			break
 		fi
 	fi
@@ -161,11 +167,8 @@ else
 fi
 echo "--- end of log ---"
 
-if [[ $log_available == "true" &&
-	$task_log == *'"complete": true'* &&
-	$task_log == *'"categoryCount": 16'* &&
-	$task_log == *'"event_without_exactly_one_default"'* &&
-	$task_log == *'"ticket_type_inventory_event_mismatch"'* ]]; then
+if [[ $log_available == "true" ]] &&
+	ticket_type_readiness_evidence_available "$task_log_messages_json"; then
 	readiness_evidence_available=true
 fi
 

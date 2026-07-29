@@ -25,9 +25,21 @@ export const TICKET_TYPE_EXPAND_READINESS_CATEGORIES = [
 export type TicketTypeExpandReadinessCategory =
   (typeof TICKET_TYPE_EXPAND_READINESS_CATEGORIES)[number];
 
+export const TICKET_TYPE_EXPAND_READINESS_EVIDENCE_TYPE =
+  'ticket-type-expand-readiness';
+export const TICKET_TYPE_EXPAND_READINESS_EVIDENCE_VERSION = 1;
+
 export interface TicketTypeExpandReadinessResult {
   category: TicketTypeExpandReadinessCategory;
   violationCount: number;
+}
+
+export interface TicketTypeExpandReadinessEvidence {
+  evidenceType: typeof TICKET_TYPE_EXPAND_READINESS_EVIDENCE_TYPE;
+  evidenceVersion: typeof TICKET_TYPE_EXPAND_READINESS_EVIDENCE_VERSION;
+  results: readonly TicketTypeExpandReadinessResult[];
+  categoryCount: number;
+  complete: true;
 }
 
 interface ReadinessQueryRow {
@@ -563,4 +575,19 @@ export function hasTicketTypeExpandViolations(
 ): boolean {
   assertTicketTypeExpandReadinessComplete(results);
   return results.some((result) => result.violationCount > 0);
+}
+
+export function serializeTicketTypeExpandReadinessEvidence(
+  results: readonly TicketTypeExpandReadinessResult[],
+): string {
+  assertTicketTypeExpandReadinessComplete(results);
+  const evidence: TicketTypeExpandReadinessEvidence = {
+    evidenceType: TICKET_TYPE_EXPAND_READINESS_EVIDENCE_TYPE,
+    evidenceVersion: TICKET_TYPE_EXPAND_READINESS_EVIDENCE_VERSION,
+    results,
+    categoryCount: results.length,
+    complete: true,
+  };
+  // CloudWatch Logsで1 eventとして構造検証できるよう、改行なしのJSONにする。
+  return JSON.stringify(evidence);
 }

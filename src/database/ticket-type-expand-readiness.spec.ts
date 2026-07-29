@@ -5,7 +5,10 @@
 import {
   checkTicketTypeExpandReadiness,
   hasTicketTypeExpandViolations,
+  serializeTicketTypeExpandReadinessEvidence,
   TICKET_TYPE_EXPAND_READINESS_CATEGORIES,
+  TICKET_TYPE_EXPAND_READINESS_EVIDENCE_TYPE,
+  TICKET_TYPE_EXPAND_READINESS_EVIDENCE_VERSION,
   TICKET_TYPE_EXPAND_READINESS_SQL,
   TicketTypeExpandReadinessResult,
 } from './ticket-type-expand-readiness';
@@ -43,6 +46,21 @@ describe('Ticket Type expand readiness result validation', () => {
     results[0].violationCount = 1;
 
     expect(hasTicketTypeExpandViolations(results)).toBe(true);
+  });
+
+  it('正本から件数を導出した機械可読な1行JSONを出力する', () => {
+    const results = completeResults();
+
+    const serialized = serializeTicketTypeExpandReadinessEvidence(results);
+
+    expect(serialized).not.toContain('\n');
+    expect(JSON.parse(serialized)).toEqual({
+      evidenceType: TICKET_TYPE_EXPAND_READINESS_EVIDENCE_TYPE,
+      evidenceVersion: TICKET_TYPE_EXPAND_READINESS_EVIDENCE_VERSION,
+      results,
+      categoryCount: TICKET_TYPE_EXPAND_READINESS_CATEGORIES.length,
+      complete: true,
+    });
   });
 
   it.each([

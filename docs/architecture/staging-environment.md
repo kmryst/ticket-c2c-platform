@@ -226,7 +226,7 @@ terraform state list   # 空であること
 
 - migration 本体: `src/database/migrations/`（baseline は 2026-07-04 時点の `database/schema.sql` スナップショット）。適用履歴は DB の `typeorm_migrations` table で管理する。
 - 実行経路は 2 つ。いずれも ECS run-task（API タスク定義 + command override）で private subnet 内から適用する:
-  - `db-migrate-dev.yml` / `db-migrate-staging.yml`: deploy とは独立した単発実行（初回構築後や検証時）。
+  - `db-migrate-dev.yml` / `db-migrate-staging.yml`: backend deploy とは別に手動起動する単発実行（初回構築後や検証時）。同じ環境のbackend rollout、DB migration、Gate A readinessとは共通concurrency groupを使い、同時実行を防ぐ。
   - `deploy-backend-*.yml` の `run_migrations` 入力: 新イメージのタスク定義 register 後・サービス更新前に migration を実行し、成功した場合のみデプロイへ進む（スキーマ変更を含むリリース用。migration 適用〜サービス更新完了までの間、旧タスクが新スキーマ上で動くため、migration は後方互換（expand-contract）で書く）。
 - migration runner は PostgreSQL advisory lock で直列化されており、誤って多重起動しても DDL は競合しない。
 - スキーマ変更では `npm run migration:create -- src/database/migrations/<PascalCase名>` で migration を追加し、`src/database/data-source.ts` の `migrations` 配列とローカル PoC の正本 `database/schema.sql` を同じ PR で同期更新する。baseline migration は編集しない。
@@ -248,7 +248,7 @@ dev と staging は workflow を分ける。dev workflow に `normal` / `full` �
 | `terraform-apply-staging.yml` | staging apply | `capacity_profile=normal \| full`、`public_endpoint_mode=https-dns \| alb-http-only` | `staging` | `terraform/environments/staging` を apply。`environment` 選択入力は持たず、staging 固有の `capacity_profile` のみ受け取る |
 | `deploy-backend-staging.yml` | staging backend deploy | `image_tag` 任意、`run_migrations` | `staging` | ECR / ECS 名は `ticket-c2c-staging` を使う |
 | `deploy-frontend-staging.yml` | staging frontend deploy | `image_tag` 任意 | `staging` | alb-http-only モード（frontend service 不在）ではサービス更新をスキップ |
-| `db-migrate-staging.yml` | staging DB migration（deploy 非依存の単発実行） | なし | `staging` | ECS run-task で TypeORM migrations を適用（Issue #92）。dev 用は `db-migrate-dev.yml` |
+| `db-migrate-staging.yml` | staging DB migration（backend deployとは別に手動起動） | なし | `staging` | ECS run-task でTypeORM migrationsを適用し、backend rollout/readinessとの同時実行は共通concurrency groupで防ぐ（Issue #92）。dev用は`db-migrate-dev.yml` |
 | `staging-smoke-test.yml` | staging smoke / integration test | なし | `staging-readonly` | apply ロールを流用しない。staging state file の S3 read-only に限定した専用 IAM ロールで `terraform output` を取得し、以降の HTTP 検証は AWS credential を使わない |
 | `terraform-destroy-staging.yml` | staging destroy | `confirm=destroy-staging` | `staging-destroy` | 検証後に毎回手動で実行する |
 

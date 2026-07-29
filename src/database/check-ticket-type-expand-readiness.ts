@@ -8,7 +8,7 @@ import { buildDatabaseUrl, getDatabaseSslConfig } from '../config';
 import {
   checkTicketTypeExpandReadiness,
   hasTicketTypeExpandViolations,
-  TICKET_TYPE_EXPAND_READINESS_CATEGORIES,
+  serializeTicketTypeExpandReadinessEvidence,
 } from './ticket-type-expand-readiness';
 
 async function main(): Promise<void> {
@@ -32,17 +32,7 @@ async function main(): Promise<void> {
     await client.query('COMMIT');
     transactionStarted = false;
     const hasViolations = hasTicketTypeExpandViolations(results);
-    console.log(
-      JSON.stringify(
-        {
-          results,
-          categoryCount: TICKET_TYPE_EXPAND_READINESS_CATEGORIES.length,
-          complete: true,
-        },
-        null,
-        2,
-      ),
-    );
+    console.log(serializeTicketTypeExpandReadinessEvidence(results));
 
     if (hasViolations) {
       process.exitCode = 1;
