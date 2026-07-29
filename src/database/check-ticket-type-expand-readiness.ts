@@ -35,9 +35,9 @@ async function main(): Promise<void> {
     console.log(
       JSON.stringify(
         {
-          complete: true,
-          categoryCount: TICKET_TYPE_EXPAND_READINESS_CATEGORIES.length,
           results,
+          categoryCount: TICKET_TYPE_EXPAND_READINESS_CATEGORIES.length,
+          complete: true,
         },
         null,
         2,

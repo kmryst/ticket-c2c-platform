@@ -227,7 +227,7 @@ npm run migration:check:ticket-type-expand:prod
 
 各workflowは環境選択inputを持たず、GitHub Environmentの承認とAWS認証を使います。通常は現行API task definitionをECS RunTaskで一時起動し、allowlist済みの`ticket-type-readiness` modeから`node dist/src/database/check-ticket-type-expand-readiness.js`を実行します。DBのschemaやデータは変更しません。
 
-workflow summaryにはUTCの開始・終了時刻、task definition、image、task ARN、checkerのJSON結果、container exit codeを記録します。checkerのJSONは`complete: true`と`categoryCount: 16`を完全性マーカーとして含みます。CloudWatch Logsは短時間retryし、完全性マーカーとreadiness結果を取得できなければcontainerが終了コード0でもworkflowを失敗させます。workflow URLと結果を親Issue #335へ記録します。このworkflowは整合性checkerの証跡だけを担当するため、Gate Aに必要なmigration前後の件数、migration名、旧binaryによるEvent作成・一覧・購入、rollbackまたはforward-fix判断も別途同じGateへ記録します。
+workflow summaryにはUTCの開始・終了時刻、task definition、image、task ARN、checkerのJSON結果、container exit codeを記録します。checkerのJSONは16カテゴリの`results`より後ろに`categoryCount: 16`と`complete: true`を完全性マーカーとして出力します。CloudWatch Logsは短時間retryし、完全性マーカーとreadiness結果を取得できなければcontainerが終了コード0でもworkflowを失敗させます。workflow URLと結果を親Issue #335へ記録します。このworkflowは整合性checkerの証跡だけを担当するため、Gate Aに必要なmigration前後の件数、migration名、旧binaryによるEvent作成・一覧・購入、rollbackまたはforward-fix判断も別途同じGateへ記録します。
 
 backend deploy、独立DB migration、readinessは環境ごとの共通concurrency groupで直列化します。migration成功後にservice更新だけが失敗し、現行serviceの旧imageにcheckerがまだない場合は、readiness workflowの`task_definition_arn`へdeploy logに記録された新task definition ARNを指定します。通常のGate Aでは空欄のまま現行serviceを使います。
 

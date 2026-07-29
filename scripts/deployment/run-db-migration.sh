@@ -144,7 +144,7 @@ for log_attempt in {1..10}; do
 			($task_log == *'"complete": true'* &&
 				$task_log == *'"categoryCount": 16'* &&
 				$task_log == *'"event_without_exactly_one_default"'* &&
-				$task_log == *'"required_unique_index_missing_or_invalid"'*) ]]; then
+				$task_log == *'"ticket_type_inventory_event_mismatch"'*) ]]; then
 			break
 		fi
 	fi
@@ -165,7 +165,7 @@ if [[ $log_available == "true" &&
 	$task_log == *'"complete": true'* &&
 	$task_log == *'"categoryCount": 16'* &&
 	$task_log == *'"event_without_exactly_one_default"'* &&
-	$task_log == *'"required_unique_index_missing_or_invalid"'* ]]; then
+	$task_log == *'"ticket_type_inventory_event_mismatch"'* ]]; then
 	readiness_evidence_available=true
 fi
 
