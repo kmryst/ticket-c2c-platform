@@ -28,7 +28,7 @@
   "dependencies": {
     "@aws-sdk/client-eventbridge": "^3.1079.0",
     "@aws-sdk/client-secrets-manager": "^3.1084.0",
-    "@aws-sdk/client-sqs": "^3.1089.0",
+    "@aws-sdk/client-sqs": "^3.1097.0",
     "@aws-sdk/credential-provider-node": "^3.972.62",
     "@fastify/cookie": "^11.1.2",
     "@nestjs/common": "^11.1.27",
@@ -64,9 +64,12 @@
     "@types/node": "^26.1.0",
     "@types/pg": "^8.20.0",
     "jest": "^30.4.2",
-    "markdownlint-cli2": "^0.23.1",
-    "ts-jest": "^29.4.11",
+    "markdownlint-cli2": "^0.23.2",
+    "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "find-my-way": "9.7.0"
   }
 }
