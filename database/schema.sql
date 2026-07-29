@@ -323,3 +323,344 @@ CREATE UNIQUE INDEX IF NOT EXISTS purchases_rejected_request_id_uq
   -- request_id がある rejected row だけを一意制約の対象にします。
   WHERE request_id IS NOT NULL
     AND status = 'rejected';
+
+-- ---------------------------------------------------------------------------
+-- Ticket Type expand schema（Issue #336 / ADR-0028）
+-- ---------------------------------------------------------------------------
+-- この段階では、上の ticket_inventory（Event 単位）が引き続き在庫の正本です。
+-- Ticket Type 単位在庫は #337 の切替まで shadow として同期し、旧 backend binary が
+-- ticket_type_id を知らない期間も同じ transaction 内の trigger で欠損を防ぎます。
+--
+-- backfill と trigger 有効化の間に旧 writer が入らないよう、expand 部分は 1 transaction
+-- とし、既知 writer の入口から必要な最大 lock を決定的な順序で取得します。
+-- Event / inventory の plain SELECT は継続できますが、purchases は ADD COLUMN が要求する
+-- ACCESS EXCLUSIVE lock のためtransaction完了までreadも待機します。
+BEGIN;
+
+-- stuck transaction や想定外のデータ量でローカル処理を無期限に止めません。
+SET LOCAL lock_timeout = '10s';
+SET LOCAL statement_timeout = '5min';
+SET LOCAL search_path = public, pg_catalog, pg_temp;
+
+-- events をwriter gateとして先に止めて既存writerの完了を待ち、purchasesの最大lockを
+-- inventoryより先に取ることで、旧Purchaseとのlock upgrade deadlockを防ぎます。
+-- Eventと後段tableを別transactionで更新する旧PoC scriptが後段lockを先取していた場合は、
+-- NOWAITでtransaction全体をrollbackし、eventsを保持したまま相手を待ちません。
+LOCK TABLE events IN EXCLUSIVE MODE;
+LOCK TABLE purchases IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK TABLE ticket_inventory IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+
+-- ticket_types は Event 内の販売区分を表します。表示名は識別子として使わず、
+-- FK は UUID、既定 Type の判定は is_default を使用します。
+CREATE TABLE IF NOT EXISTS ticket_types (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  is_default BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT ticket_types_name_nonblank_check
+    CHECK (name <> '' AND name = btrim(name)),
+  -- PostgreSQL 16 で (event_id, ticket_type_id) の複合 FK から参照する候補 key です。
+  -- id 単独の PRIMARY KEY とは別に、参照列と同じ並びの UNIQUE を明示します。
+  CONSTRAINT ticket_types_event_id_id_key UNIQUE (event_id, id)
+);
+
+-- 同じ Event 内で大文字小文字だけが違う表示名を重複登録できないようにします。
+CREATE UNIQUE INDEX IF NOT EXISTS ticket_types_event_normalized_name_uq
+  ON ticket_types (event_id, lower(name));
+
+-- 「既定 Type」は同じ Event に最大 1 件です。最低 1 件は backfill / Event trigger で作り、
+-- readiness checker が exactly-one であることを検査します。
+CREATE UNIQUE INDEX IF NOT EXISTS ticket_types_one_default_per_event_uq
+  ON ticket_types (event_id)
+  WHERE is_default;
+
+-- Ticket Type 単位の数量在庫です。#336 では legacy inventory の shadow であり、
+-- total / remaining / version / updated_at を再計算せず、そのまま同期します。
+CREATE TABLE IF NOT EXISTS ticket_type_inventory (
+  ticket_type_id UUID PRIMARY KEY,
+  event_id UUID NOT NULL,
+  total_quantity INTEGER NOT NULL,
+  remaining_quantity INTEGER NOT NULL,
+  version INTEGER NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT ticket_type_inventory_total_quantity_non_negative_check
+    CHECK (total_quantity >= 0),
+  CONSTRAINT ticket_type_inventory_remaining_quantity_non_negative_check
+    CHECK (remaining_quantity >= 0),
+  CONSTRAINT ticket_type_inventory_version_non_negative_check
+    CHECK (version >= 0),
+  CONSTRAINT ticket_type_inventory_remaining_lte_total_check
+    CHECK (remaining_quantity <= total_quantity),
+  CONSTRAINT ticket_type_inventory_event_ticket_type_fkey
+    FOREIGN KEY (event_id, ticket_type_id)
+    REFERENCES ticket_types (event_id, id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ticket_type_inventory_event_id_idx
+  ON ticket_type_inventory (event_id);
+
+-- 旧 binary はこの列を INSERT しないため、まず nullable で追加し、下の BEFORE INSERT
+-- trigger と既存 row の backfill を用意してから NOT NULL 化します。
+ALTER TABLE purchases
+  ADD COLUMN IF NOT EXISTS ticket_type_id UUID;
+
+-- 既存 Event には正確に 1 件の既定 General Admission を作ります。
+-- created_at / updated_at は migration 適用時刻とし、再適用時は既存 UUID と時刻を保持します。
+INSERT INTO ticket_types (event_id, name, is_default)
+SELECT
+  e.id,
+  'General Admission',
+  true
+FROM events e
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM ticket_types tt
+  WHERE tt.event_id = e.id
+    AND tt.is_default
+);
+
+-- legacy inventory が存在しない Event は現行 API 自体の前提崩れです。
+-- 不完全な shadow を確定せず、expand transaction 全体を rollback します。
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM events e
+    LEFT JOIN ticket_inventory legacy ON legacy.event_id = e.id
+    WHERE legacy.event_id IS NULL
+  ) THEN
+    RAISE EXCEPTION
+      'Ticket Type expand aborted: an event has no legacy ticket_inventory';
+  END IF;
+END
+$$;
+
+-- 既存 Event 単位在庫を、その Event の既定 Ticket Type へコピーします。
+INSERT INTO ticket_type_inventory (
+  ticket_type_id,
+  event_id,
+  total_quantity,
+  remaining_quantity,
+  version,
+  updated_at
+)
+SELECT
+  defaults.id,
+  legacy.event_id,
+  legacy.total_quantity,
+  legacy.remaining_quantity,
+  legacy.version,
+  legacy.updated_at
+FROM ticket_inventory legacy
+JOIN ticket_types defaults
+  ON defaults.event_id = legacy.event_id
+ AND defaults.is_default
+ON CONFLICT (ticket_type_id) DO UPDATE
+SET
+  event_id = EXCLUDED.event_id,
+  total_quantity = EXCLUDED.total_quantity,
+  remaining_quantity = EXCLUDED.remaining_quantity,
+  version = EXCLUDED.version,
+  updated_at = EXCLUDED.updated_at;
+
+-- 既存 Purchase は対象 Event の既定 Type へ紐付けます。
+-- すでに値がある row は上書きせず、後段の整合性検査で誤紐付けを fail closed にします。
+UPDATE purchases p
+SET ticket_type_id = defaults.id
+FROM ticket_types defaults
+WHERE p.event_id = defaults.event_id
+  AND defaults.is_default
+  AND p.ticket_type_id IS NULL;
+
+-- 新規 Event を旧 binary が作成した直後に、同じ transaction で既定 Type を作ります。
+CREATE OR REPLACE FUNCTION ticket_type_expand_create_default_ticket_type()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+  INSERT INTO public.ticket_types (event_id, name, is_default)
+  VALUES (NEW.id, 'General Admission', true);
+
+  RETURN NEW;
+END
+$$;
+
+DROP TRIGGER IF EXISTS events_ticket_type_expand_default_trg ON events;
+CREATE TRIGGER events_ticket_type_expand_default_trg
+AFTER INSERT ON events
+FOR EACH ROW
+EXECUTE FUNCTION ticket_type_expand_create_default_ticket_type();
+
+-- 旧 Event 単位在庫の INSERT / UPDATE を既定 Ticket Type の shadow へ同期します。
+CREATE OR REPLACE FUNCTION ticket_type_expand_sync_inventory()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  default_ticket_type_id UUID;
+BEGIN
+  SELECT id
+  INTO default_ticket_type_id
+  FROM public.ticket_types
+  WHERE event_id = NEW.event_id
+    AND is_default;
+
+  IF default_ticket_type_id IS NULL THEN
+    RAISE EXCEPTION
+      'ticket type inventory bridge failed: event % has no default ticket type',
+      NEW.event_id;
+  END IF;
+
+  INSERT INTO public.ticket_type_inventory (
+    ticket_type_id,
+    event_id,
+    total_quantity,
+    remaining_quantity,
+    version,
+    updated_at
+  )
+  VALUES (
+    default_ticket_type_id,
+    NEW.event_id,
+    NEW.total_quantity,
+    NEW.remaining_quantity,
+    NEW.version,
+    NEW.updated_at
+  )
+  ON CONFLICT (ticket_type_id) DO UPDATE
+  SET event_id = EXCLUDED.event_id,
+      total_quantity = EXCLUDED.total_quantity,
+      remaining_quantity = EXCLUDED.remaining_quantity,
+      version = EXCLUDED.version,
+      updated_at = EXCLUDED.updated_at;
+
+  RETURN NEW;
+END
+$$;
+
+DROP TRIGGER IF EXISTS ticket_inventory_ticket_type_expand_sync_trg ON ticket_inventory;
+CREATE TRIGGER ticket_inventory_ticket_type_expand_sync_trg
+AFTER INSERT OR UPDATE ON ticket_inventory
+FOR EACH ROW
+EXECUTE FUNCTION ticket_type_expand_sync_inventory();
+
+-- 旧 Purchase INSERT が ticket_type_id を省略した場合、対象 Event の既定 Type を補完します。
+CREATE OR REPLACE FUNCTION ticket_type_expand_set_purchase_ticket_type()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+  IF NEW.ticket_type_id IS NULL THEN
+    SELECT id
+    INTO NEW.ticket_type_id
+    FROM public.ticket_types
+    WHERE event_id = NEW.event_id
+      AND is_default;
+  END IF;
+
+  IF NEW.ticket_type_id IS NULL THEN
+    RAISE EXCEPTION
+      'purchase ticket type bridge failed: event % has no default ticket type',
+      NEW.event_id;
+  END IF;
+
+  RETURN NEW;
+END
+$$;
+
+DROP TRIGGER IF EXISTS purchases_ticket_type_expand_default_trg ON purchases;
+CREATE TRIGGER purchases_ticket_type_expand_default_trg
+BEFORE INSERT ON purchases
+FOR EACH ROW
+EXECUTE FUNCTION ticket_type_expand_set_purchase_ticket_type();
+
+-- backfill と trigger が揃ったため、旧 binary の列省略を保ったまま NOT NULL にできます。
+ALTER TABLE purchases
+  ALTER COLUMN ticket_type_id SET NOT NULL;
+
+-- FK の table scan と lock を分離できるよう一旦 NOT VALID で追加しますが、
+-- #337 へ未検証の制約を持ち越さず、この transaction 内で必ず VALIDATE します。
+DO $$
+BEGIN
+  ALTER TABLE purchases
+    ADD CONSTRAINT purchases_event_ticket_type_fkey
+    FOREIGN KEY (event_id, ticket_type_id)
+    REFERENCES ticket_types (event_id, id)
+    ON DELETE RESTRICT
+    NOT VALID;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END
+$$;
+
+ALTER TABLE purchases
+  VALIDATE CONSTRAINT purchases_event_ticket_type_fkey;
+
+CREATE INDEX IF NOT EXISTS purchases_event_ticket_type_created_at_idx
+  ON purchases (event_id, ticket_type_id, created_at);
+
+-- migration/schema 適用時点の最終整合性を検査します。1 件でも違反があれば、
+-- TypeORM migration とこの expand transaction は rollback されます。
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM events e
+    LEFT JOIN ticket_types tt ON tt.event_id = e.id
+    GROUP BY e.id
+    HAVING count(tt.id) <> 1
+       OR count(tt.id) FILTER (WHERE tt.is_default) <> 1
+  ) THEN
+    RAISE EXCEPTION
+      'Ticket Type expand aborted: an event does not have exactly one default Ticket Type';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM ticket_inventory legacy
+    JOIN ticket_types defaults
+      ON defaults.event_id = legacy.event_id
+     AND defaults.is_default
+    LEFT JOIN ticket_type_inventory shadow
+      ON shadow.event_id = legacy.event_id
+     AND shadow.ticket_type_id = defaults.id
+    WHERE shadow.ticket_type_id IS NULL
+       OR shadow.total_quantity IS DISTINCT FROM legacy.total_quantity
+       OR shadow.remaining_quantity IS DISTINCT FROM legacy.remaining_quantity
+       OR shadow.version IS DISTINCT FROM legacy.version
+       OR shadow.updated_at IS DISTINCT FROM legacy.updated_at
+  ) OR EXISTS (
+    SELECT 1
+    FROM ticket_type_inventory shadow
+    JOIN ticket_types tt
+      ON tt.event_id = shadow.event_id
+     AND tt.id = shadow.ticket_type_id
+    WHERE NOT tt.is_default
+  ) THEN
+    RAISE EXCEPTION
+      'Ticket Type expand aborted: legacy and default Ticket Type inventory differ';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM purchases p
+    LEFT JOIN ticket_types tt
+      ON tt.event_id = p.event_id
+     AND tt.id = p.ticket_type_id
+    WHERE p.ticket_type_id IS NULL
+       OR tt.id IS NULL
+       OR NOT tt.is_default
+  ) THEN
+    RAISE EXCEPTION
+      'Ticket Type expand aborted: a purchase is not linked to its Event Ticket Type';
+  END IF;
+END
+$$;
+
+COMMIT;

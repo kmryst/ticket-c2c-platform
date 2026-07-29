@@ -6,6 +6,8 @@
 
 このドキュメントは、B2C 一次チケット販売における Waiting Room、Protected Zone、Purchase Session、Ticket Hold、Purchase、および Fake Payment API の仕様と構成の正本です。設計判断の背景は [ADR-0020](../adr/0020-reframe-as-b2c-primary-ticketing.md)、[ADR-0021](../adr/0021-protected-zone-purchase-flow.md)、[ADR-0022](../adr/0022-b2c-purchase-journey-success-sli.md)、[ADR-0023](../adr/0023-split-b2c-purchase-journey-latency-sli.md)、[ADR-0024](../adr/0024-b2c-synchronous-api-latency-boundary.md)、[ADR-0025](../adr/0025-b2c-synchronous-purchase-latency-slo.md)、[ADR-0026](../adr/0026-measure-payment-resolution-per-attempt.md)、[ADR-0027](../adr/0027-payment-timeout-boundaries.md) に記録します。
 
+現行の Event 単位在庫から Ticket Type 単位在庫への段階移行では、[在庫 PoC DB スキーマ](../poc/inventory-schema.md) を現在状態の正本とし、expand 段階の一時 DB trigger bridge の判断を [ADR-0028](../adr/0028-use-db-trigger-bridge-for-ticket-type-expand.md) に記録します。
+
 ## サービス境界
 
 イベント主催者（Organizer）が保有する一次販売チケットを購入者（Customer）へ販売します。個人による再出品、個人間取引、売上金精算、チケットの二次流通は扱いません。

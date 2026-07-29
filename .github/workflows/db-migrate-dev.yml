@@ -1,4 +1,6 @@
-# dev の DB schema migration を deploy とは独立に実行する workflow（Issue #92）。
+# dev の DB schema migration を backend deploy とは別に手動起動する workflow（Issue #92）。
+# 起動経路は別だが、共通concurrency groupで同一環境のbackend rollout、
+# DB migration、Gate A readinessの同時実行を防ぐ。
 # API サービスの現行タスク定義を ECS run-task + command override で流用し、
 # TypeORM versioned migrations（node dist/src/database/run-migrations.js）を適用する。
 # 新イメージの migration を「デプロイ前」に流したい場合は
@@ -13,7 +15,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: db-migrate-dev
+  # backend rollout、DB migration、Gate A readinessを同一環境で直列化する。
+  group: backend-database-operation-dev
 
 jobs:
   migrate:

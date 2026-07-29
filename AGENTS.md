@@ -125,7 +125,7 @@ docker compose down -v
 ローカル PostgreSQL へスキーマを適用する場合:
 
 ```bash
-docker compose exec -T postgres psql -U ticket_poc -d ticket_poc < database/schema.sql
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ticket_poc -d ticket_poc < database/schema.sql
 ```
 
 `database/schema.sql` を変更した場合は、`docs/poc/inventory-schema.md` も合わせて更新します。

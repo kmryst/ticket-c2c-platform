@@ -82,7 +82,7 @@ docker compose ps
 スキーマを適用する。
 
 ```bash
-docker compose exec -T postgres psql -U ticket_poc -d ticket_poc < database/schema.sql
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ticket_poc -d ticket_poc < database/schema.sql
 ```
 
 API を起動する。この PoC は既定で同じ検証ユーザーから 50 回購入を試みるため、通常運用の user ID 単位レート制限（15 分に 10 回）へ先に到達しないよう、ローカル PoC 実行時だけ上限を試行数以上へ引き上げます。

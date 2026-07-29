@@ -23,7 +23,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-backend-staging
+  # backend rollout、DB migration、Gate A readinessを同一環境で直列化する。
+  group: backend-database-operation-staging
 
 jobs:
   deploy:
