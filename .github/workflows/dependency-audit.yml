@@ -31,10 +31,8 @@ concurrency:
 jobs:
   # caller job には name を付けない。job id にフォールバックさせることで、
   # callee側 job 名（Dependency Audit）との文字列重複を避ける（idp-golden-path#106参照）。
-  # idp-golden-path#131 のリリース前検証中は feature commit を固定参照する。
-  # 同 PR のマージと v1.4.0 / v1 更新後、この2箇所を @v1 に戻してからマージする。
   root:
-    uses: kmryst/idp-golden-path/.github/workflows/dependency-audit.yml@bdd0df3c6e6a4b7ffedaf6af5c125cb98963fd8b
+    uses: kmryst/idp-golden-path/.github/workflows/dependency-audit.yml@v1
     with:
       package-manager: npm
       working-directory: .
@@ -44,7 +42,7 @@ jobs:
       contents: read
 
   frontend:
-    uses: kmryst/idp-golden-path/.github/workflows/dependency-audit.yml@bdd0df3c6e6a4b7ffedaf6af5c125cb98963fd8b
+    uses: kmryst/idp-golden-path/.github/workflows/dependency-audit.yml@v1
     with:
       package-manager: npm
       working-directory: frontend
