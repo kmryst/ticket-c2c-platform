@@ -18,9 +18,9 @@ variable "allowed_security_group_ids" {
 }
 
 variable "engine_version" {
-  description = "Aurora PostgreSQL エンジンバージョン（min 0 ACU は 16.3+ が必要）"
+  description = "Aurora PostgreSQL エンジンバージョン（min 0 ACU は 16.3+ が必要）。16.6 は ap-northeast-1 で提供終了のため 16.14 へ更新（Issue #361）"
   type        = string
-  default     = "16.6"
+  default     = "16.14"
 }
 
 variable "database_name" {
