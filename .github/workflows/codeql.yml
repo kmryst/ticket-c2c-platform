@@ -30,7 +30,7 @@ jobs:
   # callee側 job 名（CodeQL Analyze (<language>)）との文字列重複を避ける
   # （idp-golden-path#106参照）。
   analyze:
-    uses: kmryst/idp-golden-path/.github/workflows/codeql.yml@v1
+    uses: kmryst/idp-golden-path/.github/workflows/codeql.yml@v1.3.1
     permissions:
       contents: read
       security-events: write
