@@ -63,6 +63,9 @@ jobs:
       - name: Validate Ticket Type readiness evidence parser
         run: bash scripts/deployment/ticket-type-readiness-evidence.spec.sh
 
+      - name: Validate ECS task container exit code lookup
+        run: bash scripts/deployment/ecs-task-container-exit-code.spec.sh
+
       - name: Validate populated Ticket Type migration
         run: npm run test:migration:ticket-type-expand
         env:

@@ -18,6 +18,8 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=scripts/deployment/ticket-type-readiness-evidence.sh
 source "${script_dir}/ticket-type-readiness-evidence.sh"
+# shellcheck source=scripts/deployment/ecs-task-container-exit-code.sh
+source "${script_dir}/ecs-task-container-exit-code.sh"
 
 usage="usage: run-db-migration.sh <cluster> <api-service> [task-definition-arn] [migration|ticket-type-readiness]"
 if (( $# > 4 )); then
@@ -128,7 +130,11 @@ task_stopped=true
 
 task_json=$(aws ecs describe-tasks --region "$region" \
 	--cluster "$cluster" --tasks "$task_arn" --query 'tasks[0]' --output json)
-exit_code=$(jq -r '.containers[0].exitCode // "none"' <<<"$task_json")
+# 配列indexではなくcontainer名一致でapp containerのexitCodeを取得する（Issue #363）。
+# describe-tasksのcontainers[]配列順序はcontainerDefinitions順序と一致する保証がなく、
+# task停止に巻き込まれて終了したADOT sidecar（essential=false）の終了コードを
+# 誤ってtask成否判定へ採用してしまう不具合があった。
+exit_code=$(ecs_task_container_exit_code "$task_json" "$container")
 stopped_reason=$(jq -r '.stoppedReason // "-"' <<<"$task_json")
 
 # ECS task のログを表示する（awslogs stream: <prefix>/<container>/<task-id>）
