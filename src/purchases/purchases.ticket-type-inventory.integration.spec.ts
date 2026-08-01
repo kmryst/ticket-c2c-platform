@@ -561,6 +561,13 @@ async function dropDatabaseWhenIdle(
           WHERE datname = $1`,
         [databaseName],
       );
+      // 異常系に限り best-effort で FORCE DROP し、一時 DB を残さないよう試みてから fail する。
+      // FORCE はこの失敗パスだけに限定し、正常系（session 0 確認済み）の決定性には影響しない。
+      try {
+        await adminClient.query(`DROP DATABASE ${quotedName} WITH (FORCE)`);
+      } catch {
+        // best-effort。DROP 失敗も下記の残存 session 情報付きエラーで表面化する。
+      }
       throw new Error(
         `一時 DB ${databaseName} の残存 session が ${deadlineMs}ms 以内に 0 になりませんでした。` +
           ` 残存 session: ${JSON.stringify(diagnostics.rows)}`,
