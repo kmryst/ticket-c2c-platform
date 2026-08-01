@@ -48,7 +48,7 @@ DB triggerはcontrol rowを`FOR SHARE`で読み、旧binaryのtransactionもmode
 
 Ticket Type更新後は、同じEventのType在庫を合計し、legacy `ticket_inventory`をEvent API用の互換集計として更新する。異なるTypeの並行更新では、Eventのlegacy rowを`FOR UPDATE`でmutexにしてからfresh statement snapshotで合計を読み直し、lock待ち前の古い集計による後勝ち上書きを防ぐ。
 
-transaction-local `ticket_c2c.inventory_mirror_origin`と`pg_trigger_depth()`を併用し、mirror writeだけをinactive側に許可する。GUCだけをclientが偽装してもtop-level writeは許可しない。Ticket Typeからlegacyへのmirrorが既存forward bridgeを再発火させた場合は、そのnested bounceをrow triggerでskipする。
+transaction-local `ticket_c2c.inventory_mirror_origin`と`pg_trigger_depth()`を併用し、mirror writeだけをinactive側に許可する。GUCだけをclientが偽装してもtop-level writeは許可しない。Ticket Typeからlegacyへのmirrorがforward bridgeを再発火させた場合は、#376の置換版bridgeがupsert前にnested bounceを止める。row triggerのskipはschema drift時のdefense-in-depthであり、readiness checkerは置換前後のfunction本文をexact hashで識別する。
 
 inactive側への非mirror `INSERT` / `UPDATE`、activation後の旧legacy writer、予期しないnested writeはfail closedで拒否する。inventory rowの直接`DELETE` / `TRUNCATE`はactive / inactiveを問わず許可しない。削除はEvent親rowの削除に伴う外部キーcascadeだけを許可し、在庫tableを独立したlifecycle ownerにしない。
 
@@ -68,6 +68,8 @@ Event一覧とOpenSearch未設定時のDB fallbackは`ticket_inventory`を読み
 - 同じkeyでTypeまたは数量が異なる場合は、在庫更新前にHTTP 409を返す。
 - unified unique indexは、advisory lockを持たない旧binaryとのrolling raceに対するDB最終ガードとする。
 
+rolling中の旧binaryは、既存rejected keyを在庫補充後にconfirmedへ変える旧semanticsを持つ。統合index適用後にこの経路へ入ると、transactionはunique violationでrollbackされて在庫を壊さないが、旧binaryが統合index名をrejected競合として認識できずHTTP 500を返し得る。Issue #378のcompatibility matrixとrunbookはこの一時的な失敗を既知状態として扱い、旧task 0件をactivation前提にする。
+
 Valkeyが`sold_out`を返しても、requestId付きrequestはPostgreSQL transactionへ進め、authoritativeなconfirmed / rejected結果を永続化する。これにより、同じpayloadの再送は永続rowをreplayし、異なるpayloadは在庫更新前に409となる。requestIdなしのrequestだけは従来どおりValkeyで早期拒否できる。Ticket Type単位のValkey namespace、reserve / release / syncとそのrace境界はIssue #389が所有する。
 
 Purchaseは`ticket_type_id`を常に記録し、applicationはEventとの所有関係を検証する。検証済み複合FK `(event_id, ticket_type_id) -> ticket_types(event_id, id)`も最終的に別EventのTypeを拒否する。
@@ -84,6 +86,8 @@ Issue #376 migrationのdownは、control modeが`legacy`で、各Eventが正確�
 
 `ticket_type` activation後はschema downを直接実行しない。まずIssue #378のcontrolled rollbackでlegacyへ戻す。複数Type在庫や非default Purchaseをlegacyで損失なく表現できない場合は、downをfail closedとし、forward fixまたはbackup/restoreを選ぶ。
 
+`ticket_type` modeで新規作成したEventは、初期Type versionとlegacy互換集計versionが一致しない場合がある。この場合もdownは全列parity検査でfail closedとなる。Issue #378は通常のmode rollbackとschema downを分離し、schema downが必要な場合はlegacy forward writeまたは明示的reconciliationでversion parityを回復してから再検査する。
+
 ## 根拠
 
 - PostgreSQL共有rowとadvisory lockは、ECS taskやapplication processをまたいで同じ切替境界になる。
@@ -97,7 +101,7 @@ Issue #376 migrationのdownは、control modeが`legacy`で、各Eventが正確�
 
 - triggerとtransaction-local markerはapplication SQLから見えにくい暗黙writeを増やす。
 - request-key lockは同じkeyのretryを直列化し、hash collision時は無関係なrequestも一時的に直列化する。
-- requestId付きrequestはValkeyの`sold_out`後もPostgreSQLへ進むため、requestIdなしの早期拒否よりDB負荷が高い。
+- requestId付きrequestはValkeyの`sold_out`後もPostgreSQLへ進むため、requestIdなしの早期拒否よりDB負荷が高い。keyを変え続けるrequestはrejected rowも増やすため、Issue #389でrejected insert rateとDB到達率を観測し、前段guardを再評価する。
 - inactive側の誤writeをavailabilityよりconsistency優先で拒否するため、mode不整合時は販売を停止し得る。
 - 在庫rowの直接削除を許可しないため、運用上の削除はEvent lifecycleまたは明示的なschema変更として扱う必要がある。
 - Type更新ごとにEvent合計を再計算するため、1 EventのType数が大幅に増えるとwrite costが上がる。
