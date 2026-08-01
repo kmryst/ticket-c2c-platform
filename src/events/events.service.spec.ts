@@ -10,6 +10,7 @@ import { DatabaseService } from '../database/database.service';
 import { InventoryCacheService } from '../cache/inventory-cache.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
 import { SearchService } from '../search/search.service';
+import { TicketTypeResolverService } from '../purchases/ticket-type-resolver.service';
 
 const EVENT_ID = '11111111-1111-4111-8111-111111111111';
 const CREATOR_ID = '22222222-2222-4222-8222-222222222222';
@@ -45,6 +46,7 @@ function createService(client: ReturnType<typeof createFakeDbClient>) {
   } as unknown as DatabaseService;
   const inventoryCache = {
     initCounter: jest.fn(async () => undefined),
+    initTicketTypeCounter: jest.fn(async () => undefined),
   } as unknown as InventoryCacheService;
   const domainEvents = {
     publish: jest.fn(async () => undefined),
@@ -52,8 +54,19 @@ function createService(client: ReturnType<typeof createFakeDbClient>) {
   const searchService = {
     search: jest.fn(async () => null),
   } as unknown as SearchService;
+  const resolver = {
+    resolvePrefilterPlan: jest.fn(),
+    prime: jest.fn(),
+    invalidate: jest.fn(),
+  } as unknown as TicketTypeResolverService;
 
-  return new EventsService(database, inventoryCache, domainEvents, searchService);
+  return new EventsService(
+    database,
+    inventoryCache,
+    domainEvents,
+    searchService,
+    resolver,
+  );
 }
 
 // validBody は parseCreateEventInput を通過する最小のイベント登録 body です。
@@ -123,6 +136,11 @@ describe('EventsService.createEvent', () => {
       { initCounter } as unknown as InventoryCacheService,
       { publish } as unknown as DomainEventsService,
       { search: jest.fn() } as unknown as SearchService,
+      {
+        resolvePrefilterPlan: jest.fn(),
+        prime: jest.fn(),
+        invalidate: jest.fn(),
+      } as unknown as TicketTypeResolverService,
     );
 
     await service.createEvent(validBody, CREATOR_ID);
@@ -171,5 +189,40 @@ describe('EventsService.createEvent', () => {
     expect(
       client.calls.some(({ text }) => text.includes('INSERT INTO ticket_inventory')),
     ).toBe(false);
+  });
+
+  it('ticket_type modeでは Type counter と mapping を初期化し、Event counter を作らない（Issue #389）', async () => {
+    const client = createFakeDbClient('ticket_type');
+    const database = {
+      connect: jest.fn(async () => client),
+    } as unknown as DatabaseService;
+    const initCounter = jest.fn(async () => undefined);
+    const initTicketTypeCounter = jest.fn(async () => undefined);
+    const prime = jest.fn();
+    const service = new EventsService(
+      database,
+      { initCounter, initTicketTypeCounter } as unknown as InventoryCacheService,
+      { publish: jest.fn(async () => undefined) } as unknown as DomainEventsService,
+      { search: jest.fn() } as unknown as SearchService,
+      {
+        resolvePrefilterPlan: jest.fn(),
+        prime,
+        invalidate: jest.fn(),
+      } as unknown as TicketTypeResolverService,
+    );
+
+    await service.createEvent(validBody, CREATOR_ID);
+
+    // commit 後に Type counter と mapping を初期化し、Event 単位 counter は作らない。
+    expect(initTicketTypeCounter).toHaveBeenCalledWith(
+      EVENT_ID,
+      TICKET_TYPE_ID,
+      validBody.totalQuantity,
+    );
+    expect(initCounter).not.toHaveBeenCalled();
+    expect(prime).toHaveBeenCalledWith(EVENT_ID, {
+      writerMode: 'ticket_type',
+      scope: { kind: 'single', ticketTypeId: TICKET_TYPE_ID },
+    });
   });
 });

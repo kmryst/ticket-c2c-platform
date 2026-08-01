@@ -10,6 +10,7 @@ import {
   readInventoryWriterMode,
 } from '../database/inventory-writer-control';
 import { InventoryCacheService } from '../cache/inventory-cache.service';
+import { TicketTypeResolverService } from '../purchases/ticket-type-resolver.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
 import {
   SearchService,
@@ -51,6 +52,9 @@ export class EventsService {
     private readonly inventoryCache: InventoryCacheService,
     private readonly domainEvents: DomainEventsService,
     private readonly searchService: SearchService,
+    // resolver は PurchasesService と共有する singleton を必須 DI で受ける。
+    // module 配線漏れは起動時に検出させる。
+    private readonly resolver: TicketTypeResolverService,
   ) {}
 
   // createEvent はイベントと初期在庫を 1 transaction で作成します。
@@ -62,12 +66,16 @@ export class EventsService {
     const client = await this.database.connect();
 
     let eventId: string;
+    // ticket_type mode で作った default Type を、commit 後の Valkey 初期化で使う。
+    let ticketTypeWriterMode = false;
+    let defaultTicketTypeId: string | null = null;
     try {
       await client.query('BEGIN');
 
       // Issue #376: first table access より前に shared barrier を取得し、DB共有modeを読む。
       await acquireSharedInventoryWriterBarrier(client);
       const writerMode = await readInventoryWriterMode(client);
+      ticketTypeWriterMode = writerMode === 'ticket_type';
 
       const inserted = await client.query<EventInsertRow>(
         `
@@ -111,6 +119,7 @@ export class EventsService {
             'new event does not have exactly one default ticket type',
           );
         }
+        defaultTicketTypeId = defaultType.rows[0].id;
         await client.query(
           `
             INSERT INTO ticket_type_inventory (
@@ -134,7 +143,22 @@ export class EventsService {
     }
 
     // 正本（Aurora）確定後に、前段フィルタと検索プロジェクションへ伝搬します。
-    await this.inventoryCache.initCounter(eventId, input.totalQuantity);
+    // commit 失敗時はここに到達しないため、Valkey へ何も作りません。
+    if (ticketTypeWriterMode && defaultTicketTypeId) {
+      // ticket_type mode: 作成した default Type の Valkey counter と mapping を初期化する。
+      await this.inventoryCache.initTicketTypeCounter(
+        eventId,
+        defaultTicketTypeId,
+        input.totalQuantity,
+      );
+      this.resolver.prime(eventId, {
+        writerMode: 'ticket_type',
+        scope: { kind: 'single', ticketTypeId: defaultTicketTypeId },
+      });
+    } else {
+      // legacy mode: 既存 Event 単位 counter 初期化を維持する。
+      await this.inventoryCache.initCounter(eventId, input.totalQuantity);
+    }
     await this.domainEvents.publish('EventListed', {
       eventId,
       title: input.title,

@@ -81,6 +81,15 @@ jobs:
         env:
           TEST_VALKEY_URL: redis://127.0.0.1:6379
 
+      # Issue #389 の「実 PostgreSQL + 実 Valkey 統合テスト」受け入れ条件を required check で
+      # 証明する。TEST_DATABASE_URL はこの focused step にだけ渡す（npm test 全体へ渡すと
+      # 無関係な DB suite が未準備の共有 DB 上で有効化されうるため）。
+      - name: Ticket Type Valkey inventory integration (実 PostgreSQL + 実 Valkey)
+        run: npx jest src/purchases/purchases.ticket-type-inventory.integration.spec.ts --runInBand
+        env:
+          TEST_DATABASE_URL: postgresql://ticket_poc:ticket_poc_password@127.0.0.1:5432/ticket_poc
+          TEST_VALKEY_URL: redis://127.0.0.1:6379
+
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest

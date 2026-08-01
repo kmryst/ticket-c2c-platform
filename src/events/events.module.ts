@@ -8,6 +8,7 @@ import { DatabaseModule } from '../database/database.module';
 import { CacheModule } from '../cache/cache.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { SearchModule } from '../search/search.module';
+import { TicketTypeResolverModule } from '../purchases/ticket-type-resolver.module';
 import { EventsController } from './events.controller';
 import { EventsService } from './events.service';
 
@@ -18,6 +19,7 @@ import { EventsService } from './events.service';
     CacheModule,
     MessagingModule,
     SearchModule,
+    TicketTypeResolverModule,
   ],
   controllers: [EventsController],
   providers: [EventsService],

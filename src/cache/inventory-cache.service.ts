@@ -23,6 +23,23 @@ import { emitMetric } from '../observability/emf';
 // - unknown: Valkey 無効・カウンタ不在・エラー（判定を DB に委ねる）
 export type ReserveOutcome = 'reserved' | 'sold_out' | 'unknown';
 
+// TicketTypeReserveResult は Ticket Type 単位 reserve の結果です（Issue #389）。
+// reserve と CAS revision の取得を 1 つの Lua script で原子的に行うため、
+// outcome と revision を一緒に返します。reserve 後に別の getCounterVersion を
+// 呼ぶ設計だと、その隙間に別 request の reserve / release が割り込んで
+// 古い revision で sync してしまうためです。
+// - outcome: reserved / sold_out / unknown（Event 単位 reserve と同義）
+// - revision: reserved 時に減算後の CAS revision（sync に使う）。
+//   sold_out / unknown / Valkey 障害では null（sync できないことを表す）。
+//
+// この revision は Valkey 内でカウンタ変更回数を数える CAS 用の値であり、
+// #376 が PostgreSQL transaction から返す inventory version（在庫行の version 列）
+// とは別物です。混同しないよう型と名前を分けています。
+export interface TicketTypeReserveResult {
+  outcome: ReserveOutcome;
+  revision: string | null;
+}
+
 // REQUEST_SEEN_TTL_SECONDS は「DB へ確定済みの requestId」マーカーの保持期間です。
 // 売り切れ後の再送をどこまで idempotent replay として救済するかの窓で、
 // クライアントの現実的なリトライ間隔（秒〜分）に対して十分長い 24 時間とします。
@@ -74,6 +91,71 @@ if version == false then
   version = '0'
 end
 if version ~= ARGV[2] then
+  return 'skipped'
+end
+redis.call('SET', KEYS[1], ARGV[1])
+redis.call('INCR', KEYS[2])
+return 'synced'
+`;
+
+// --- Ticket Type 単位 namespace（Issue #389） ---
+//
+// Event 単位 key（inventory:<eventId> / inventory:<eventId>:v）は変更・削除しません。
+// Ticket Type 用に衝突しない新 namespace を追加します。
+// counter と revision は同じ Lua script で扱うため、Redis Cluster でも同じ hash slot に
+// 乗るよう同じ hash tag `{<eventId>:<ticketTypeId>}` を使います。
+//
+// - inventory:ticket-type:{<eventId>:<ticketTypeId>}:remaining
+// - inventory:ticket-type:{<eventId>:<ticketTypeId>}:revision
+
+// TICKET_TYPE_INIT_SCRIPT は明示的な counter 初期化です。
+// #378 の seed か、EventsService が ticket_type mode で作った default Type だけが呼びます。
+const TICKET_TYPE_INIT_SCRIPT = `
+redis.call('SET', KEYS[1], ARGV[1])
+redis.call('INCR', KEYS[2])
+return 'initialized'
+`;
+
+// TICKET_TYPE_RESERVE_SCRIPT は「存在確認 → 在庫比較 → 減算 → revision 更新 →
+// race-safe な revision 取得」を 1 script で原子的に行います。
+// reserved 時だけ減算後の revision を返します。counter 不在は unknown（fail-open）とし、
+// キーを作りません。sold_out は減算しないため revision を返しません。
+const TICKET_TYPE_RESERVE_SCRIPT = `
+local current = redis.call('GET', KEYS[1])
+if current == false then
+  return {'unknown'}
+end
+if tonumber(current) < tonumber(ARGV[1]) then
+  return {'sold_out'}
+end
+redis.call('DECRBY', KEYS[1], ARGV[1])
+local revision = redis.call('INCR', KEYS[2])
+return {'reserved', tostring(revision)}
+`;
+
+// TICKET_TYPE_RELEASE_SCRIPT は reserve の補償です。
+// counter 不在時は何もしません（素の INCRBY だとキーを 0 起点で捏造するため）。
+const TICKET_TYPE_RELEASE_SCRIPT = `
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 'skipped'
+end
+redis.call('INCRBY', KEYS[1], ARGV[1])
+redis.call('INCR', KEYS[2])
+return 'released'
+`;
+
+// TICKET_TYPE_SYNC_SCRIPT は DB の Ticket Type 残数による CAS 上書きです。
+// counter 不在時はキーを作らず skip します（未 seed の Type を暗黙 activation しない）。
+// ARGV[2]（DB 判定前に控えた revision）と現在の revision が一致する場合だけ SET します。
+const TICKET_TYPE_SYNC_SCRIPT = `
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 'skipped'
+end
+local revision = redis.call('GET', KEYS[2])
+if revision == false then
+  revision = '0'
+end
+if revision ~= ARGV[2] then
   return 'skipped'
 end
 redis.call('SET', KEYS[1], ARGV[1])
@@ -264,6 +346,157 @@ export class InventoryCacheService implements OnModuleDestroy {
     }
   }
 
+  // --- Ticket Type 単位 API（Issue #389） ---
+
+  // initTicketTypeCounter は Ticket Type 単位 counter を明示的に初期化します。
+  // 呼び出し元は #378 の seed か、ticket_type mode の EventsService だけです。
+  // merge / artifact deploy だけで新 counter を暗黙 activation しないため、
+  // reserve / release / sync はこのメソッド以外で counter を作りません。
+  async initTicketTypeCounter(
+    eventId: string,
+    ticketTypeId: string,
+    quantity: number,
+  ): Promise<void> {
+    if (!this.client) {
+      return;
+    }
+    try {
+      await this.client.eval(
+        TICKET_TYPE_INIT_SCRIPT,
+        2,
+        this.ticketTypeKey(eventId, ticketTypeId),
+        this.ticketTypeRevisionKey(eventId, ticketTypeId),
+        String(quantity),
+      );
+    } catch (error) {
+      console.error('Valkey initTicketTypeCounter failed:', error);
+      emitMetric('ValkeyFailOpen', 1, 'Count', {
+        Operation: 'initTicketTypeCounter',
+      });
+    }
+  }
+
+  // reserveTicketType は Ticket Type 単位の前段フィルタ本体です。
+  // reserved 時は減算後の CAS revision を同じ script で取得して返します。
+  async reserveTicketType(
+    eventId: string,
+    ticketTypeId: string,
+    quantity: number,
+  ): Promise<TicketTypeReserveResult> {
+    if (!this.client) {
+      return { outcome: 'unknown', revision: null };
+    }
+    try {
+      const raw = (await this.client.eval(
+        TICKET_TYPE_RESERVE_SCRIPT,
+        2,
+        this.ticketTypeKey(eventId, ticketTypeId),
+        this.ticketTypeRevisionKey(eventId, ticketTypeId),
+        String(quantity),
+      )) as [string, string?];
+      const outcome = raw[0] as ReserveOutcome;
+      return {
+        outcome,
+        revision: outcome === 'reserved' ? (raw[1] ?? null) : null,
+      };
+    } catch (error) {
+      // Valkey 障害で購入を止めない。正確性は PostgreSQL の条件付き更新が保証します。
+      console.error('Valkey reserveTicketType failed:', error);
+      emitMetric('ValkeyFailOpen', 1, 'Count', {
+        Operation: 'reserveTicketType',
+      });
+      return { outcome: 'unknown', revision: null };
+    }
+  }
+
+  // releaseTicketType は reserve 後に DB 確定へ進めなかった場合の補償です。
+  // counter 不在時は何もしません（未 seed の Type を捏造しない）。
+  // 戻り値は補償が失敗しなかったか（true = released / skipped、false = Valkey error）。
+  // Valkey 無効（前段フィルタ自体を使っていない）も補償対象がないため true を返します。
+  // 呼び出し元は false のとき compensation failure を観測します。
+  async releaseTicketType(
+    eventId: string,
+    ticketTypeId: string,
+    quantity: number,
+  ): Promise<boolean> {
+    if (!this.client) {
+      return true;
+    }
+    try {
+      await this.client.eval(
+        TICKET_TYPE_RELEASE_SCRIPT,
+        2,
+        this.ticketTypeKey(eventId, ticketTypeId),
+        this.ticketTypeRevisionKey(eventId, ticketTypeId),
+        String(quantity),
+      );
+      return true;
+    } catch (error) {
+      console.error('Valkey releaseTicketType failed:', error);
+      emitMetric('ValkeyFailOpen', 1, 'Count', {
+        Operation: 'releaseTicketType',
+      });
+      return false;
+    }
+  }
+
+  // getTicketTypeCounterRevision は CAS sync のガードに使う現在の revision を返します。
+  // reserve を伴わない fail-open confirmed の drift 補正で使います（reserve 済みの
+  // 場合は reserveTicketType が返す revision を使い、別途この呼び出しはしません）。
+  // null は Valkey 無効・エラーを表し、その場合 sync は行えません（fail-open）。
+  async getTicketTypeCounterRevision(
+    eventId: string,
+    ticketTypeId: string,
+  ): Promise<string | null> {
+    if (!this.client) {
+      return null;
+    }
+    try {
+      return (
+        (await this.client.get(
+          this.ticketTypeRevisionKey(eventId, ticketTypeId),
+        )) ?? '0'
+      );
+    } catch (error) {
+      console.error('Valkey getTicketTypeCounterRevision failed:', error);
+      emitMetric('ValkeyFailOpen', 1, 'Count', {
+        Operation: 'getTicketTypeCounterRevision',
+      });
+      return null;
+    }
+  }
+
+  // syncTicketTypeCounter は DB の Ticket Type 残数を正として counter を CAS 補正します。
+  // counter 不在時はキーを作らず false を返します。expectedRevision から変化がない
+  // 場合だけ上書きし、並行する reserve / release の効果を古い DB 値で消しません。
+  async syncTicketTypeCounter(
+    eventId: string,
+    ticketTypeId: string,
+    remaining: number,
+    expectedRevision: string,
+  ): Promise<boolean> {
+    if (!this.client) {
+      return false;
+    }
+    try {
+      const outcome = await this.client.eval(
+        TICKET_TYPE_SYNC_SCRIPT,
+        2,
+        this.ticketTypeKey(eventId, ticketTypeId),
+        this.ticketTypeRevisionKey(eventId, ticketTypeId),
+        String(remaining),
+        expectedRevision,
+      );
+      return outcome === 'synced';
+    } catch (error) {
+      console.error('Valkey syncTicketTypeCounter failed:', error);
+      emitMetric('ValkeyFailOpen', 1, 'Count', {
+        Operation: 'syncTicketTypeCounter',
+      });
+      return false;
+    }
+  }
+
   async onModuleDestroy() {
     if (this.client) {
       // quit はサーバー応答を待つため、落ちている場合に備えて disconnect で確実に閉じます。
@@ -273,6 +506,17 @@ export class InventoryCacheService implements OnModuleDestroy {
 
   private key(eventId: string): string {
     return `inventory:${eventId}`;
+  }
+
+  // ticketTypeKey / ticketTypeRevisionKey は Ticket Type 単位 namespace のキーです。
+  // hash tag `{<eventId>:<ticketTypeId>}` を共有し、counter と revision を
+  // Redis Cluster でも同じ hash slot に置きます（同一 Lua script で両方に触れるため）。
+  private ticketTypeKey(eventId: string, ticketTypeId: string): string {
+    return `inventory:ticket-type:{${eventId}:${ticketTypeId}}:remaining`;
+  }
+
+  private ticketTypeRevisionKey(eventId: string, ticketTypeId: string): string {
+    return `inventory:ticket-type:{${eventId}:${ticketTypeId}}:revision`;
   }
 
   // versionKey はカウンタ変更回数を数える version キーです。syncCounter の CAS ガードに使います。
