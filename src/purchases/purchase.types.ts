@@ -33,6 +33,9 @@ export interface ParsedPurchaseInput {
   quantity: number;
   // requestId は同じリクエストの再送を見分けるための任意の idempotency key です。
   requestId?: string;
+  // ticketTypeId は #376 compatibility writer の内部選択値です。
+  // HTTP request field として公開するのは #379 が所有するため、controller はまだ設定しません。
+  ticketTypeId?: string;
 }
 
 // PurchaseResult は controller からクライアントへ返す購入結果です。

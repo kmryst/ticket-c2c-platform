@@ -5,6 +5,10 @@
 
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
+import {
+  acquireSharedInventoryWriterBarrier,
+  readInventoryWriterMode,
+} from '../database/inventory-writer-control';
 import { InventoryCacheService } from '../cache/inventory-cache.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
 import {
@@ -23,6 +27,10 @@ const POSTGRES_INT4_MAX = 2_147_483_647;
 interface EventInsertRow {
   id: string;
   created_at: string;
+}
+
+interface DefaultTicketTypeRow {
+  id: string;
 }
 
 interface EventListRow {
@@ -57,6 +65,10 @@ export class EventsService {
     try {
       await client.query('BEGIN');
 
+      // Issue #376: first table access より前に shared barrier を取得し、DB共有modeを読む。
+      await acquireSharedInventoryWriterBarrier(client);
+      const writerMode = await readInventoryWriterMode(client);
+
       const inserted = await client.query<EventInsertRow>(
         `
           INSERT INTO events (title, event_type, starts_at, location_latitude, location_longitude, created_by)
@@ -74,13 +86,44 @@ export class EventsService {
       );
       eventId = inserted.rows[0].id;
 
-      await client.query(
-        `
-          INSERT INTO ticket_inventory (event_id, total_quantity, remaining_quantity)
-          VALUES ($1, $2, $2)
-        `,
-        [eventId, input.totalQuantity],
-      );
+      if (writerMode === 'legacy') {
+        await client.query(
+          `
+            INSERT INTO ticket_inventory (event_id, total_quantity, remaining_quantity)
+            VALUES ($1, $2, $2)
+          `,
+          [eventId, input.totalQuantity],
+        );
+      } else {
+        // events の #336 trigger が同じtransactionで作った default Typeをactive writerにする。
+        const defaultType = await client.query<DefaultTicketTypeRow>(
+          `
+            SELECT id
+            FROM ticket_types
+            WHERE event_id = $1
+              AND is_default
+            FOR SHARE
+          `,
+          [eventId],
+        );
+        if (defaultType.rowCount !== 1) {
+          throw new Error(
+            'new event does not have exactly one default ticket type',
+          );
+        }
+        await client.query(
+          `
+            INSERT INTO ticket_type_inventory (
+              ticket_type_id,
+              event_id,
+              total_quantity,
+              remaining_quantity
+            )
+            VALUES ($1, $2, $3, $3)
+          `,
+          [defaultType.rows[0].id, eventId, input.totalQuantity],
+        );
+      }
 
       await client.query('COMMIT');
     } catch (error) {

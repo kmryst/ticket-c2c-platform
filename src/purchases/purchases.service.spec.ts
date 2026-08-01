@@ -14,12 +14,15 @@ import { DomainEventsService } from '../messaging/domain-events.service';
 const EVENT_ID = '11111111-1111-4111-8111-111111111111';
 const BUYER_ID = '22222222-2222-4222-8222-222222222222';
 const PURCHASE_ID = '33333333-3333-4333-8333-333333333333';
+const TICKET_TYPE_ID = '44444444-4444-4444-8444-444444444444';
+const OTHER_TICKET_TYPE_ID = '55555555-5555-4555-8555-555555555555';
 
 // 既存 confirmed row の再送応答（DB からの読み出し結果）です。
 const existingConfirmedRow = {
   purchase_id: PURCHASE_ID,
   event_id: EVENT_ID,
   buyer_id: BUYER_ID,
+  ticket_type_id: TICKET_TYPE_ID,
   quantity: 2,
   status: 'confirmed' as const,
   rejection_reason: null,
@@ -36,17 +39,33 @@ interface FakeDbBehavior {
   remainingAfterUpdate?: number;
   // remainingOnReject: UPDATE 失敗時に SELECT で読む現在の残在庫。
   remainingOnReject?: number;
+  // compatibilityRemaining: Event単位互換在庫として読む残数。
+  compatibilityRemaining?: number;
+  writerMode?: 'legacy' | 'ticket_type';
+  ticketTypeIds?: string[];
 }
 
 // createFakeDbClient は購入 transaction の SQL 発行順を substring で見分ける fake PoolClient です。
 function createFakeDbClient(behavior: FakeDbBehavior) {
   const queries: string[] = [];
-  const query = jest.fn(async (text: string) => {
+  const query = jest.fn(async (text: string, values?: unknown[]) => {
     queries.push(text);
+    if (text.includes('FROM inventory_writer_control')) {
+      return {
+        rowCount: 1,
+        rows: [{ writer_mode: behavior.writerMode ?? 'legacy' }],
+      };
+    }
     if (text.includes('SELECT id FROM events')) {
       return { rowCount: 1, rows: [{ id: EVENT_ID }] };
     }
-    if (text.includes("status = 'confirmed'")) {
+    if (text.includes('FROM ticket_types')) {
+      const ids = text.includes('AND id = $2')
+        ? [String(values?.[1])]
+        : (behavior.ticketTypeIds ?? [TICKET_TYPE_ID]);
+      return { rowCount: ids.length, rows: ids.map((id) => ({ id })) };
+    }
+    if (text.includes('FROM purchases')) {
       return behavior.existingConfirmed
         ? { rowCount: 1, rows: [existingConfirmedRow] }
         : { rowCount: 0, rows: [] };
@@ -56,22 +75,74 @@ function createFakeDbClient(behavior: FakeDbBehavior) {
         ? {
             rowCount: 1,
             rows: [
-              { remaining_quantity: behavior.remainingAfterUpdate ?? 0 },
+              {
+                remaining_quantity: behavior.remainingAfterUpdate ?? 0,
+                version: 1,
+              },
             ],
           }
         : { rowCount: 0, rows: [] };
     }
-    if (text.includes('SELECT remaining_quantity FROM ticket_inventory')) {
+    if (text.includes('UPDATE ticket_type_inventory')) {
+      return behavior.inventoryUpdated
+        ? {
+            rowCount: 1,
+            rows: [
+              {
+                remaining_quantity: behavior.remainingAfterUpdate ?? 0,
+                version: 1,
+              },
+            ],
+          }
+        : { rowCount: 0, rows: [] };
+    }
+    if (
+      text.includes('SELECT remaining_quantity, version') &&
+      text.includes('FROM ticket_inventory')
+    ) {
       return {
         rowCount: 1,
-        rows: [{ remaining_quantity: behavior.remainingOnReject ?? 0 }],
+        rows: [
+          {
+            remaining_quantity: behavior.remainingOnReject ?? 0,
+            version: 0,
+          },
+        ],
       };
-    }
-    if (text.includes("status = 'rejected'")) {
-      return { rowCount: 0, rows: [] };
     }
     if (text.includes('INSERT INTO purchases')) {
       return { rowCount: 1, rows: [{ id: PURCHASE_ID }] };
+    }
+    if (
+      text.includes('SELECT remaining_quantity, version') &&
+      text.includes('FROM ticket_type_inventory')
+    ) {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            remaining_quantity: behavior.remainingOnReject ?? 0,
+            version: 0,
+          },
+        ],
+      };
+    }
+    if (
+      text.includes('SELECT remaining_quantity') &&
+      text.includes('FROM ticket_inventory')
+    ) {
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            remaining_quantity:
+              behavior.compatibilityRemaining ??
+              behavior.remainingAfterUpdate ??
+              behavior.remainingOnReject ??
+              0,
+          },
+        ],
+      };
     }
     // BEGIN / COMMIT / ROLLBACK / FOR SHARE 以外は届かない想定です。
     return { rowCount: 0, rows: [] };
@@ -125,33 +196,60 @@ describe('PurchasesService の前段フィルタ分岐（M-1）', () => {
     expect(database.connect).not.toHaveBeenCalled();
   });
 
-  it('未知の requestId + sold_out は前段拒否し DB に到達しない（バイパス封鎖）', async () => {
-    const { service, database, inventoryCache } = createService({
-      reserveOutcome: 'sold_out',
-      wasRequestSeen: false,
-    });
-
-    // 旧実装では requestId を付けるだけで前段フィルタを素通りして DB へ到達できた。
-    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
-      quantity: 2,
-      requestId: 'random-flood-request-id',
-    });
-
-    expect(result.status).toBe('rejected');
-    expect(result.rejectionReason).toBe('sold_out_precheck');
-    expect(inventoryCache.reserve).toHaveBeenCalledWith(EVENT_ID, 2);
-    expect(inventoryCache.wasRequestSeen).toHaveBeenCalledWith(
-      BUYER_ID,
-      EVENT_ID,
-      'random-flood-request-id',
-    );
-    expect(database.connect).not.toHaveBeenCalled();
-  });
-
-  it('確定済みマーカーのある requestId + sold_out は DB 判定へ流し、元の confirmed を返す（idempotent replay）', async () => {
+  it('requestId + sold_out はmarkerなしでもDB判定へ進み結果を永続化する', async () => {
     const { service, database, inventoryCache, dbClient } = createService({
       reserveOutcome: 'sold_out',
-      wasRequestSeen: true,
+      wasRequestSeen: false,
+      db: {
+        inventoryUpdated: true,
+        remainingAfterUpdate: 0,
+        compatibilityRemaining: 0,
+      },
+    });
+
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 2,
+      requestId: 'db-backed-request-id',
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(inventoryCache.reserve).toHaveBeenCalledWith(EVENT_ID, 2);
+    expect(inventoryCache.wasRequestSeen).not.toHaveBeenCalled();
+    expect(database.connect).toHaveBeenCalled();
+    expect(
+      dbClient.queries.some((query) => query.includes('INSERT INTO purchases')),
+    ).toBe(true);
+  });
+
+  it('requestId + sold_out のDB在庫不足もsold_out_precheckではなくrejected rowを保存する', async () => {
+    const { service, database, dbClient } = createService({
+      reserveOutcome: 'sold_out',
+      db: {
+        inventoryUpdated: false,
+        remainingOnReject: 0,
+        compatibilityRemaining: 0,
+      },
+    });
+
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 2,
+      requestId: 'db-backed-rejection',
+    });
+
+    expect(result).toMatchObject({
+      purchaseId: PURCHASE_ID,
+      status: 'rejected',
+      rejectionReason: 'insufficient_inventory',
+    });
+    expect(database.connect).toHaveBeenCalled();
+    expect(
+      dbClient.queries.some((query) => query.includes('INSERT INTO purchases')),
+    ).toBe(true);
+  });
+
+  it('requestId + sold_out はValkey markerを読まず、DBから元のconfirmedを返す', async () => {
+    const { service, database, inventoryCache, dbClient } = createService({
+      reserveOutcome: 'sold_out',
       db: { existingConfirmed: true },
     });
 
@@ -164,6 +262,7 @@ describe('PurchasesService の前段フィルタ分岐（M-1）', () => {
     expect(result.status).toBe('confirmed');
     expect(result.purchaseId).toBe(PURCHASE_ID);
     expect(result.remainingQuantity).toBe(5);
+    expect(inventoryCache.wasRequestSeen).not.toHaveBeenCalled();
     // replay は在庫を消費しないため、新しい INSERT / UPDATE は発行されない。
     expect(
       dbClient.queries.some((q) => q.includes('UPDATE ticket_inventory')),
@@ -300,5 +399,149 @@ describe('PurchasesService の認証統合（Issue #135）', () => {
       service.createPurchase(EVENT_ID, 'not-a-uuid', { quantity: 1 }),
     ).rejects.toMatchObject({ status: 400 });
     expect(database.connect).not.toHaveBeenCalled();
+  });
+});
+
+describe('PurchasesService の compatibility writer（Issue #376）', () => {
+  it('table access前のlock順を shared barrier -> requestId lock に固定する', async () => {
+    const { service, dbClient } = createService({
+      reserveOutcome: 'reserved',
+      db: { inventoryUpdated: true, remainingAfterUpdate: 8 },
+    });
+
+    await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 2,
+      requestId: 'lock-order',
+    });
+
+    const sharedBarrier = dbClient.queries.findIndex((query) =>
+      query.includes('pg_advisory_xact_lock_shared'),
+    );
+    const requestLock = dbClient.queries.findIndex((query) =>
+      query.includes('hashtextextended'),
+    );
+    const firstTable = dbClient.queries.findIndex((query) =>
+      query.includes('FROM inventory_writer_control'),
+    );
+    expect(sharedBarrier).toBeGreaterThan(-1);
+    expect(requestLock).toBeGreaterThan(sharedBarrier);
+    expect(firstTable).toBeGreaterThan(requestLock);
+  });
+
+  it('ticket_type modeではType在庫を更新しpublic resultと旧eventにはEvent集計を返す', async () => {
+    const { service, dbClient, domainEvents } = createService({
+      reserveOutcome: 'unknown',
+      db: {
+        writerMode: 'ticket_type',
+        inventoryUpdated: true,
+        remainingAfterUpdate: 6,
+        compatibilityRemaining: 9,
+      },
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 2 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    const update = dbClient.queries.find((query) =>
+      query.includes('UPDATE ticket_type_inventory'),
+    );
+    expect(update).toContain('ticket_type_id = $2');
+    expect(update).toContain('remaining_quantity >= $3');
+    expect(update).toContain('RETURNING remaining_quantity, version');
+    expect(result.remainingQuantity).toBe(9);
+    expect(result).not.toHaveProperty('ticketTypeId');
+    expect(result).not.toHaveProperty('inventoryVersion');
+    expect(domainEvents.publish).toHaveBeenCalledWith(
+      'TicketPurchased',
+      expect.objectContaining({ remainingQuantity: 9 }),
+    );
+    expect(domainEvents.publish).toHaveBeenCalledWith('InventoryChanged', {
+      eventId: EVENT_ID,
+      remainingQuantity: 9,
+    });
+  });
+
+  it('ticketTypeId省略の既存keyは現在Typeが複数でも保存済み結果をreplayする', async () => {
+    const { service, dbClient } = createService({
+      reserveOutcome: 'unknown',
+      db: {
+        writerMode: 'ticket_type',
+        existingConfirmed: true,
+        ticketTypeIds: [TICKET_TYPE_ID, OTHER_TICKET_TYPE_ID],
+      },
+    });
+
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 2,
+      requestId: 'omitted-type-replay',
+    });
+
+    expect(result.purchaseId).toBe(PURCHASE_ID);
+    expect(result.status).toBe('confirmed');
+    expect(
+      dbClient.queries.some((query) => query.includes('FROM ticket_types')),
+    ).toBe(false);
+  });
+
+  it('同じrequestIdでquantityが異なる場合は在庫更新前に409にする', async () => {
+    const { service, dbClient } = createService({
+      reserveOutcome: 'reserved',
+      db: { existingConfirmed: true },
+    });
+
+    await expect(
+      service.createPurchase(EVENT_ID, BUYER_ID, {
+        quantity: 1,
+        requestId: 'payload-conflict',
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(
+      dbClient.queries.some((query) => query.includes('UPDATE ticket_inventory')),
+    ).toBe(false);
+  });
+
+  it('同じrequestIdでticketTypeIdが異なる場合も在庫更新前に409にする', async () => {
+    const { service, dbClient } = createService({
+      reserveOutcome: 'reserved',
+      db: {
+        writerMode: 'ticket_type',
+        existingConfirmed: true,
+      },
+    });
+
+    await expect(
+      service.createPurchase(
+        EVENT_ID,
+        BUYER_ID,
+        { quantity: 2, requestId: 'type-conflict' },
+        { ticketTypeId: OTHER_TICKET_TYPE_ID },
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(
+      dbClient.queries.some((query) =>
+        query.includes('UPDATE ticket_type_inventory'),
+      ),
+    ).toBe(false);
+    expect(
+      dbClient.queries.some((query) => query.includes('FROM ticket_types')),
+    ).toBe(false);
+  });
+
+  it('confirmed replayではdomain eventを再発行しない', async () => {
+    const { service, domainEvents } = createService({
+      reserveOutcome: 'unknown',
+      db: { existingConfirmed: true },
+    });
+
+    await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 2,
+      requestId: 'no-republish',
+    });
+
+    expect(domainEvents.publish).not.toHaveBeenCalled();
   });
 });
