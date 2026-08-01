@@ -11,6 +11,7 @@ import { InventoryCacheService } from '../../cache/inventory-cache.service';
 import { DatabaseService } from '../database.service';
 import { DomainEventsService } from '../../messaging/domain-events.service';
 import { PurchasesService } from '../../purchases/purchases.service';
+import { TicketTypeResolverService } from '../../purchases/ticket-type-resolver.service';
 import { EventsService } from '../../events/events.service';
 import { SearchService } from '../../search/search.service';
 import { checkTicketTypeExpandReadiness } from '../ticket-type-expand-readiness';
@@ -603,8 +604,14 @@ describeWithPostgres(
 
         const pool = new Pool({ connectionString: databaseUrl, max: 10 });
         const publish = jest.fn(async () => undefined);
+        // PurchasesService と EventsService は共有 resolver singleton を明示注入する
+        // （本番と同じ DI 挙動。Issue #389 指摘7）。
+        const sharedDatabase = {
+          connect: () => pool.connect(),
+        } as unknown as DatabaseService;
+        const resolver = new TicketTypeResolverService(sharedDatabase);
         const service = new PurchasesService(
-          { connect: () => pool.connect() } as unknown as DatabaseService,
+          sharedDatabase,
           {
             reserve: jest.fn(async () => 'unknown'),
             release: jest.fn(async () => undefined),
@@ -624,16 +631,18 @@ describeWithPostgres(
             initTicketTypeCounter: jest.fn(async () => undefined),
           } as unknown as InventoryCacheService,
           { publish } as unknown as DomainEventsService,
+          resolver,
         );
 
         const eventsService = new EventsService(
-          { connect: () => pool.connect() } as unknown as DatabaseService,
+          sharedDatabase,
           {
             initCounter: jest.fn(async () => undefined),
             initTicketTypeCounter: jest.fn(async () => undefined),
           } as unknown as InventoryCacheService,
           { publish } as unknown as DomainEventsService,
           { search: jest.fn(async () => null) } as unknown as SearchService,
+          resolver,
         );
 
         try {

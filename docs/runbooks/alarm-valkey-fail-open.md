@@ -62,7 +62,12 @@ Valkey で即時終了させず、authoritative な冪等性判定のために P
 - **rejected insert rate**: `PurchaseRejectedPersisted`（Count、Service=api）。新規 rejected row を
   DB へ永続化した回数（replay は含まない）。requestId を変え続ける traffic の増加兆候。
 - 併せて `aurora-connections-high` / `aurora-cpu-high` と、`ValkeyFailOpen`（Ticket Type 単位操作
-  を含む）、`TicketTypeScopeMismatch`、`CompensationFailure` を確認する。
+  を含む）、`TicketTypeScopeMismatch`、`WriterModeMismatch`、`PrefilterBypass`、`CompensationFailure`
+  を確認する。
+- `PurchaseSoldOutToPostgres` / `PurchaseRejectedPersisted` は legacy / ticket_type の両 writer mode
+  経路で同じ意味で発行される（どちらの経路が有効でも DB 到達率と rejected insert rate を一貫して
+  観測できる）。`WriterModeMismatch` の増加は activation / rollback 途中の writer mode drift、
+  `PrefilterBypass` の増加は resolver 到達不能を示す。
 
 ### 前段 guard の再検討条件
 

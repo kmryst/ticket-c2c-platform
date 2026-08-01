@@ -3,7 +3,7 @@
 // 登録は Aurora（正本）へ書き、Valkey カウンタ初期化と EventListed 発行で読み取り系へ伝搬します。
 // 検索は OpenSearch を読み、未設定時（ローカル）は DB フォールバックします。
 
-import { BadRequestException, Injectable, Optional } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import {
   acquireSharedInventoryWriterBarrier,
@@ -47,19 +47,15 @@ interface EventListRow {
 
 @Injectable()
 export class EventsService {
-  private readonly resolver: TicketTypeResolverService;
-
   constructor(
     private readonly database: DatabaseService,
     private readonly inventoryCache: InventoryCacheService,
     private readonly domainEvents: DomainEventsService,
     private readonly searchService: SearchService,
-    // resolver は DI で共有 singleton を注入する。未注入（一部の単体テスト）では
-    // database から fallback で生成する。
-    @Optional() resolver?: TicketTypeResolverService,
-  ) {
-    this.resolver = resolver ?? new TicketTypeResolverService(database);
-  }
+    // resolver は PurchasesService と共有する singleton を必須 DI で受ける。
+    // module 配線漏れは起動時に検出させる。
+    private readonly resolver: TicketTypeResolverService,
+  ) {}
 
   // createEvent はイベントと初期在庫を 1 transaction で作成します。
   // createdBy は JwtAuthGuard 検証済みトークンの sub claim（users.id）です（L-10、Issue #194）。

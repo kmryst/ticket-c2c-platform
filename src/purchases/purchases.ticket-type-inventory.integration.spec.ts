@@ -20,6 +20,7 @@ import { InventoryCacheService } from '../cache/inventory-cache.service';
 import { DatabaseService } from '../database/database.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
 import { PurchasesService } from './purchases.service';
+import { TicketTypeResolverService } from './ticket-type-resolver.service';
 import { Baseline1751594400000 } from '../database/migrations/1751594400000-baseline';
 import { AddUsers1783251707172 } from '../database/migrations/1783251707172-add-users';
 import { AddPurchasesBuyerFk1783252676631 } from '../database/migrations/1783252676631-add-purchases-buyer-fk';
@@ -76,6 +77,7 @@ describeWithPostgres(
         dataSource: DataSource;
         service: PurchasesService;
         cache: InventoryCacheService;
+        resolver: TicketTypeResolverService;
         seedEvent: (perType: number[]) => Promise<{
           eventId: string;
           typeIds: string[];
@@ -86,6 +88,7 @@ describeWithPostgres(
           eventId: string,
           ticketTypeId: string,
         ) => Promise<number | null>;
+        setWriterMode: (mode: 'legacy' | 'ticket_type') => Promise<void>;
       }) => Promise<T>,
     ): Promise<T> {
       const databaseName = [
@@ -115,10 +118,15 @@ describeWithPostgres(
         await dataSource.initialize();
         await dataSource.runMigrations({ transaction: 'each' });
 
+        const database = {
+          connect: () => pool.connect(),
+        } as unknown as DatabaseService;
+        const resolver = new TicketTypeResolverService(database);
         const service = new PurchasesService(
-          { connect: () => pool.connect() } as unknown as DatabaseService,
+          database,
           cache,
           { publish: jest.fn(async () => undefined) } as unknown as DomainEventsService,
+          resolver,
         );
 
         const seedUser = async (): Promise<string> => {
@@ -223,10 +231,12 @@ describeWithPostgres(
           dataSource,
           service,
           cache,
+          resolver,
           seedEvent,
           seedUser,
           dbRemaining,
           valkeyRemaining,
+          setWriterMode: (mode) => switchWriterMode(dataSource, mode),
         });
       } finally {
         await cache.onModuleDestroy();
@@ -367,6 +377,88 @@ describeWithPostgres(
           // 在庫消費は成立していないため、Type 別 DB/Valkey はともに 0 のまま一致する。
           expect(await dbRemaining(typeA)).toBe(0);
           expect(await valkeyRemaining(eventId, typeA)).toBe(0);
+        },
+      );
+    });
+
+    it('writer mode drift（reserve 後に legacy へ切替）で rejected は exact release し reserve 前後の Type counter 差分 0', async () => {
+      await withHarness(
+        async ({
+          service,
+          cache,
+          resolver,
+          seedEvent,
+          seedUser,
+          valkeyRemaining,
+          setWriterMode,
+        }) => {
+          const buyer = await seedUser();
+          const { eventId, typeIds } = await seedEvent([0]);
+          const [typeA] = typeIds;
+
+          // Valkey Type counter を 1 に上書き（DB legacy 在庫 0 と drift させる）。
+          // prefilter は ticket_type で reserve できるが、transaction は legacy で在庫不足。
+          await cache.initTicketTypeCounter(eventId, typeA, 1);
+          const before = await valkeyRemaining(eventId, typeA);
+          expect(before).toBe(1);
+
+          // resolver に ticket_type plan を prime してから DB を legacy へ切り替える。
+          resolver.prime(eventId, {
+            writerMode: 'ticket_type',
+            scope: { kind: 'single', ticketTypeId: typeA },
+          });
+          await setWriterMode('legacy');
+
+          const result = await service.createPurchase(
+            eventId,
+            buyer,
+            { quantity: 1 },
+            { ticketTypeId: typeA },
+          );
+
+          // transaction は legacy 在庫 0 で rejected。reserve は exact release され、
+          // legacy aggregate は Ticket Type key へ sync されない。
+          expect(result.status).toBe('rejected');
+          expect(await valkeyRemaining(eventId, typeA)).toBe(before);
+        },
+      );
+    });
+
+    it('writer mode drift で confirmed は reserve が実消費に対応し二重補償しない', async () => {
+      await withHarness(
+        async ({
+          service,
+          resolver,
+          seedEvent,
+          seedUser,
+          dbRemaining,
+          valkeyRemaining,
+          setWriterMode,
+        }) => {
+          const buyer = await seedUser();
+          const { eventId, typeIds } = await seedEvent([3]);
+          const [typeA] = typeIds;
+          const beforeValkey = await valkeyRemaining(eventId, typeA);
+          expect(beforeValkey).toBe(3);
+
+          resolver.prime(eventId, {
+            writerMode: 'ticket_type',
+            scope: { kind: 'single', ticketTypeId: typeA },
+          });
+          await setWriterMode('legacy');
+
+          const result = await service.createPurchase(
+            eventId,
+            buyer,
+            { quantity: 1 },
+            { ticketTypeId: typeA },
+          );
+
+          expect(result.status).toBe('confirmed');
+          // reserve が同一論理在庫の消費に対応するため release / sync しない。
+          // Valkey は reserve 後の値、legacy mirror 後の default Type DB 残数と一致する（差分 0）。
+          expect(await valkeyRemaining(eventId, typeA)).toBe(2);
+          expect(await dbRemaining(typeA)).toBe(2);
         },
       );
     });

@@ -57,6 +57,20 @@ DB クエリを発生させない。cache miss のときだけ `writer_mode` と
 まとめて読み、cache する。この read は routing hint であり advisory barrier を取らない。
 在庫更新の正本判定は #376 の transaction が barrier 下で mode を再読する。
 
+cache miss は同一 eventId について singleflight（in-flight Promise coalescing）で重複排除し、
+sold-out flood 時でも同時多重 DB クエリを 1 回にまとめる。in-flight load 中の `prime()` /
+`invalidate()` は token 検査で保護し、古い load の結果が新しい状態を上書きしない。cache は
+TTL に加えてエントリ数の有限上限（既定 10000、`TICKET_TYPE_PREFILTER_CACHE_MAX_ENTRIES`）を持ち、
+挿入順を使った近似 LRU で最古エントリを O(1) で追い出す。上限超過は次回 cache miss として DB へ
+劣化するが、プロセスメモリを保護する。常駐 timer は作らず、TTL 失効エントリはアクセス時に削除する。
+
+resolver が `writer_mode` を解決できない場合（DB 障害など）は、legacy を推測しない。
+Event / Ticket Type どちらの counter も reserve / sync しない DB-only bypass で authoritative
+transaction へ fail-open する（PR 設計原則: ambiguous なら PostgreSQL へ委ねる）。DB 確定後の
+confirmed / rejected metric、request marker、domain event contract は通常経路と揃え、bypass は
+低カーディナリティ metric（`PrefilterBypass`）と trace 付き log で観測する。resolver と transaction
+の両方が失敗した場合は通常の DB エラーを返す。
+
 ### Ticket Type 解決順と冪等性境界
 
 prefilter scope の Type は次の優先順で解決する。
@@ -78,6 +92,17 @@ revision 取得」を原子的に行い、`reserved` 時だけ減算後の revis
 `getCounterVersion` を呼ぶ設計にはしない（reserve と revision 取得の隙間に別 request が割り込む
 ため）。reserve 結果は `reserved` / `sold_out` / `unknown` と、sync に使える revision または
 利用不能を表す `null` を安全に表現する。
+
+CAS sync に使う anchor revision は取得タイミングを path で分ける。
+
+- `gate=reserved`（reserve 済み）: reserve が原子的に返した減算後 revision を anchor にする。
+  transaction 後に revision を読み直さない。
+- `gate=unknown`（reserve していない drift 補正）: anchor revision は DB transaction を開始する
+  「前」に取得する。transaction 中に別 reserve が revision を進めた場合、この古い revision による
+  CAS は失敗し、並行 reserve の減算を上書きしない。anchor が `null` なら sync しない。cache 鮮度の
+  回復より並行 reserve の保護を優先する。
+
+いずれの sync も Lua script の EXISTS 検査で未 seed counter を新規作成しない。
 
 ### fail-open と未 seed
 
@@ -102,6 +127,19 @@ replay / payload 相違 409）は、reserve した Type と数量だけを補償
 する値には Event 互換集計ではなく実際の Ticket Type 残数を使う。prefilter で解決した Type と
 transaction が返す Type が異なる場合は、一方の DB 残数を別 Type の Valkey key へ sync せず、
 安全側（reserve 分の release + log + metric）に倒す。
+
+不変条件: 成功した Ticket Type reserve（`gate=reserved`）は、(1) 同じ論理在庫の DB 消費として
+確定する（confirmed で reserve が実消費に対応）か、(2) 同じ eventId + ticketTypeId + quantity
+だけを必ず終端補償する（rejected / replayed / transaction 例外）。`ticketTypeRemainingQuantity`
+が `null` でも「何もしない」にはしない。
+
+writer mode drift（prefilter は ticket_type で reserve したが、transaction は activation /
+rollback の途中で legacy として実行される）を明示的に扱う。transaction outcome は実際に使用した
+`writerModeUsed` を持つ。CAS sync は「transaction が ticket_type writer で実行され、同一 Type の
+DB 残数と有効な anchor revision が揃う」場合だけ行い、legacy aggregate の DB 残数を Ticket Type
+key へ sync しない。CAS できない rejected は必ず exact release する。confirmed で reserve が実消費に
+対応する場合は二重補償しない。drift は低カーディナリティ metric（`WriterModeMismatch`）と trace
+相関可能な log で観測する。
 
 ### requestId
 

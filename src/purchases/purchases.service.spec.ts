@@ -169,6 +169,8 @@ function createService(options: {
   ticketTypeRevision?: string;
   db?: FakeDbBehavior;
   plan?: PrefilterPlan;
+  // resolverError=true で resolvePrefilterPlan を失敗させ、DB-only bypass を検証する。
+  resolverError?: boolean;
 }) {
   const dbClient = createFakeDbClient(options.db ?? {});
 
@@ -222,7 +224,12 @@ function createService(options: {
         : { writerMode: 'ticket_type', scope: { kind: 'multi' } };
   }
   const resolver = {
-    resolvePrefilterPlan: jest.fn(async () => plan),
+    resolvePrefilterPlan: jest.fn(async () => {
+      if (options.resolverError) {
+        throw new Error('resolver failed');
+      }
+      return plan;
+    }),
     prime: jest.fn(),
     invalidate: jest.fn(),
   } as unknown as TicketTypeResolverService;
@@ -863,5 +870,164 @@ describe('PurchasesService の Ticket Type 単位経路（Issue #389）', () => 
     expect(result.remainingQuantity).toBe(9);
     expect(result).not.toHaveProperty('ticketTypeId');
     expect(result).not.toHaveProperty('inventoryVersion');
+  });
+
+  it('gate=unknown の sync anchor は transaction 前に取得する（reserved では取得しない）', async () => {
+    const { service, inventoryCache } = createService({
+      reserveOutcome: 'unknown',
+      ticketTypeRevision: 'pre-rev',
+      db: ticketTypeDb({ inventoryUpdated: true, remainingAfterUpdate: 5 }),
+    });
+
+    await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 2 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    // transaction 前に取得した anchor revision で sync する（transaction 後には取得しない）。
+    expect(inventoryCache.getTicketTypeCounterRevision).toHaveBeenCalledTimes(1);
+    expect(inventoryCache.syncTicketTypeCounter).toHaveBeenCalledWith(
+      EVENT_ID,
+      TICKET_TYPE_ID,
+      5,
+      'pre-rev',
+    );
+  });
+});
+
+describe('PurchasesService の resolver 失敗時 DB-only bypass（Issue #389 指摘3）', () => {
+  it('resolver reject 時は Event/Type reserve も sync もせず authoritative transaction を試行する', async () => {
+    const { service, database, inventoryCache } = createService({
+      reserveOutcome: 'reserved',
+      resolverError: true,
+      db: { inventoryUpdated: true, remainingAfterUpdate: 8 },
+    });
+
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 2,
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(database.connect).toHaveBeenCalled();
+    // legacy を推測せず、どちらの counter も使わない。
+    expect(inventoryCache.reserve).not.toHaveBeenCalled();
+    expect(inventoryCache.reserveTicketType).not.toHaveBeenCalled();
+    expect(inventoryCache.syncCounter).not.toHaveBeenCalled();
+    expect(inventoryCache.syncTicketTypeCounter).not.toHaveBeenCalled();
+    expect(inventoryCache.release).not.toHaveBeenCalled();
+    expect(inventoryCache.releaseTicketType).not.toHaveBeenCalled();
+  });
+
+  it('resolver も transaction も失敗した場合は transaction のエラーを返す', async () => {
+    const { service, dbClient } = createService({
+      reserveOutcome: 'reserved',
+      resolverError: true,
+    });
+    dbClient.query.mockRejectedValueOnce(new Error('connection lost'));
+
+    await expect(
+      service.createPurchase(EVENT_ID, BUYER_ID, { quantity: 1 }),
+    ).rejects.toThrow('connection lost');
+  });
+
+  it('bypass でも confirmed metric・marker・domain event の contract を維持する', async () => {
+    const { service, inventoryCache, domainEvents } = createService({
+      reserveOutcome: 'reserved',
+      resolverError: true,
+      db: { inventoryUpdated: true, remainingAfterUpdate: 8 },
+    });
+
+    await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 2,
+      requestId: 'bypass-req',
+    });
+
+    expect(inventoryCache.markRequestSeen).toHaveBeenCalledWith(
+      BUYER_ID,
+      EVENT_ID,
+      'bypass-req',
+    );
+    expect(domainEvents.publish).toHaveBeenCalledWith(
+      'TicketPurchased',
+      expect.objectContaining({ eventId: EVENT_ID }),
+    );
+  });
+});
+
+describe('PurchasesService の writer mode drift 補償（Issue #389 指摘1）', () => {
+  // prefilter は ticket_type で reserve するが、transaction は legacy で実行される drift。
+  const driftPlan: PrefilterPlan = {
+    writerMode: 'ticket_type',
+    scope: { kind: 'single', ticketTypeId: TICKET_TYPE_ID },
+  };
+
+  it('rejected では legacy aggregate を sync せず、同じ Type・数量を exact release する', async () => {
+    const { service, inventoryCache } = createService({
+      reserveOutcome: 'reserved',
+      plan: driftPlan,
+      // transaction は legacy mode で在庫不足 → rejected。
+      db: { writerMode: 'legacy', inventoryUpdated: false, remainingOnReject: 0 },
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 3 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    expect(result.status).toBe('rejected');
+    // legacy aggregate を Ticket Type key へ sync しない。
+    expect(inventoryCache.syncTicketTypeCounter).not.toHaveBeenCalled();
+    // reserve した同じ Type・数量だけを戻す。
+    expect(inventoryCache.releaseTicketType).toHaveBeenCalledWith(
+      EVENT_ID,
+      TICKET_TYPE_ID,
+      3,
+    );
+  });
+
+  it('confirmed では reserve が実消費に対応するため二重補償（release / sync）しない', async () => {
+    const { service, inventoryCache } = createService({
+      reserveOutcome: 'reserved',
+      plan: driftPlan,
+      db: { writerMode: 'legacy', inventoryUpdated: true, remainingAfterUpdate: 5 },
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 1 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    expect(result.status).toBe('confirmed');
+    expect(inventoryCache.releaseTicketType).not.toHaveBeenCalled();
+    expect(inventoryCache.syncTicketTypeCounter).not.toHaveBeenCalled();
+  });
+
+  it('replay では drift でも reserve 分を同じ Type へ戻し、別 Type を変えない', async () => {
+    const { service, inventoryCache } = createService({
+      reserveOutcome: 'reserved',
+      plan: driftPlan,
+      db: { writerMode: 'legacy', existingConfirmed: true },
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 2, requestId: 'drift-replay' },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    expect(result.status).toBe('confirmed');
+    expect(inventoryCache.releaseTicketType).toHaveBeenCalledWith(
+      EVENT_ID,
+      TICKET_TYPE_ID,
+      2,
+    );
+    expect(inventoryCache.syncTicketTypeCounter).not.toHaveBeenCalled();
   });
 });

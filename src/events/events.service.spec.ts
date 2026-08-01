@@ -136,6 +136,11 @@ describe('EventsService.createEvent', () => {
       { initCounter } as unknown as InventoryCacheService,
       { publish } as unknown as DomainEventsService,
       { search: jest.fn() } as unknown as SearchService,
+      {
+        resolvePrefilterPlan: jest.fn(),
+        prime: jest.fn(),
+        invalidate: jest.fn(),
+      } as unknown as TicketTypeResolverService,
     );
 
     await service.createEvent(validBody, CREATOR_ID);

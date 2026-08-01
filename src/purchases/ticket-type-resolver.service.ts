@@ -11,6 +11,10 @@
 // cache miss のときだけ、writer mode と Event の Ticket Type 一覧を 1 接続でまとめて
 // 読み、TTL 付きで cache します。
 //
+// resolver が writer mode を解決できない場合は例外を投げます。呼び出し元
+// （PurchasesService）は legacy を推測せず、Event / Ticket Type どちらの counter も
+// 使わない DB-only bypass で authoritative transaction へ fail-open します。
+//
 // cache invalidation 境界（#379 が複数 Type 作成を公開するときに必要）:
 // - 単一 Type の Event に 2 件目の Type を追加する（#379）
 // - writer mode を legacy <-> ticket_type へ切り替える（#378 の activation / rollback）
@@ -18,7 +22,7 @@
 // TTL 経過を待つか、EventsService のように prime() で明示更新します。詳細は
 // docs/poc/inventory-purchase-poc.md「Ticket Type 単位 Valkey 前段フィルタ」節を正本とします。
 
-import { Injectable, Optional } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { InventoryWriterMode } from '../database/inventory-writer-control';
 
@@ -31,9 +35,7 @@ export type PrefilterPlan =
   | { writerMode: 'legacy' }
   | {
       writerMode: 'ticket_type';
-      scope:
-        | { kind: 'single'; ticketTypeId: string }
-        | { kind: 'multi' };
+      scope: { kind: 'single'; ticketTypeId: string } | { kind: 'multi' };
     };
 
 interface CacheEntry {
@@ -46,56 +48,130 @@ interface CacheEntry {
 // activation / rollback の反映遅延を短く保つ妥協点として短めにします。
 const DEFAULT_TTL_MS = 5_000;
 
+// DEFAULT_MAX_ENTRIES は cache エントリ数の上限です。TTL に加えて有限上限を設け、
+// event 種類が単調増加してもプロセスメモリを保護します。上限超過時は挿入順で最も古い
+// エントリを O(1) で追い出します（超過分は次回 cache miss として DB へ劣化します）。
+const DEFAULT_MAX_ENTRIES = 10_000;
+
 @Injectable()
 export class TicketTypeResolverService {
+  // cache は挿入順を LRU 近似として使う（Map は挿入順を保持する）。
   private readonly cache = new Map<string, CacheEntry>();
+  // inflight は同一 eventId への並行 cache miss を 1 回の DB load に coalesce する。
+  private readonly inflight = new Map<
+    string,
+    { promise: Promise<PrefilterPlan>; token: number }
+  >();
+  private loadToken = 0;
   private readonly ttlMs: number;
+  private readonly maxEntries: number;
 
-  constructor(
-    @Optional() private readonly database?: DatabaseService,
-  ) {
-    const configured = Number(process.env.TICKET_TYPE_PREFILTER_CACHE_TTL_MS);
+  constructor(private readonly database: DatabaseService) {
+    const configuredTtl = Number(
+      process.env.TICKET_TYPE_PREFILTER_CACHE_TTL_MS,
+    );
     this.ttlMs =
-      Number.isFinite(configured) && configured > 0
-        ? configured
+      Number.isFinite(configuredTtl) && configuredTtl > 0
+        ? configuredTtl
         : DEFAULT_TTL_MS;
+    const configuredMax = Number(
+      process.env.TICKET_TYPE_PREFILTER_CACHE_MAX_ENTRIES,
+    );
+    this.maxEntries =
+      Number.isInteger(configuredMax) && configuredMax > 0
+        ? configuredMax
+        : DEFAULT_MAX_ENTRIES;
   }
 
   // resolvePrefilterPlan は event の前段フィルタ plan を返します。
   // cache hit では DB へ到達せず、cache miss のときだけ 1 接続で解決して cache します。
+  // 同一 eventId への並行 cache miss は 1 回の DB load へ coalesce します（singleflight）。
   async resolvePrefilterPlan(eventId: string): Promise<PrefilterPlan> {
-    const cached = this.cache.get(eventId);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.plan;
+    const fresh = this.getFresh(eventId);
+    if (fresh !== undefined) {
+      return fresh;
     }
 
-    const plan = await this.loadPlanFromDatabase(eventId);
-    this.store(eventId, plan);
-    return plan;
+    // 進行中の同一 eventId load があれば相乗りする（DB connect / query を 1 回にする）。
+    const existing = this.inflight.get(eventId);
+    if (existing) {
+      return existing.promise;
+    }
+
+    const token = ++this.loadToken;
+    const load = (async () => {
+      const plan = await this.loadPlanFromDatabase(eventId);
+      // load 中に prime() / invalidate() が発生した場合、この inflight entry は
+      // それらによって削除されている。古い load の結果で cache を上書きしないため、
+      // 自分の token が現在の inflight entry として残っているときだけ store する。
+      const current = this.inflight.get(eventId);
+      if (current && current.token === token) {
+        this.storeInternal(eventId, plan);
+      }
+      return plan;
+    })();
+    this.inflight.set(eventId, { promise: load, token });
+
+    try {
+      return await load;
+    } finally {
+      // 失敗時も含めて自分の inflight entry を必ず削除し、次回 retry 可能にする。
+      // 新しい inflight entry（別 token）は削除しない。
+      const current = this.inflight.get(eventId);
+      if (current && current.token === token) {
+        this.inflight.delete(eventId);
+      }
+    }
   }
 
   // prime は解決済み plan を明示的に cache へ入れます。
   // ticket_type mode の EventsService が、作成直後の Event→default Type mapping を
   // 反映するために使います（初回購入の cache miss を避ける）。
+  // 進行中の古い load がこの結果を上書きしないよう、inflight entry を破棄します。
   prime(eventId: string, plan: PrefilterPlan): void {
-    this.store(eventId, plan);
+    this.storeInternal(eventId, plan);
+    this.inflight.delete(eventId);
   }
 
   // invalidate は event の cache を破棄します。#378 / #379 が構成変更を即時反映したい
   // 場合の明示 API です（本 Issue の範囲では TTL 失効が主経路）。
+  // 進行中の古い load が破棄後に結果を復活させないよう、inflight entry も破棄します。
   invalidate(eventId: string): void {
     this.cache.delete(eventId);
+    this.inflight.delete(eventId);
   }
 
-  private store(eventId: string, plan: PrefilterPlan): void {
+  // getFresh は有効な cache エントリを返します。TTL 失効エントリは確実に削除します。
+  private getFresh(eventId: string): PrefilterPlan | undefined {
+    const entry = this.cache.get(eventId);
+    if (!entry) {
+      return undefined;
+    }
+    if (entry.expiresAt <= Date.now()) {
+      this.cache.delete(eventId);
+      return undefined;
+    }
+    // LRU touch: 参照されたエントリを末尾へ移動する（O(1)）。
+    this.cache.delete(eventId);
+    this.cache.set(eventId, entry);
+    return entry.plan;
+  }
+
+  private storeInternal(eventId: string, plan: PrefilterPlan): void {
+    // 既存キーを消してから set し直し、挿入順（LRU）を末尾へ更新する。
+    this.cache.delete(eventId);
     this.cache.set(eventId, { plan, expiresAt: Date.now() + this.ttlMs });
+    // 上限超過時は最も古いエントリ（Map 先頭）を追い出す。
+    while (this.cache.size > this.maxEntries) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.cache.delete(oldest);
+    }
   }
 
   private async loadPlanFromDatabase(eventId: string): Promise<PrefilterPlan> {
-    if (!this.database) {
-      // DB が無い構成（想定外）では安全側に legacy 扱いにする。
-      return { writerMode: 'legacy' };
-    }
     const client = await this.database.connect();
     try {
       // writer mode は activation の切替スイッチ（routing hint）としてだけ読む。
