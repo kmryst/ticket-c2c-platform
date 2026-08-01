@@ -8,6 +8,10 @@ Accepted
 
 2026-07-27
 
+## 2026-08-01 追記
+
+当時の後続Issue #337は、PostgreSQL compatibility writer #376、version付きprojection #377、Valkey #389、activation / rollback #378へ分割した。旧#339のcleanup責務も#383、#390、#391、#384、#385へ分割した。expand段階の判断は引き続き有効であり、次段のwriter切替判断は[ADR-0029](./0029-use-control-aware-postgresql-compatibility-writer.md)に記録する。
+
 ## 背景
 
 現行の購入処理は、Event ごとに1行ある `ticket_inventory` を PostgreSQL 在庫の正本として条件付き更新し、`purchases` へ購入結果を記録する。B2C 一次販売では Ticket Type 単位の在庫が必要になるため、Issue #335 は `expand -> 内部処理切替 -> API 公開 -> contract cleanup` の順で段階移行する方針を定めている。

@@ -72,13 +72,13 @@ default_ticket_types AS (
   FROM public.ticket_types
   WHERE is_default
 ),
--- function_body_md5 は canonical PL/pgSQL prosrc の exact hash。
--- migration と schema.sql の function parity test も byte-for-byte で同じ本文を検証する。
+-- function_body_md5s は canonical PL/pgSQL prosrc の許可hash。
+-- #336単体のbridgeと、#376がnested bounceだけを止めるsuccessor版を明示的に区別する。
 required_bridge_triggers(
   table_name,
   trigger_name,
   function_name,
-  function_body_md5,
+  function_body_md5s,
   trigger_type
 ) AS (
   VALUES
@@ -86,21 +86,24 @@ required_bridge_triggers(
       'events'::text,
       'events_ticket_type_expand_default_trg'::text,
       'ticket_type_expand_create_default_ticket_type'::text,
-      'b93a46dd7d53cb4f5833ff8ce5f447f5'::text,
+      ARRAY['b93a46dd7d53cb4f5833ff8ce5f447f5']::text[],
       5::smallint
     ),
     (
       'ticket_inventory',
       'ticket_inventory_ticket_type_expand_sync_trg',
       'ticket_type_expand_sync_inventory',
-      '4c5fc01e805ed4fb42cd4d35c493aa78',
+      ARRAY[
+        '4c5fc01e805ed4fb42cd4d35c493aa78',
+        '56894124575b9c7825a172fa67cf5d86'
+      ],
       21
     ),
     (
       'purchases',
       'purchases_ticket_type_expand_default_trg',
       'ticket_type_expand_set_purchase_ticket_type',
-      '9b5c4e4e463f9d632afcd449ce80281f',
+      ARRAY['9b5c4e4e463f9d632afcd449ce80281f'],
       7
     )
 ),
@@ -373,8 +376,9 @@ violations AS (
      OR database_function.proleakproof
      OR database_function.proconfig IS DISTINCT FROM
        ARRAY['search_path=pg_catalog, public, pg_temp']::text[]
-     OR md5(database_function.prosrc) IS DISTINCT FROM
-       required.function_body_md5
+     OR NOT (
+       md5(database_function.prosrc) = ANY(required.function_body_md5s)
+     )
 
   UNION ALL
 

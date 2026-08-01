@@ -1,7 +1,6 @@
 -- ファイル概要:
 -- このファイルはローカル在庫 PoC の PostgreSQL 構造を定義する schema です。
--- events / ticket_inventory / purchases と idempotency 用 index を作り、
--- NestJS API が参照する「在庫の正本」と「購入判定の履歴」を DB 上に用意します。
+-- Ticket Type対応のmode-aware在庫、共有control、購入判定と冪等性制約を用意します。
 
 -- ローカル在庫 PoC 用の PostgreSQL schema です。
 -- このファイルは、Docker Compose で起動した PostgreSQL にそのまま流し込む実行可能な DB 定義です。
@@ -275,6 +274,8 @@ CREATE INDEX IF NOT EXISTS purchases_request_lookup_idx
 -- これにより、途中で失敗したローカル DB に schema.sql を再適用しても復旧しやすくなります。
 DROP INDEX IF EXISTS purchases_request_id_uq_next;
 
+-- ここは旧schemaから#336までを再現するbootstrap indexです。
+-- ファイル末尾の#376 transactionがstatus横断のunified indexへ置き換えます。
 -- confirmed idempotency 用の unique index を用意します。
 -- 同じ buyer/event/request_id の confirmed は最大 1 件だけ、というルールを DB が保証します。
 -- DO block にすることで、古い index 形状のローカル DB も安全に移行できます。
@@ -314,7 +315,7 @@ BEGIN
 END
 $$;
 
--- rejected idempotency 用の unique index です。
+-- rejected idempotency 用のbootstrap unique indexです。最終状態では#376が撤去します。
 -- 同じ buyer/event/request_id の rejected 再送で rejected row が無限に増えることを防ぎます。
 -- confirmed とは別 index にしておくことで、将来在庫が補充された場合の confirmed 余地は残します。
 CREATE UNIQUE INDEX IF NOT EXISTS purchases_rejected_request_id_uq
@@ -328,7 +329,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS purchases_rejected_request_id_uq
 -- Ticket Type expand schema（Issue #336 / ADR-0028）
 -- ---------------------------------------------------------------------------
 -- この段階では、上の ticket_inventory（Event 単位）が引き続き在庫の正本です。
--- Ticket Type 単位在庫は #337 の切替まで shadow として同期し、旧 backend binary が
+-- Ticket Type 単位在庫は #376 の compatibility writer 導入まで shadow として同期し、旧 backend binary が
 -- ticket_type_id を知らない期間も同じ transaction 内の trigger で欠損を防ぎます。
 --
 -- backfill と trigger 有効化の間に旧 writer が入らないよう、expand 部分は 1 transaction
@@ -349,6 +350,21 @@ SET LOCAL search_path = public, pg_catalog, pg_temp;
 LOCK TABLE events IN EXCLUSIVE MODE;
 LOCK TABLE purchases IN ACCESS EXCLUSIVE MODE NOWAIT;
 LOCK TABLE ticket_inventory IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+
+-- #376 の共有control state。schema.sql再適用でも既存modeをlegacyへ戻してはならない。
+CREATE TABLE IF NOT EXISTS inventory_writer_control (
+  singleton BOOLEAN NOT NULL DEFAULT true,
+  writer_mode TEXT NOT NULL DEFAULT 'legacy',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT inventory_writer_control_pkey PRIMARY KEY (singleton),
+  CONSTRAINT inventory_writer_control_singleton_check CHECK (singleton),
+  CONSTRAINT inventory_writer_control_mode_check
+    CHECK (writer_mode IN ('legacy', 'ticket_type'))
+);
+
+INSERT INTO inventory_writer_control (singleton, writer_mode)
+VALUES (true, 'legacy')
+ON CONFLICT (singleton) DO NOTHING;
 
 -- ticket_types は Event 内の販売区分を表します。表示名は識別子として使わず、
 -- FK は UUID、既定 Type の判定は is_default を使用します。
@@ -420,13 +436,19 @@ WHERE NOT EXISTS (
   FROM ticket_types tt
   WHERE tt.event_id = e.id
     AND tt.is_default
-);
+)
+  AND (
+    SELECT writer_mode = 'legacy'
+    FROM inventory_writer_control
+    WHERE singleton
+  );
 
 -- legacy inventory が存在しない Event は現行 API 自体の前提崩れです。
 -- 不完全な shadow を確定せず、expand transaction 全体を rollback します。
 DO $$
 BEGIN
-  IF EXISTS (
+  IF (SELECT writer_mode FROM inventory_writer_control WHERE singleton) = 'legacy'
+     AND EXISTS (
     SELECT 1
     FROM events e
     LEFT JOIN ticket_inventory legacy ON legacy.event_id = e.id
@@ -439,32 +461,72 @@ END
 $$;
 
 -- 既存 Event 単位在庫を、その Event の既定 Ticket Type へコピーします。
-INSERT INTO ticket_type_inventory (
-  ticket_type_id,
-  event_id,
-  total_quantity,
-  remaining_quantity,
-  version,
-  updated_at
-)
-SELECT
-  defaults.id,
-  legacy.event_id,
-  legacy.total_quantity,
-  legacy.remaining_quantity,
-  legacy.version,
-  legacy.updated_at
-FROM ticket_inventory legacy
-JOIN ticket_types defaults
-  ON defaults.event_id = legacy.event_id
- AND defaults.is_default
-ON CONFLICT (ticket_type_id) DO UPDATE
-SET
-  event_id = EXCLUDED.event_id,
-  total_quantity = EXCLUDED.total_quantity,
-  remaining_quantity = EXCLUDED.remaining_quantity,
-  version = EXCLUDED.version,
-  updated_at = EXCLUDED.updated_at;
+-- compatibility guard導入後の再適用ではinactive側への直接INSERTを避け、active legacy
+-- rowのno-op UPDATEから既存forward bridgeを発火して欠損shadowだけを復旧します。
+DO $$
+BEGIN
+  IF (SELECT writer_mode FROM inventory_writer_control WHERE singleton) = 'legacy'
+     AND EXISTS (
+       SELECT 1
+       FROM ticket_inventory legacy
+       JOIN ticket_types defaults
+         ON defaults.event_id = legacy.event_id
+        AND defaults.is_default
+       LEFT JOIN ticket_type_inventory existing_shadow
+         ON existing_shadow.ticket_type_id = defaults.id
+       WHERE existing_shadow.ticket_type_id IS NULL
+     ) THEN
+    IF EXISTS (
+      SELECT 1
+      FROM pg_trigger database_trigger
+      WHERE database_trigger.tgrelid =
+              'public.ticket_type_inventory'::regclass
+        AND database_trigger.tgname =
+              'inventory_compatibility_fence_ticket_type_statement_trg'
+        AND NOT database_trigger.tgisinternal
+    ) THEN
+      UPDATE ticket_inventory legacy
+      SET total_quantity = legacy.total_quantity,
+          remaining_quantity = legacy.remaining_quantity,
+          version = legacy.version,
+          updated_at = legacy.updated_at
+      WHERE EXISTS (
+        SELECT 1
+        FROM ticket_types defaults
+        LEFT JOIN ticket_type_inventory existing_shadow
+          ON existing_shadow.ticket_type_id = defaults.id
+        WHERE defaults.event_id = legacy.event_id
+          AND defaults.is_default
+          AND existing_shadow.ticket_type_id IS NULL
+      );
+    ELSE
+      INSERT INTO ticket_type_inventory (
+        ticket_type_id,
+        event_id,
+        total_quantity,
+        remaining_quantity,
+        version,
+        updated_at
+      )
+      SELECT
+        defaults.id,
+        legacy.event_id,
+        legacy.total_quantity,
+        legacy.remaining_quantity,
+        legacy.version,
+        legacy.updated_at
+      FROM ticket_inventory legacy
+      JOIN ticket_types defaults
+        ON defaults.event_id = legacy.event_id
+       AND defaults.is_default
+      LEFT JOIN ticket_type_inventory existing_shadow
+        ON existing_shadow.ticket_type_id = defaults.id
+      WHERE existing_shadow.ticket_type_id IS NULL
+      ON CONFLICT (ticket_type_id) DO NOTHING;
+    END IF;
+  END IF;
+END
+$$;
 
 -- 既存 Purchase は対象 Event の既定 Type へ紐付けます。
 -- すでに値がある row は上書きせず、後段の整合性検査で誤紐付けを fail closed にします。
@@ -473,7 +535,12 @@ SET ticket_type_id = defaults.id
 FROM ticket_types defaults
 WHERE p.event_id = defaults.event_id
   AND defaults.is_default
-  AND p.ticket_type_id IS NULL;
+  AND p.ticket_type_id IS NULL
+  AND (
+    SELECT writer_mode = 'legacy'
+    FROM inventory_writer_control
+    WHERE singleton
+  );
 
 -- 新規 Event を旧 binary が作成した直後に、同じ transaction で既定 Type を作ります。
 CREATE OR REPLACE FUNCTION ticket_type_expand_create_default_ticket_type()
@@ -504,6 +571,14 @@ AS $$
 DECLARE
   default_ticket_type_id UUID;
 BEGIN
+  IF pg_trigger_depth() > 1
+     AND current_setting(
+       'ticket_c2c.inventory_mirror_origin',
+       true
+     ) = 'ticket_type' THEN
+    RETURN NEW;
+  END IF;
+
   SELECT id
   INTO default_ticket_type_id
   FROM public.ticket_types
@@ -585,7 +660,7 @@ ALTER TABLE purchases
   ALTER COLUMN ticket_type_id SET NOT NULL;
 
 -- FK の table scan と lock を分離できるよう一旦 NOT VALID で追加しますが、
--- #337 へ未検証の制約を持ち越さず、この transaction 内で必ず VALIDATE します。
+-- #376 へ未検証の制約を持ち越さず、この transaction 内で必ず VALIDATE します。
 DO $$
 BEGIN
   ALTER TABLE purchases
@@ -609,7 +684,8 @@ CREATE INDEX IF NOT EXISTS purchases_event_ticket_type_created_at_idx
 -- TypeORM migration とこの expand transaction は rollback されます。
 DO $$
 BEGIN
-  IF EXISTS (
+  IF (SELECT writer_mode FROM inventory_writer_control WHERE singleton) = 'legacy'
+     AND EXISTS (
     SELECT 1
     FROM events e
     LEFT JOIN ticket_types tt ON tt.event_id = e.id
@@ -621,7 +697,9 @@ BEGIN
       'Ticket Type expand aborted: an event does not have exactly one default Ticket Type';
   END IF;
 
-  IF EXISTS (
+  IF (SELECT writer_mode FROM inventory_writer_control WHERE singleton) = 'legacy'
+     AND (
+    EXISTS (
     SELECT 1
     FROM ticket_inventory legacy
     JOIN ticket_types defaults
@@ -642,12 +720,13 @@ BEGIN
       ON tt.event_id = shadow.event_id
      AND tt.id = shadow.ticket_type_id
     WHERE NOT tt.is_default
-  ) THEN
+  )) THEN
     RAISE EXCEPTION
       'Ticket Type expand aborted: legacy and default Ticket Type inventory differ';
   END IF;
 
-  IF EXISTS (
+  IF (SELECT writer_mode FROM inventory_writer_control WHERE singleton) = 'legacy'
+     AND EXISTS (
     SELECT 1
     FROM purchases p
     LEFT JOIN ticket_types tt
@@ -662,5 +741,452 @@ BEGIN
   END IF;
 END
 $$;
+
+COMMIT;
+
+-- ---------------------------------------------------------------------------
+-- Ticket Type PostgreSQL compatibility writer（Issue #376 / ADR-0029）
+-- ---------------------------------------------------------------------------
+-- 初期modeはlegacy。merge / deploy / schema適用だけではactive writerを切り替えない。
+-- #378 のactivationは同じadvisory keyをexclusive取得してcontrol rowを更新する。
+BEGIN;
+
+SET LOCAL lock_timeout = '10s';
+SET LOCAL statement_timeout = '5min';
+SET LOCAL search_path = public, pg_catalog, pg_temp;
+
+SELECT pg_advisory_xact_lock(335, 376);
+LOCK TABLE events IN EXCLUSIVE MODE;
+LOCK TABLE purchases IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK TABLE ticket_types IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+LOCK TABLE ticket_inventory IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+LOCK TABLE ticket_type_inventory IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+
+-- statusを横断する既存重複は自動統合せず、index変更前にfail closedで停止する。
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM purchases
+    WHERE request_id IS NOT NULL
+    GROUP BY buyer_id, event_id, request_id
+    HAVING count(*) > 1
+  ) THEN
+    RAISE EXCEPTION
+      'inventory compatibility schema aborted: duplicate requestId exists across purchase statuses';
+  END IF;
+END
+$$;
+
+DROP INDEX IF EXISTS purchases_request_id_uq;
+DROP INDEX IF EXISTS purchases_rejected_request_id_uq;
+CREATE UNIQUE INDEX purchases_request_id_uq
+  ON purchases (buyer_id, event_id, request_id)
+  WHERE request_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION inventory_compatibility_fence_inventory_statement()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  current_mode TEXT;
+  mirror_origin TEXT;
+BEGIN
+  SELECT writer_mode
+  INTO current_mode
+  FROM public.inventory_writer_control
+  WHERE singleton
+  FOR SHARE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'inventory writer control row is missing'
+      USING ERRCODE = '55000';
+  END IF;
+
+  mirror_origin := current_setting(
+    'ticket_c2c.inventory_mirror_origin',
+    true
+  );
+
+  -- statement trigger は対象行が0件でも発火する。旧binaryのsold-out UPDATEも、
+  -- inactive tableへ到達した時点でfail closedにする。
+  IF pg_trigger_depth() = 1 THEN
+    IF (TG_TABLE_NAME = 'ticket_inventory' AND current_mode <> 'legacy')
+       OR (
+         TG_TABLE_NAME = 'ticket_type_inventory'
+         AND current_mode <> 'ticket_type'
+       ) THEN
+      RAISE EXCEPTION
+        'inactive inventory writer rejected for table % while mode is %',
+        TG_TABLE_NAME,
+        current_mode
+        USING ERRCODE = '55000';
+    END IF;
+
+    PERFORM set_config(
+      'ticket_c2c.inventory_mirror_origin',
+      current_mode,
+      true
+    );
+    RETURN NULL;
+  END IF;
+
+  IF (TG_TABLE_NAME = 'ticket_inventory'
+      AND current_mode = 'ticket_type'
+      AND mirror_origin = 'ticket_type')
+     OR (TG_TABLE_NAME = 'ticket_type_inventory'
+         AND current_mode = 'legacy'
+         AND mirror_origin = 'legacy')
+     OR (TG_TABLE_NAME = 'ticket_type_inventory'
+         AND current_mode = 'ticket_type'
+         AND mirror_origin = 'ticket_type') THEN
+    RETURN NULL;
+  END IF;
+
+  RAISE EXCEPTION
+    'unexpected nested inventory statement for table %',
+    TG_TABLE_NAME
+    USING ERRCODE = '55000';
+END
+$$;
+
+DROP TRIGGER IF EXISTS inventory_compatibility_fence_legacy_statement_trg
+  ON ticket_inventory;
+CREATE TRIGGER inventory_compatibility_fence_legacy_statement_trg
+BEFORE INSERT OR UPDATE ON ticket_inventory
+FOR EACH STATEMENT
+EXECUTE FUNCTION inventory_compatibility_fence_inventory_statement();
+
+DROP TRIGGER IF EXISTS inventory_compatibility_fence_ticket_type_statement_trg
+  ON ticket_type_inventory;
+CREATE TRIGGER inventory_compatibility_fence_ticket_type_statement_trg
+BEFORE INSERT OR UPDATE ON ticket_type_inventory
+FOR EACH STATEMENT
+EXECUTE FUNCTION inventory_compatibility_fence_inventory_statement();
+
+CREATE OR REPLACE FUNCTION inventory_compatibility_guard_legacy_write()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  current_mode TEXT;
+  mirror_origin TEXT;
+BEGIN
+  SELECT writer_mode
+  INTO current_mode
+  FROM public.inventory_writer_control
+  WHERE singleton
+  FOR SHARE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'inventory writer control row is missing'
+      USING ERRCODE = '55000';
+  END IF;
+
+  mirror_origin := current_setting(
+    'ticket_c2c.inventory_mirror_origin',
+    true
+  );
+
+  IF pg_trigger_depth() = 1 THEN
+    IF current_mode <> 'legacy' THEN
+      RAISE EXCEPTION
+        'inactive legacy inventory writer rejected while mode is ticket_type'
+        USING ERRCODE = '55000';
+    END IF;
+    PERFORM set_config(
+      'ticket_c2c.inventory_mirror_origin',
+      'legacy',
+      true
+    );
+    RETURN NEW;
+  END IF;
+
+  IF current_mode = 'ticket_type'
+     AND mirror_origin = 'ticket_type' THEN
+    RETURN NEW;
+  END IF;
+
+  RAISE EXCEPTION
+    'unexpected nested legacy inventory write'
+    USING ERRCODE = '55000';
+END
+$$;
+
+DROP TRIGGER IF EXISTS inventory_compatibility_guard_legacy_write_trg
+  ON ticket_inventory;
+CREATE TRIGGER inventory_compatibility_guard_legacy_write_trg
+BEFORE INSERT OR UPDATE ON ticket_inventory
+FOR EACH ROW
+EXECUTE FUNCTION inventory_compatibility_guard_legacy_write();
+
+CREATE OR REPLACE FUNCTION inventory_compatibility_guard_ticket_type_write()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  current_mode TEXT;
+  mirror_origin TEXT;
+BEGIN
+  SELECT writer_mode
+  INTO current_mode
+  FROM public.inventory_writer_control
+  WHERE singleton
+  FOR SHARE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'inventory writer control row is missing'
+      USING ERRCODE = '55000';
+  END IF;
+
+  mirror_origin := current_setting(
+    'ticket_c2c.inventory_mirror_origin',
+    true
+  );
+
+  IF pg_trigger_depth() = 1 THEN
+    IF current_mode <> 'ticket_type' THEN
+      RAISE EXCEPTION
+        'inactive Ticket Type inventory writer rejected while mode is legacy'
+        USING ERRCODE = '55000';
+    END IF;
+    PERFORM set_config(
+      'ticket_c2c.inventory_mirror_origin',
+      'ticket_type',
+      true
+    );
+    RETURN NEW;
+  END IF;
+
+  IF current_mode = 'legacy'
+     AND mirror_origin = 'legacy' THEN
+    RETURN NEW;
+  END IF;
+
+  -- ticket_type -> legacy mirror は既存 #336 forward bridge を発火させる。
+  -- その nested upsert だけを行単位でskipし、相互triggerのbounceを止める。
+  IF current_mode = 'ticket_type'
+     AND mirror_origin = 'ticket_type' THEN
+    RETURN NULL;
+  END IF;
+
+  RAISE EXCEPTION
+    'unexpected nested Ticket Type inventory write'
+    USING ERRCODE = '55000';
+END
+$$;
+
+DROP TRIGGER IF EXISTS inventory_compatibility_guard_ticket_type_write_trg
+  ON ticket_type_inventory;
+CREATE TRIGGER inventory_compatibility_guard_ticket_type_write_trg
+BEFORE INSERT OR UPDATE ON ticket_type_inventory
+FOR EACH ROW
+EXECUTE FUNCTION inventory_compatibility_guard_ticket_type_write();
+
+-- 在庫DELETEはaggregate mirrorを曖昧にするため直接実行を禁止する。
+-- 許可するのは events DELETE statementの実行中に深いtriggerから届く既知のFK cascadeだけ。
+CREATE OR REPLACE FUNCTION inventory_compatibility_mark_event_delete_cascade()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+  PERFORM set_config(
+    'ticket_c2c.event_delete_cascade',
+    'true',
+    true
+  );
+  RETURN NULL;
+END
+$$;
+
+DROP TRIGGER IF EXISTS inventory_compatibility_mark_event_delete_before_trg
+  ON events;
+CREATE TRIGGER inventory_compatibility_mark_event_delete_before_trg
+BEFORE DELETE ON events
+FOR EACH STATEMENT
+EXECUTE FUNCTION inventory_compatibility_mark_event_delete_cascade();
+
+CREATE OR REPLACE FUNCTION inventory_compatibility_guard_delete_cascade()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+  IF pg_trigger_depth() >= 2
+     AND current_setting(
+       'ticket_c2c.event_delete_cascade',
+       true
+     ) = 'true' THEN
+    RETURN NULL;
+  END IF;
+
+  RAISE EXCEPTION
+    'direct delete rejected for compatibility table % at trigger depth %',
+    TG_TABLE_NAME,
+    pg_trigger_depth()
+    USING ERRCODE = '55000';
+END
+$$;
+
+DROP TRIGGER IF EXISTS inventory_compatibility_guard_legacy_delete_trg
+  ON ticket_inventory;
+CREATE TRIGGER inventory_compatibility_guard_legacy_delete_trg
+BEFORE DELETE ON ticket_inventory
+FOR EACH STATEMENT
+EXECUTE FUNCTION inventory_compatibility_guard_delete_cascade();
+
+DROP TRIGGER IF EXISTS inventory_compatibility_guard_ticket_type_delete_trg
+  ON ticket_type_inventory;
+CREATE TRIGGER inventory_compatibility_guard_ticket_type_delete_trg
+BEFORE DELETE ON ticket_type_inventory
+FOR EACH STATEMENT
+EXECUTE FUNCTION inventory_compatibility_guard_delete_cascade();
+
+DROP TRIGGER IF EXISTS inventory_compatibility_guard_ticket_type_definition_delete_trg
+  ON ticket_types;
+CREATE TRIGGER inventory_compatibility_guard_ticket_type_definition_delete_trg
+BEFORE DELETE ON ticket_types
+FOR EACH STATEMENT
+EXECUTE FUNCTION inventory_compatibility_guard_delete_cascade();
+
+CREATE OR REPLACE FUNCTION inventory_compatibility_reject_truncate()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+  RAISE EXCEPTION
+    'truncate rejected for compatibility table %',
+    TG_TABLE_NAME
+    USING ERRCODE = '55000';
+END
+$$;
+
+DROP TRIGGER IF EXISTS inventory_compatibility_reject_legacy_truncate_trg
+  ON ticket_inventory;
+CREATE TRIGGER inventory_compatibility_reject_legacy_truncate_trg
+BEFORE TRUNCATE ON ticket_inventory
+FOR EACH STATEMENT
+EXECUTE FUNCTION inventory_compatibility_reject_truncate();
+
+DROP TRIGGER IF EXISTS inventory_compatibility_reject_ticket_type_truncate_trg
+  ON ticket_type_inventory;
+CREATE TRIGGER inventory_compatibility_reject_ticket_type_truncate_trg
+BEFORE TRUNCATE ON ticket_type_inventory
+FOR EACH STATEMENT
+EXECUTE FUNCTION inventory_compatibility_reject_truncate();
+
+DROP TRIGGER IF EXISTS inventory_compatibility_reject_ticket_type_definition_truncate_trg
+  ON ticket_types;
+CREATE TRIGGER inventory_compatibility_reject_ticket_type_definition_truncate_trg
+BEFORE TRUNCATE ON ticket_types
+FOR EACH STATEMENT
+EXECUTE FUNCTION inventory_compatibility_reject_truncate();
+
+CREATE OR REPLACE FUNCTION inventory_compatibility_sync_ticket_type_to_legacy()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  current_mode TEXT;
+  mirror_origin TEXT;
+  aggregate_total BIGINT;
+  aggregate_remaining BIGINT;
+BEGIN
+  mirror_origin := current_setting(
+    'ticket_c2c.inventory_mirror_origin',
+    true
+  );
+
+  -- legacy -> Ticket Type の既存bridgeから呼ばれた nested trigger はreverseしない。
+  IF pg_trigger_depth() <> 1
+     OR mirror_origin IS DISTINCT FROM 'ticket_type' THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT writer_mode
+  INTO current_mode
+  FROM public.inventory_writer_control
+  WHERE singleton
+  FOR SHARE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'inventory writer control row is missing'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF current_mode <> 'ticket_type' THEN
+    RAISE EXCEPTION
+      'Ticket Type inventory reverse mirror invoked outside ticket_type mode'
+      USING ERRCODE = '55000';
+  END IF;
+
+  -- 新規 Event の Ticket Type active write では legacy row がまだない。
+  -- placeholder を同じ mirror 経路で作り、その row を Event 単位の集計mutexにする。
+  INSERT INTO public.ticket_inventory (
+    event_id,
+    total_quantity,
+    remaining_quantity,
+    version,
+    updated_at
+  )
+  VALUES (NEW.event_id, 0, 0, 0, now())
+  ON CONFLICT (event_id) DO NOTHING;
+
+  -- 異なる Type の並行更新を Event 単位で直列化してから、fresh statement snapshot で
+  -- 合計を読み直す。lock待ち前の古いsnapshotでaggregateを上書きしない。
+  PERFORM 1
+  FROM public.ticket_inventory
+  WHERE event_id = NEW.event_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'legacy compatibility inventory row is missing for event %',
+      NEW.event_id
+      USING ERRCODE = '55000';
+  END IF;
+
+  SELECT sum(total_quantity), sum(remaining_quantity)
+  INTO aggregate_total, aggregate_remaining
+  FROM public.ticket_type_inventory
+  WHERE event_id = NEW.event_id;
+
+  IF aggregate_total IS NULL
+     OR aggregate_remaining IS NULL
+     OR aggregate_total > 2147483647
+     OR aggregate_remaining > 2147483647 THEN
+    RAISE EXCEPTION
+      'Ticket Type inventory aggregate is missing or exceeds INTEGER for event %',
+      NEW.event_id
+      USING ERRCODE = '22003';
+  END IF;
+
+  UPDATE public.ticket_inventory
+  SET total_quantity = aggregate_total::INTEGER,
+      remaining_quantity = aggregate_remaining::INTEGER,
+      version = version + 1,
+      updated_at = now()
+  WHERE event_id = NEW.event_id;
+
+  RETURN NEW;
+END
+$$;
+
+DROP TRIGGER IF EXISTS inventory_compatibility_sync_ticket_type_to_legacy_trg
+  ON ticket_type_inventory;
+CREATE TRIGGER inventory_compatibility_sync_ticket_type_to_legacy_trg
+AFTER INSERT OR UPDATE ON ticket_type_inventory
+FOR EACH ROW
+EXECUTE FUNCTION inventory_compatibility_sync_ticket_type_to_legacy();
 
 COMMIT;

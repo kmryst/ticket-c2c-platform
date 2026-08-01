@@ -18,6 +18,7 @@ import { AddPurchasesBuyerFk1783252676631 } from './1783252676631-add-purchases-
 import { AddRefreshTokens1783307740648 } from './1783307740648-add-refresh-tokens';
 import { AddEventsCreatedBy1783342791808 } from './1783342791808-add-events-created-by';
 import { AddTicketTypeExpandSchema1785128190273 } from './1785128190273-add-ticket-type-expand-schema';
+import { AddTicketTypeCompatibilityWriter1785542400000 } from './1785542400000-add-ticket-type-compatibility-writer';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describeWithPostgres = TEST_DATABASE_URL ? describe : describe.skip;
@@ -389,6 +390,7 @@ describeWithPostgres(
           });
           expect(firstRun.map((migration) => migration.name)).toEqual([
             'AddTicketTypeExpandSchema1785128190273',
+            'AddTicketTypeCompatibilityWriter1785542400000',
           ]);
 
           const history = await initializedDataSource.query<
@@ -407,6 +409,7 @@ describeWithPostgres(
             'AddRefreshTokens1783307740648',
             'AddEventsCreatedBy1783342791808',
             'AddTicketTypeExpandSchema1785128190273',
+            'AddTicketTypeCompatibilityWriter1785542400000',
           ]);
 
           const secondRun = await initializedDataSource.runMigrations({
@@ -1377,6 +1380,11 @@ describeWithPostgres(
             new AddTicketTypeExpandSchema1785128190273(),
             'up',
           );
+          await applyMigration(
+            dataSource,
+            new AddTicketTypeCompatibilityWriter1785542400000(),
+            'up',
+          );
           return selectExpandCatalogSignature(dataSource);
         },
       );
@@ -1393,10 +1401,10 @@ describeWithPostgres(
         await dataSource.query(schemaSql);
 
         const readiness = await checkTicketTypeExpandReadiness(dataSource);
-        expect(hasTicketTypeExpandViolations(readiness)).toBe(false);
         expect(
-          readiness.every(({ violationCount }) => violationCount === 0),
-        ).toBe(true);
+          readiness.filter(({ violationCount }) => violationCount !== 0),
+        ).toEqual([]);
+        expect(hasTicketTypeExpandViolations(readiness)).toBe(false);
 
         return selectExpandCatalogSignature(dataSource);
       });

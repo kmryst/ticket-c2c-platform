@@ -2,67 +2,46 @@
 
 ## ステータス
 
-実装済み。実際のローカル DB 定義は `database/schema.sql` を正本とし、このドキュメントはその構造と制約を説明する。
+実装済み。実際のローカル DB 定義は `database/schema.sql` を正本とし、この文書は構造、制約、writer mode を説明する。
 
-Issue #336 の expand 段階では、現行の Event 単位 `ticket_inventory` を在庫の正本として維持し、Ticket Type 単位の table と関連を後方互換に追加しています。`ticket_type_inventory` は移行用の shadow であり、Issue #337 の内部切替が完了するまで独立した在庫正本として更新しません。
+Issue #336 の expand schema に、Issue #376 の PostgreSQL compatibility writer を追加済みである。共有 control state の初期値は `legacy` であり、artifact の merge、deploy、migration 適用だけでは在庫正本、既存 API 応答、active read / write pathを切り替えない。設計判断は [ADR-0028](../adr/0028-use-db-trigger-bridge-for-ticket-type-expand.md) と [ADR-0029](../adr/0029-use-control-aware-postgresql-compatibility-writer.md) に記録する。
 
-このドキュメントは、在庫 PoC と Ticket Type 移行で使う DB スキーマを記録するものです。本番用の完全な Purchase Session / Ticket Hold データモデルではありません。expand 段階の設計判断は [ADR-0028](../adr/0028-use-db-trigger-bridge-for-ticket-type-expand.md) に記録します。
+このスキーマは在庫 PoC と Ticket Type 移行用であり、完成形の Purchase Session / Ticket Hold データモデルではない。
 
 ## 目的
 
-在庫 PoC では、同時購入リクエストが集中しても在庫数を超えた購入が確定しないことを検証します。
-
-そのため、最初のスキーマは次のテーブルに絞ります。
+同時購入が集中しても在庫数を超えた購入を確定せず、legacy Event 在庫から Ticket Type 在庫へ rollback 可能な段階移行を行う。
 
 | テーブル | 目的 |
 | --- | --- |
-| `users` | 購入者アカウント（メール+パスワード認証。ADR-0010） |
-| `refresh_tokens` | opaque リフレッシュトークンの hash・ローテーション系譜・失効状態（ADR-0012） |
+| `users` | 購入者アカウント |
+| `refresh_tokens` | refresh token の hash、系譜、失効状態 |
 | `events` | イベント本体 |
-| `ticket_inventory` | イベントごとの legacy 在庫。expand 段階の正本 |
 | `ticket_types` | Event 内の販売 Ticket Type |
-| `ticket_type_inventory` | Ticket Type ごとの数量在庫。expand 段階では同期 shadow |
-| `purchases` | 購入結果 |
+| `ticket_inventory` | `legacy` の正本、`ticket_type` の Event 互換集計 |
+| `ticket_type_inventory` | `legacy` の shadow、`ticket_type` の正本 |
+| `inventory_writer_control` | DB 共有の active writer mode |
+| `purchases` | confirmed / rejected の購入結果と冪等性payload |
 
-## `users`
+## 認証と Event のテーブル
 
-メール+パスワード認証（ADR-0010、Issue #132）の購入者アカウントを表します。
+### `users`
 
 | 列 | 型 | 説明 |
 | --- | --- | --- |
-| `id` | `UUID` | ユーザー ID。JWT の `sub` claim に入る値 |
-| `email` | `TEXT` | ログイン ID。`lower(email)` の unique index で一意 |
-| `password_hash` | `TEXT` | bcrypt（コストファクター 12）のハッシュ。平文は保存しない |
+| `id` | `UUID` | ユーザー ID。JWT の `sub` |
+| `email` | `TEXT` | `lower(email)` の unique index で一意 |
+| `password_hash` | `TEXT` | bcrypt hash。平文は保存しない |
 | `created_at` | `TIMESTAMPTZ` | 作成日時 |
 | `updated_at` | `TIMESTAMPTZ` | 更新日時 |
 
-`purchases.buyer_id -> users.id` の FK は、購入 API の認証必須化（Issue #135）で追加済みです。認証導入前のローカル DB に残る過去データを壊さないよう、FK は `NOT VALID`（既存 row は未検査、新規書き込みには強制）で付与しています。
+`purchases.buyer_id -> users.id` は、新規書き込みには強制する `NOT VALID` FK である。認証導入前のローカル既存 row を検査対象外にするためである。
 
-## `refresh_tokens`
+### `refresh_tokens`
 
-リフレッシュトークンは生値を保存せず、SHA-256 hash とローテーション系譜を保存します。
+生 token は保存せず、SHA-256 hash、`family_id`、親子関係、使用・失効時刻、調査用 IP / User-Agent を保存する。`token_hash` は一意、`family_id` と `user_id` は検索 index を持つ。
 
-| 列 | 型 | 説明 |
-| --- | --- | --- |
-| `id` | `UUID` | トークン row の主キー |
-| `user_id` | `UUID` | `users.id` への FK。ユーザー削除時は cascade |
-| `family_id` | `UUID` | login / signup から始まるトークンファミリーの失効単位 |
-| `token_hash` | `TEXT` | opaque トークンの SHA-256 hash。unique index 付き |
-| `parent_token_id` | `UUID` | rotate 元の `refresh_tokens.id` |
-| `replaced_by_token_id` | `UUID` | rotate 後の `refresh_tokens.id` |
-| `issued_at` | `TIMESTAMPTZ` | 発行日時 |
-| `expires_at` | `TIMESTAMPTZ` | 絶対有効期限 |
-| `used_at` | `TIMESTAMPTZ` | rotate-on-use で消費した日時 |
-| `revoked_at` | `TIMESTAMPTZ` | logout / reuse detection で失効した日時 |
-| `revoked_reason` | `TEXT` | 失効理由 |
-| `created_ip` | `TEXT` | 発行元 IP。調査用 |
-| `created_user_agent` | `TEXT` | 発行元 User-Agent。調査用 |
-
-`family_id` は reuse detection / logout のファミリー一括失効、`user_id` はユーザー単位の調査に使うため、それぞれ index を持ちます。
-
-## `events`
-
-イベント本体を表します。
+### `events`
 
 | 列 | 型 | 説明 |
 | --- | --- | --- |
@@ -70,199 +49,196 @@ Issue #336 の expand 段階では、現行の Event 単位 `ticket_inventory` �
 | `title` | `TEXT` | イベント名 |
 | `event_type` | `TEXT` | イベント種別 |
 | `starts_at` | `TIMESTAMPTZ` | 開催日時 |
-| `location_latitude` | `NUMERIC(9, 6)` | 開催地の緯度 |
-| `location_longitude` | `NUMERIC(9, 6)` | 開催地の経度 |
-| `created_by` | `UUID` | イベント作成者。`users.id` への FK（`NOT VALID`）。JWT の `sub` claim 由来 |
+| `location_latitude` | `NUMERIC(9, 6)` | 緯度 |
+| `location_longitude` | `NUMERIC(9, 6)` | 経度 |
+| `created_by` | `UUID` | `users.id` への `NOT VALID` FK |
 | `created_at` | `TIMESTAMPTZ` | 作成日時 |
 
-緯度経度は、後続の検索 PoC で使い回せるように入れています。
+## Ticket Type と在庫
 
-## `ticket_types`
-
-Event 内の販売 Ticket Type を表します。初期実装は General Admission（自由席）の数量在庫だけを扱います。
+### `ticket_types`
 
 | 列 | 型 | 説明 |
 | --- | --- | --- |
-| `id` | `UUID` | Ticket Type ID。独立した主キー |
-| `event_id` | `UUID` | 所有する `events.id` への FK。Event 削除時は cascade |
-| `name` | `TEXT` | 表示名。空文字列と前後の空白を禁止 |
-| `is_default` | `BOOLEAN` | 既定 Ticket Type かどうか |
+| `id` | `UUID` | Ticket Type ID。主キー |
+| `event_id` | `UUID` | 所有 Event。削除時は cascade |
+| `name` | `TEXT` | 表示名。空文字と前後空白を禁止 |
+| `is_default` | `BOOLEAN` | 既定 Type か |
 | `created_at` | `TIMESTAMPTZ` | 作成日時 |
 | `updated_at` | `TIMESTAMPTZ` | 更新日時 |
 
-一意性と参照整合性は次のように分けて保証します。
+DB は次を強制する。
 
-- `ticket_types_event_normalized_name_uq` は `(event_id, lower(name))` を一意にし、同じ Event 内の `VIP` と `vip` のような重複を禁止する。
-- `ticket_types_one_default_per_event_uq` は `is_default = true` の row に限定した partial unique index で、Event ごとの既定 Type を最大1件にする。
-- `ticket_types_event_id_id_key` は `(event_id, id)` を一意にし、在庫と Purchase が「存在する Ticket Type」だけでなく「同じ Event に属する Ticket Type」を参照できるようにする。
+- `(event_id, lower(name))` を一意にし、大文字小文字だけが異なる名前も重複させない。
+- `is_default` の partial unique index により、既定 Type を Event ごとに最大1件にする。
+- `(event_id, id)` を一意にし、在庫と Purchase の複合 FK が別 Event の Type を参照できないようにする。
 
-`id` は単独でも主キーですが、PostgreSQL の複合外部キー `(event_id, ticket_type_id)` の参照先には、同じ列構成の通常の unique 制約が必要です。そのため `(event_id, id)` の unique 制約を明示します。
+既定 Type の最低1件は、#336 の backfill、Event 作成 trigger、readiness 検査で保証する。
 
-partial unique index が保証するのは既定 Type が「最大1件」であることです。「最低1件」は、既存 Event の backfill、Event 作成 trigger、cutover 前の fail-closed checker により保証します。
-
-## `ticket_inventory`
-
-イベントごとの legacy 在庫を表します。
+### `inventory_writer_control`
 
 | 列 | 型 | 説明 |
 | --- | --- | --- |
-| `event_id` | `UUID` | イベント ID。主キー |
-| `total_quantity` | `INTEGER` | 総在庫数 |
-| `remaining_quantity` | `INTEGER` | 残在庫数 |
-| `version` | `INTEGER` | 更新回数。観測・楽観ロック検証用 |
+| `singleton` | `BOOLEAN` | `true` だけを許す主キー |
+| `writer_mode` | `TEXT` | `legacy` または `ticket_type` |
+| `updated_at` | `TIMESTAMPTZ` | mode 更新日時 |
+
+row は正確に1件で、初期値は `legacy` である。application writer は shared barrier の取得後にこの row を読む。Issue #376 は切替可能な artifact までを所有し、exclusive barrier、preflight、実環境 activation / rollback は Issue #378 が所有する。
+
+### `ticket_inventory`
+
+| 列 | 型 | 説明 |
+| --- | --- | --- |
+| `event_id` | `UUID` | Event ID。主キー |
+| `total_quantity` | `INTEGER` | Event の総数または互換合計 |
+| `remaining_quantity` | `INTEGER` | Event の残数または互換合計 |
+| `version` | `INTEGER` | active legacy 更新、または互換集計更新の単調増加値 |
 | `updated_at` | `TIMESTAMPTZ` | 更新日時 |
 
-制約:
-
-- `total_quantity >= 0`
-- `remaining_quantity >= 0`
-- `remaining_quantity <= total_quantity`
-
-Issue #336 の expand 段階では、在庫超過防止の正本は引き続きこのテーブルです。現行 backend の PostgreSQL 条件付き更新は変更せず、その結果を DB trigger で `ticket_type_inventory` へ同期します。
-
-## `ticket_type_inventory`
-
-Ticket Type ごとの General Admission 数量在庫を表します。Issue #336 では legacy 在庫から同期する shadow であり、Issue #337 の controlled activation より前に独立更新しません。
+### `ticket_type_inventory`
 
 | 列 | 型 | 説明 |
 | --- | --- | --- |
 | `ticket_type_id` | `UUID` | Ticket Type ID。主キー |
-| `event_id` | `UUID` | Ticket Type を所有する Event ID |
-| `total_quantity` | `INTEGER` | 総在庫数 |
-| `remaining_quantity` | `INTEGER` | 残在庫数 |
-| `version` | `INTEGER` | 更新回数。legacy 在庫の値を引き継ぐ |
-| `updated_at` | `TIMESTAMPTZ` | legacy 在庫の更新日時を引き継ぐ |
+| `event_id` | `UUID` | 所有 Event ID |
+| `total_quantity` | `INTEGER` | Type 総在庫 |
+| `remaining_quantity` | `INTEGER` | Type 残在庫 |
+| `version` | `INTEGER` | active Type の条件付き更新ごとに増える値 |
+| `updated_at` | `TIMESTAMPTZ` | 更新日時 |
 
-数量には `ticket_inventory` と同じ制約を適用します。
+両在庫 table は `total >= 0`、`remaining >= 0`、`remaining <= total`、`version >= 0` を強制する。`ticket_type_inventory` の `(event_id, ticket_type_id)` は同じ Event の `ticket_types(event_id, id)` だけを参照できる。
 
-- `total_quantity >= 0`
-- `remaining_quantity >= 0`
-- `remaining_quantity <= total_quantity`
-- `version >= 0`
+mode ごとの役割は次のとおりである。
 
-複合外部キー
-`(event_id, ticket_type_id) -> ticket_types(event_id, id)` により、別 Event の Ticket Type 在庫を作れません。Ticket Type 削除時は対応する在庫を cascade で削除します。`event_id` からの照合用 index も持ちます。
+| Mode | active writer / 正本 | transaction 内 mirror | 非 active 側への直接 write |
+| --- | --- | --- | --- |
+| `legacy` | `ticket_inventory` | 正確に1件の既定 `ticket_type_inventory` へ同値同期 | Ticket Type 側を拒否 |
+| `ticket_type` | `ticket_type_inventory` | Type の `SUM(total_quantity)` / `SUM(remaining_quantity)` を `ticket_inventory` へ集約 | legacy 側を拒否 |
 
-## `purchases`
+`ticket_type` mode の legacy `version` は Event 互換集計の更新回数であり、個々の Type version と同値である必要はない。Type version は各 active row の条件付き更新 transaction が採番し、更新後残数と同じ `RETURNING` で取得する。version 付き event contract と projection は Issue #377 が所有する。
 
-購入結果を表します。
+inactive側の条件付き`UPDATE`は、対象rowが0件でもstatement fenceがmode不一致として拒否する。inventory rowの直接`DELETE` / `TRUNCATE`はactive / inactiveを問わず拒否し、Event親rowの削除に伴う外部キーcascadeだけを許可する。
+
+## `purchases` と冪等性
 
 | 列 | 型 | 説明 |
 | --- | --- | --- |
-| `id` | `UUID` | 購入 ID |
-| `event_id` | `UUID` | イベント ID |
-| `ticket_type_id` | `UUID` | 購入対象 Ticket Type ID。同じ Event の `ticket_types` への複合 FK |
-| `buyer_id` | `UUID` | 購入者 ID。`users.id` への FK（`NOT VALID`）。JWT の `sub` claim 由来 |
-| `request_id` | `TEXT` | リクエスト ID。冪等性検証用 |
-| `quantity` | `INTEGER` | 購入枚数 |
+| `id` | `UUID` | Purchase ID |
+| `event_id` | `UUID` | Event ID |
+| `ticket_type_id` | `UUID` | 同じ Event の Ticket Type ID |
+| `buyer_id` | `UUID` | JWT `sub` 由来の購入者 |
+| `request_id` | `TEXT` | 任意の冪等性key |
+| `quantity` | `INTEGER` | 要求枚数 |
 | `status` | `purchase_status` | `confirmed` または `rejected` |
-| `rejection_reason` | `TEXT` | 拒否理由 |
-| `remaining_quantity_after` | `INTEGER` | 確定購入後の残在庫。拒否時は `NULL` |
+| `rejection_reason` | `TEXT` | rejected の理由 |
+| `remaining_quantity_after` | `INTEGER` | confirmed 直後のEvent互換残数 snapshot |
 | `created_at` | `TIMESTAMPTZ` | 作成日時 |
 
-`request_id` は任意ですが、同じ購入者・同じイベントの確定購入（`confirmed`）では一意にします。拒否された購入（`rejected`）は同じ購入者・同じイベント・同じ `request_id` で重複記録しないようにしつつ、在庫補充後に確定購入として再試行できるようにします。将来的にリトライや二重送信の検証に使います。
+`purchases_event_ticket_type_fkey` は `(event_id, ticket_type_id)` を検証済み複合 FK とし、別 Event の Type を DB でも拒否する。
 
-`ticket_type_id` は既存 Purchase を対象 Event の既定 `General Admission` へ backfill した後に `NOT NULL` とします。複合外部キー
-`(event_id, ticket_type_id) -> ticket_types(event_id, id)` により、別 Event の Ticket Type を購入できません。この外部キーは migration 内で `VALIDATE CONSTRAINT` まで完了し、未検証状態を Issue #337 へ持ち越しません。`buyer_id` の既存データ互換を目的とした `NOT VALID` FK とは扱いが異なります。
+`request_id IS NOT NULL` の row は `(buyer_id, event_id, request_id)` を status 横断で一意にする。冪等性payloadは `ticket_type_id + quantity` である。
 
-`(event_id, ticket_type_id, created_at)` の index は、Ticket Type ごとの購入照合と migration readiness 検査に使います。現行の `buyer_id + event_id + request_id` の冪等性 scope は Issue #336 では変更しません。
+- 同じ key / 同じ payload は、元の confirmed または rejected row を返し、在庫を再更新しない。
+- 同じ key で Type または数量が異なる場合は、在庫更新前に HTTP 409 とする。
+- request-key advisory lock は payload を含めず、異なるpayloadも同じlockで直列化する。
+- migration は既存の confirmed / rejected 横断重複を index 変更前に検出し、削除・統合せず全体を rollback する。
+- `request_id = NULL` は冪等性対象外である。
 
-この `ticket_type_id` は現行の直接購入 API を後方互換に expand するための列です。複数 Ticket Type の明細を持つ Ticket Hold や Purchase の最終形ではありません。Ticket Hold 明細と Purchase 明細の table 境界は、Purchase Session / Ticket Hold の実装 Issue で決定します。
+requestId付きrequestは、Valkeyが`sold_out`を返してもPostgreSQLへ進み、authoritativeなconfirmed / rejected rowを永続化する。同じpayloadはそのrowをreplayし、異なるpayloadは409となる。requestIdなしだけはValkeyで早期拒否できる。Ticket Type単位のValkey処理はIssue #389が所有する。
 
-## expand migration と live-write bridge
+公開 Purchase API で Ticket Type を指定する contract は Issue #379 が所有する。#376 の内部 writerは、Type指定を省略した場合に Event の Type が正確に1件のときだけ解決する。複数 Type の作成・選択を公開APIへ出してはいけない。
 
-既存データの backfill と旧 backend の live write の間に欠損を作らないため、versioned migration は1 transaction 内で、既知 writer の入口である `events`、最大 lock が必要な `purchases`、`ticket_inventory` の順に lock を取得し、backfill と一時 DB trigger の有効化を完了します。`lock_timeout` は10秒、各 statement の `statement_timeout` は5分とし、超過時は全体を rollback します。migration 中も Event と在庫の plain read は継続できますが、Purchase の read / write は transaction 完了まで待機します。
+## Writer barrier と mirror
 
-| Trigger | 対象 | expand 段階の動作 |
-| --- | --- | --- |
-| `events_ticket_type_expand_default_trg` | `events` の `AFTER INSERT` | 既定 `General Admission` を同じ transaction で作成する |
-| `ticket_inventory_ticket_type_expand_sync_trg` | `ticket_inventory` の `AFTER INSERT OR UPDATE` | 既定 Type の `ticket_type_inventory` を legacy 在庫の値で upsert する |
-| `purchases_ticket_type_expand_default_trg` | `purchases` の `BEFORE INSERT` | 旧 writer が省略した `ticket_type_id` を対象 Event の既定 Type で補完する |
+control-aware transaction は次の順序を守る。
 
-同期方向は legacy から Ticket Type 側への一方向です。trigger が既定 Type を特定できない、または制約に違反する場合は source の書き込みも同じ transaction で失敗し、未同期の legacy row だけを commit しません。
+1. `pg_advisory_xact_lock_shared(335, 376)`
+2. `requestId` があれば buyer + Event + requestId から導出した transaction advisory lock
+3. `inventory_writer_control` を含む最初の table access
 
-Event 削除時は外部キーの cascade により `ticket_types` と `ticket_type_inventory` を削除するため、`ticket_inventory` の `DELETE` 同期 trigger は設けません。
+request lock の hash collision は無関係なrequestを余分に直列化するだけで、安全性を弱めない。Issue #378 の mode transition は同じ固定 key の exclusive barrierを取得する。
 
-一方向の在庫同期 trigger を残したまま、`ticket_type_inventory` を正本として独立更新してはいけません。Issue #337 は旧 writer の drain と fail-closed preflight を終えた activation 境界で、この trigger を削除するか新しい互換方式へ置き換えます。Event 作成と Purchase 補完の互換 trigger は、Gate C で旧 task と legacy fallback の終了を確認した後、Issue #339 で撤去します。
+DB trigger は transaction-local `ticket_c2c.inventory_mirror_origin` と `pg_trigger_depth()` を併用する。GUCだけをclientが設定してもinactive側のtop-level writeを偽装できない。
 
-## migration readiness と rollback
+- inventory statement fence: inactive側の`UPDATE`を対象row数に関係なくstatement開始時に拒否する。
+- `inventory_compatibility_guard_legacy_write_trg`: legacy の直接 write または Ticket Type 由来のnested mirrorだけを許可する。
+- `inventory_compatibility_guard_ticket_type_write_trg`: Ticket Type の直接 writeまたはlegacy由来mirrorを許可し、reverse mirrorから#336 bridgeへのbounceをskipする。
+- `inventory_compatibility_sync_ticket_type_to_legacy_trg`: Type合計をlegacy互換rowへ反映する。
+- inventory delete guard: 直接`DELETE` / `TRUNCATE`を拒否し、Event親rowからの外部キーcascadeだけを許可する。
 
-Issue #337 の activation 前には readiness checker を実行し、16カテゴリの違反件数がすべて0件であることを確認します。checkerは期待するカテゴリの欠落・追加・重複や不正な件数もエラーとして扱います。1カテゴリでも1件以上、または結果集合が不完全ならprocessは終了コード1となり、切替をfail closedで停止します。
+reverse mirror は `ticket_inventory` の Event row を `FOR UPDATE` でmutexにしてからfresh statement snapshotでType合計を読み直す。異なるTypeが並行更新されても、lock待ち前の古い合計で後勝ち上書きしない。
 
-ローカルではTypeScriptを直接実行します。
+## Event API の互換境界
+
+Event作成もinventory writerである。transactionはshared barrierとmodeを読み、`legacy`では従来どおりlegacy在庫を作り、`ticket_type`ではEvent triggerが作った既定Typeの在庫を作る。mirrorがもう一方を同じtransactionで補完する。
+
+Event一覧とOpenSearch未設定時のDB fallbackは、既存どおり `ticket_inventory` を読む。`ticket_type` modeではこのrowがType合計の互換projectionになるため、top-level `totalQuantity` / `remainingQuantity` のAPI形状とread pathはdeployだけでは変わらない。
+
+既存Purchase responseと既存`TicketPurchased` / `InventoryChanged` eventの`remainingQuantity`も、選択Typeの残数ではなく`ticket_inventory`のEvent互換集計を使う。transactionが取得したType単位の`ticketTypeId`、remaining、versionは内部値として保持し、Type単位responseはIssue #379、version付きevent contractはIssue #377で公開する。
+
+## Migration、readiness、rollback
+
+Issue #336 migration は backfill と次の既存 bridge を1 transactionで導入した。
+
+- Event作成後に既定 `General Admission` を作る。
+- legacy在庫を既定Type shadowへ同期する。
+- 旧 Purchase writerが省略した `ticket_type_id` を既定Typeで補完する。
+
+Issue #376 migration は exclusive barrierとrelation lockを取得し、次を原子的に行う。
+
+- expand readinessとstatus横断request key重複のpreflight
+- 初期 `legacy` control row
+- status横断 unique index
+- 0件更新も止めるinactive-side statement fence
+- direct inventory `DELETE` / `TRUNCATE` guardとEvent親削除のcascade例外
+- row guardとTicket Typeからlegacyへのaggregate mirror
+
+Issue #336 readiness checkerは引き続き初期 `legacy` の16カテゴリを検査する。
 
 ```bash
 npm run migration:check:ticket-type-expand
-```
-
-production imageではdevDependencyの`ts-node`を使わず、build済みJavaScriptを実行します。checkerは`REPEATABLE READ READ ONLY` transaction内の単一snapshotで照合し、この実行経路からDBを変更できないようDB側でも強制します。
-
-```bash
 npm run migration:check:ticket-type-expand:prod
 ```
 
-| Category | 違反として数える状態 |
-| --- | --- |
-| `event_without_exactly_one_default` | 既定 Ticket Type が正確に1件ではないEvent |
-| `event_without_exactly_one_ticket_type_before_cutover` | cutover前にTicket Typeが正確に1件ではないEvent |
-| `event_without_legacy_inventory` | 正本の`ticket_inventory`がないEvent |
-| `legacy_inventory_without_default_shadow` | 対応する既定`ticket_type_inventory`がないlegacy在庫 |
-| `legacy_shadow_total_mismatch` | legacyとshadowの`total_quantity`差分 |
-| `legacy_shadow_remaining_mismatch` | legacyとshadowの`remaining_quantity`差分 |
-| `legacy_shadow_version_mismatch` | legacyとshadowの`version`差分 |
-| `legacy_shadow_updated_at_mismatch` | legacyとshadowの`updated_at`差分 |
-| `non_default_inventory_before_cutover` | 非既定Ticket Typeに作成された在庫 |
-| `purchase_without_ticket_type` | `ticket_type_id`が未設定のPurchase |
-| `purchase_ticket_type_event_mismatch` | PurchaseとTicket TypeのEvent不一致または孤児参照 |
-| `ticket_type_inventory_event_mismatch` | shadow在庫とTicket TypeのEvent不一致または孤児参照 |
-| `required_bridge_trigger_missing_or_disabled` | 必須bridge triggerの欠落、無効化、対象event・即時性・更新対象列・function本文/設定の不一致 |
-| `required_ticket_type_fk_missing_or_unvalidated` | 必須FKの欠落、未検証、列対応・参照先・削除動作の不一致 |
-| `required_ticket_type_not_null_missing` | expand tableと`purchases.ticket_type_id`の必須列欠落または`NOT NULL`未設定 |
-| `required_unique_index_missing_or_invalid` | Ticket TypeのPK・複合参照key・正規化名・既定Type・shadow在庫PKの欠落または定義不一致 |
+親Issue #335のGate Aはdev / stagingのmanual workflow、migration前後件数、旧binary live write、rollback判断を証跡化する。PR mergeは環境適用やactivationを意味しない。
 
-親Issue #335のRollout Gate Aでは、migrationと旧backend binaryによるlive write確認後、対象環境専用のmanual workflowを実行します。
+Issue #376 downはmodeが`legacy`で、各Eventが正確に1件の既定Typeだけを持ち、legacy/default在庫が全列一致し、全PurchaseがそのTypeを参照するときだけ許可する。`ticket_type` modeや複数Type dataをlegacyへ表現できない場合はDDL前に停止する。activation後はIssue #378のcontrolled rollbackを先に使い、losslessに戻せなければforward fixまたはbackup/restoreとする。
 
-- dev: `.github/workflows/ticket-type-expand-readiness-dev.yml`
-- staging: `.github/workflows/ticket-type-expand-readiness-staging.yml`
+## 購入確定クエリ
 
-各workflowは環境選択inputを持たず、GitHub Environmentの承認とAWS認証を使います。通常は現行API task definitionをECS RunTaskで一時起動し、allowlist済みの`ticket-type-readiness` modeから`node dist/src/database/check-ticket-type-expand-readiness.js`を実行します。DBのschemaやデータは変更しません。
-
-workflow summaryにはUTCの開始・終了時刻、task definition、image、task ARN、checkerのJSON結果、container exit codeを記録します。checkerは検証済みの全カテゴリを、証跡type/version、動的な`categoryCount`、`complete: true`とともに1行JSONで出力します。CloudWatch Logsは短時間retryし、JSONのtype/version、結果件数との一致、カテゴリの一意性、違反0件を構造検証します。完全なreadiness結果を取得できなければcontainerが終了コード0でもworkflowを失敗させます。workflow URLと結果を親Issue #335へ記録します。このworkflowは整合性checkerの証跡だけを担当するため、Gate Aに必要なmigration前後の件数、migration名、旧binaryによるEvent作成・一覧・購入、rollbackまたはforward-fix判断も別途同じGateへ記録します。
-
-backend deploy、独立DB migration、readinessは環境ごとの共通concurrency groupで直列化します。migration成功後にservice更新だけが失敗し、現行serviceの旧imageにcheckerがまだない場合は、readiness workflowの`task_definition_arn`へdeploy logに記録された新task definition ARNを指定します。通常のGate Aでは空欄のまま現行serviceを使います。
-
-正規化後の Ticket Type 名重複は unique index が書き込み時に拒否します。PR merge は dev / staging への migration 適用完了を意味しません。migration 前後の Event / Ticket Type / 在庫 / Purchase 件数、populated data、旧 backend binary、migration 後の live write は親 Issue #335 の Rollout Gate A で検証し、同じ環境の Gate A が PASS するまで Issue #337 の内部切替を有効化しません。
-
-down migration は、各 Event が legacy schema で表現できる既定 Ticket Type だけを持ち、legacy 在庫と shadow 在庫が一致し、全 Purchase が同じ Event の既定 Type に紐付く場合に限って実行できます。複数または非既定 Ticket Type、在庫差分、既定 Type 以外への Purchase 紐付けなど、contract 時に失われるデータがある場合は明示的に停止します。Issue #337 の activation 後は forward fix または backup/restore を原則とします。
-
-## 購入確定の基本クエリ
-
-在庫の最終確定では、PostgreSQL の条件付き更新を使います。
+`legacy` mode:
 
 ```sql
 UPDATE ticket_inventory
-SET
-  remaining_quantity = remaining_quantity - :quantity,
-  version = version + 1,
-  updated_at = now()
+SET remaining_quantity = remaining_quantity - :quantity,
+    version = version + 1,
+    updated_at = now()
 WHERE event_id = :event_id
-  AND remaining_quantity >= :quantity;
+  AND remaining_quantity >= :quantity
+RETURNING remaining_quantity, version;
 ```
 
-更新件数が `1` の場合は購入確定、`0` の場合は在庫不足として扱います。
+`ticket_type` mode:
 
-このクエリが、同時購入時に在庫超過を防ぐ最終ガードです。Valkey は前段で不要なリクエストを減らすために使いますが、最終的な正確性は PostgreSQL で保証します。
-
-## 適用ファイル
-
-スキーマ定義は次のファイルに置きます。
-
-```text
-database/schema.sql
+```sql
+UPDATE ticket_type_inventory
+SET remaining_quantity = remaining_quantity - :quantity,
+    version = version + 1,
+    updated_at = now()
+WHERE event_id = :event_id
+  AND ticket_type_id = :ticket_type_id
+  AND remaining_quantity >= :quantity
+RETURNING remaining_quantity, version;
 ```
 
-ローカル PostgreSQL へ適用する場合:
+更新件数1件だけをconfirmedとする。PostgreSQL row lockと条件再評価が過剰販売を防ぐ最終ガードであり、Valkeyは正本ではない。
+
+## 適用と検証
 
 ```bash
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ticket_poc -d ticket_poc < database/schema.sql
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 \
+  -U ticket_poc -d ticket_poc < database/schema.sql
+
+npm run test:migration:ticket-type-expand
+npm run test:migration:ticket-type-compatibility
 ```
