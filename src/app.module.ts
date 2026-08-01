@@ -23,6 +23,8 @@ import { HealthController } from './health.controller';
 import { PurchasesController } from './purchases/purchases.controller';
 // PurchasesService は在庫確認、在庫更新、購入履歴作成を担当する本体ロジックです。
 import { PurchasesService } from './purchases/purchases.service';
+// TicketTypeResolverModule は Ticket Type 単位前段フィルタの scope 解決 service を提供します（Issue #389）。
+import { TicketTypeResolverModule } from './purchases/ticket-type-resolver.module';
 
 // AppModule はこの API のルートモジュールです。
 // ここを見ると「どの controller と service がアプリに登録されているか」が分かります。
@@ -33,6 +35,7 @@ import { PurchasesService } from './purchases/purchases.service';
     CacheModule,
     MessagingModule,
     SearchModule,
+    TicketTypeResolverModule,
     EventsModule,
     AuthModule,
   ],

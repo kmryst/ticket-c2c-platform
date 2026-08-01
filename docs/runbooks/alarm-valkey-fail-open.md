@@ -49,6 +49,39 @@ Security Group、ECS desired count、Valkey 構成を変更する場合は、対
 3. **fail-open が継続している間の緩和**: Aurora 側の負荷（`aurora-connections-high` 等）が同時に上昇している場合は、`alarm-aurora.md` の runbook に従い一時的に API の desired_count を絞ることも選択肢（トレードオフ: スループット低下）。
 4. Valkey は「正本ではない」設計（fail-open 前提、キャッシュ・前段フィルタ用途）のため、Valkey 単独の障害でデータ不整合は発生しない。復旧を急ぐ理由は「Aurora 保護層の早期回復」である。
 
+## Ticket Type cutover 時の Aurora 到達（Issue #389）
+
+Ticket Type 単位 cutover（ADR-0029 / ADR-0030）では、`requestId` 付きの sold-out request を
+Valkey で即時終了させず、authoritative な冪等性判定のために PostgreSQL へ通します。requestId を
+変え続ける sold-out traffic は、DB 到達数と rejected row を増やすため、ID 値を含めない低
+カーディナリティ metric で到達率を監視します。
+
+- **DB 到達率**: `PurchaseSoldOutToPostgres`（Count、Service=api）。requestId 付き sold-out を
+  Valkey で終了させず DB へ通した回数。総 request に対する比で「Valkey で早期拒否できていない
+  sold-out traffic」の割合を見る。
+- **rejected insert rate**: `PurchaseRejectedPersisted`（Count、Service=api）。新規 rejected row を
+  DB へ永続化した回数（replay は含まない）。requestId を変え続ける traffic の増加兆候。
+- 併せて `aurora-connections-high` / `aurora-cpu-high` と、`ValkeyFailOpen`（Ticket Type 単位操作
+  を含む）、`TicketTypeScopeMismatch`、`CompensationFailure` を確認する。
+
+### 前段 guard の再検討条件
+
+上記 traffic で Aurora 保護が必要になった場合、次の対策を検討する。いずれも #376 の
+authoritative replay（同一 key・同一 payload は元結果を返す）と payload 相違 409 を壊さない
+ことを前提とする。
+
+- **前段 guard / WAF rate 制御**: 同一 buyer が requestId を変え続ける sold-out 連打を、CloudFront
+  / WAF または購入 API の dual-key レート制限（ADR-0015）でエッジ寄りに絞る。requestId 値では
+  なく buyer / IP 単位で絞ることで idempotency を壊さない。
+- **rate limit の強化**: 購入エンドポイントの user_id 主体 dual-key レート制限の閾値を、sold-out
+  event に対して一時的に厳しくする。
+- **容量制御**: Aurora 接続数・ECS desired count・読み取り経路の分離で DB 保護層を厚くする。
+  実行時は対象環境・変更前後値・ユーザー影響を記録し承認を得る。
+
+判断の目安: `PurchaseSoldOutToPostgres` と `PurchaseRejectedPersisted` の増加が `aurora-connections-high`
+と相関し始めたら、上記のいずれかを Issue 化して導入を検討する。Terraform の alarm / dashboard
+追加は #389 の対象外であり、必要になった時点で別 Issue で扱う。
+
 ## エスカレーション条件
 
 - **Critical**: 通知受信次第、1 時間以内に状況確認開始。Valkey 障害が 1 時間以上継続する場合は Aurora 側の負荷を監視しながら復旧を最優先タスク化。

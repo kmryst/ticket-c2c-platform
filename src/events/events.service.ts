@@ -3,13 +3,14 @@
 // 登録は Aurora（正本）へ書き、Valkey カウンタ初期化と EventListed 発行で読み取り系へ伝搬します。
 // 検索は OpenSearch を読み、未設定時（ローカル）は DB フォールバックします。
 
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import {
   acquireSharedInventoryWriterBarrier,
   readInventoryWriterMode,
 } from '../database/inventory-writer-control';
 import { InventoryCacheService } from '../cache/inventory-cache.service';
+import { TicketTypeResolverService } from '../purchases/ticket-type-resolver.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
 import {
   SearchService,
@@ -46,12 +47,19 @@ interface EventListRow {
 
 @Injectable()
 export class EventsService {
+  private readonly resolver: TicketTypeResolverService;
+
   constructor(
     private readonly database: DatabaseService,
     private readonly inventoryCache: InventoryCacheService,
     private readonly domainEvents: DomainEventsService,
     private readonly searchService: SearchService,
-  ) {}
+    // resolver は DI で共有 singleton を注入する。未注入（一部の単体テスト）では
+    // database から fallback で生成する。
+    @Optional() resolver?: TicketTypeResolverService,
+  ) {
+    this.resolver = resolver ?? new TicketTypeResolverService(database);
+  }
 
   // createEvent はイベントと初期在庫を 1 transaction で作成します。
   // createdBy は JwtAuthGuard 検証済みトークンの sub claim（users.id）です（L-10、Issue #194）。
@@ -62,12 +70,16 @@ export class EventsService {
     const client = await this.database.connect();
 
     let eventId: string;
+    // ticket_type mode で作った default Type を、commit 後の Valkey 初期化で使う。
+    let ticketTypeWriterMode = false;
+    let defaultTicketTypeId: string | null = null;
     try {
       await client.query('BEGIN');
 
       // Issue #376: first table access より前に shared barrier を取得し、DB共有modeを読む。
       await acquireSharedInventoryWriterBarrier(client);
       const writerMode = await readInventoryWriterMode(client);
+      ticketTypeWriterMode = writerMode === 'ticket_type';
 
       const inserted = await client.query<EventInsertRow>(
         `
@@ -111,6 +123,7 @@ export class EventsService {
             'new event does not have exactly one default ticket type',
           );
         }
+        defaultTicketTypeId = defaultType.rows[0].id;
         await client.query(
           `
             INSERT INTO ticket_type_inventory (
@@ -134,7 +147,22 @@ export class EventsService {
     }
 
     // 正本（Aurora）確定後に、前段フィルタと検索プロジェクションへ伝搬します。
-    await this.inventoryCache.initCounter(eventId, input.totalQuantity);
+    // commit 失敗時はここに到達しないため、Valkey へ何も作りません。
+    if (ticketTypeWriterMode && defaultTicketTypeId) {
+      // ticket_type mode: 作成した default Type の Valkey counter と mapping を初期化する。
+      await this.inventoryCache.initTicketTypeCounter(
+        eventId,
+        defaultTicketTypeId,
+        input.totalQuantity,
+      );
+      this.resolver.prime(eventId, {
+        writerMode: 'ticket_type',
+        scope: { kind: 'single', ticketTypeId: defaultTicketTypeId },
+      });
+    } else {
+      // legacy mode: 既存 Event 単位 counter 初期化を維持する。
+      await this.inventoryCache.initCounter(eventId, input.totalQuantity);
+    }
     await this.domainEvents.publish('EventListed', {
       eventId,
       title: input.title,

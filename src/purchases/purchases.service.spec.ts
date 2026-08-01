@@ -10,6 +10,10 @@ import { PurchasesService } from './purchases.service';
 import { InventoryCacheService } from '../cache/inventory-cache.service';
 import { DatabaseService } from '../database/database.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
+import {
+  PrefilterPlan,
+  TicketTypeResolverService,
+} from './ticket-type-resolver.service';
 
 const EVENT_ID = '11111111-1111-4111-8111-111111111111';
 const BUYER_ID = '22222222-2222-4222-8222-222222222222';
@@ -152,11 +156,19 @@ function createFakeDbClient(behavior: FakeDbBehavior) {
 }
 
 // createService はモック依存で PurchasesService を組み立てる helper です。
+// resolver は mock を注入し、prefilter plan（writer mode / Type scope）を
+// テストが直接制御できるようにします。plan の DB 解決自体は
+// ticket-type-resolver.service.spec.ts で別途検証します。
 function createService(options: {
   reserveOutcome: 'reserved' | 'sold_out' | 'unknown';
   wasRequestSeen?: boolean;
   syncCounterResult?: boolean;
+  syncTicketTypeResult?: boolean;
+  reserveTicketTypeRevision?: string | null;
+  releaseTicketTypeOk?: boolean;
+  ticketTypeRevision?: string;
   db?: FakeDbBehavior;
+  plan?: PrefilterPlan;
 }) {
   const dbClient = createFakeDbClient(options.db ?? {});
 
@@ -171,14 +183,57 @@ function createService(options: {
     syncCounter: jest.fn(async () => options.syncCounterResult ?? true),
     markRequestSeen: jest.fn(async () => undefined),
     wasRequestSeen: jest.fn(async () => options.wasRequestSeen ?? false),
+    // Ticket Type 単位 API（Issue #389）。
+    reserveTicketType: jest.fn(async () => ({
+      outcome: options.reserveOutcome,
+      revision:
+        options.reserveOutcome === 'reserved'
+          ? (options.reserveTicketTypeRevision ?? 'rev-1')
+          : null,
+    })),
+    releaseTicketType: jest.fn(async () => options.releaseTicketTypeOk ?? true),
+    getTicketTypeCounterRevision: jest.fn(
+      async () => options.ticketTypeRevision ?? 'rev-1',
+    ),
+    syncTicketTypeCounter: jest.fn(
+      async () => options.syncTicketTypeResult ?? true,
+    ),
+    initTicketTypeCounter: jest.fn(async () => undefined),
   } as unknown as InventoryCacheService;
 
   const domainEvents = {
     publish: jest.fn(async () => undefined),
   } as unknown as DomainEventsService;
 
-  const service = new PurchasesService(database, inventoryCache, domainEvents);
-  return { service, database, inventoryCache, domainEvents, dbClient };
+  const writerMode = options.db?.writerMode ?? 'legacy';
+  let plan: PrefilterPlan;
+  if (options.plan) {
+    plan = options.plan;
+  } else if (writerMode === 'legacy') {
+    plan = { writerMode: 'legacy' };
+  } else {
+    const ids = options.db?.ticketTypeIds ?? [TICKET_TYPE_ID];
+    plan =
+      ids.length === 1
+        ? {
+            writerMode: 'ticket_type',
+            scope: { kind: 'single', ticketTypeId: ids[0] },
+          }
+        : { writerMode: 'ticket_type', scope: { kind: 'multi' } };
+  }
+  const resolver = {
+    resolvePrefilterPlan: jest.fn(async () => plan),
+    prime: jest.fn(),
+    invalidate: jest.fn(),
+  } as unknown as TicketTypeResolverService;
+
+  const service = new PurchasesService(
+    database,
+    inventoryCache,
+    domainEvents,
+    resolver,
+  );
+  return { service, database, inventoryCache, domainEvents, dbClient, resolver };
 }
 
 describe('PurchasesService の前段フィルタ分岐（M-1）', () => {
@@ -543,5 +598,270 @@ describe('PurchasesService の compatibility writer（Issue #376）', () => {
     });
 
     expect(domainEvents.publish).not.toHaveBeenCalled();
+  });
+});
+
+describe('PurchasesService の Ticket Type 単位経路（Issue #389）', () => {
+  const ticketTypeDb = (extra: FakeDbBehavior = {}): FakeDbBehavior => ({
+    writerMode: 'ticket_type',
+    ...extra,
+  });
+
+  it('explicit Type は reserve に明示 Type を使い、別 Type counter を使わない', async () => {
+    const { service, inventoryCache } = createService({
+      reserveOutcome: 'reserved',
+      plan: {
+        writerMode: 'ticket_type',
+        scope: { kind: 'single', ticketTypeId: OTHER_TICKET_TYPE_ID },
+      },
+      db: ticketTypeDb({ inventoryUpdated: true, remainingAfterUpdate: 4 }),
+    });
+
+    await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 1 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    // 明示 Type が優先され、cache の別 Type（OTHER）は使わない。
+    expect(inventoryCache.reserveTicketType).toHaveBeenCalledWith(
+      EVENT_ID,
+      TICKET_TYPE_ID,
+      1,
+    );
+    expect(inventoryCache.reserve).not.toHaveBeenCalled();
+  });
+
+  it('requestId なしの sold_out は前段拒否し DB に到達しない（ticket_type）', async () => {
+    const { service, database } = createService({
+      reserveOutcome: 'sold_out',
+      db: ticketTypeDb(),
+    });
+
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 2,
+    });
+
+    expect(result.status).toBe('rejected');
+    expect(result.rejectionReason).toBe('sold_out_precheck');
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it('requestId 付きの sold_out は DB へ進み結果を永続化する（ticket_type）', async () => {
+    const { service, database, inventoryCache, dbClient } = createService({
+      reserveOutcome: 'sold_out',
+      db: ticketTypeDb({
+        inventoryUpdated: true,
+        remainingAfterUpdate: 0,
+        compatibilityRemaining: 0,
+      }),
+    });
+
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 2,
+      requestId: 'tt-sold-out-to-db',
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(database.connect).toHaveBeenCalled();
+    expect(inventoryCache.markRequestSeen).toHaveBeenCalled();
+    expect(
+      dbClient.queries.some((q) => q.includes('INSERT INTO purchases')),
+    ).toBe(true);
+  });
+
+  it('複数 Type かつ Type 省略は Valkey を bypass し DB へ判断させる', async () => {
+    const { service, inventoryCache, dbClient } = createService({
+      reserveOutcome: 'unknown',
+      db: ticketTypeDb({
+        ticketTypeIds: [TICKET_TYPE_ID, OTHER_TICKET_TYPE_ID],
+        inventoryUpdated: true,
+        remainingAfterUpdate: 3,
+        compatibilityRemaining: 3,
+      }),
+    });
+
+    // 複数 Type で Type 省略の新規 request は #376 の transaction が 400 にする。
+    await expect(
+      service.createPurchase(EVENT_ID, BUYER_ID, { quantity: 1 }),
+    ).rejects.toMatchObject({ status: 400 });
+
+    // bypass のため reserveTicketType を呼ばない。
+    expect(inventoryCache.reserveTicketType).not.toHaveBeenCalled();
+    expect(
+      dbClient.queries.some((q) => q.includes('FROM ticket_types')),
+    ).toBe(true);
+  });
+
+  it('reserved で通過した replay は reserve 分を同じ Type へ release で戻す', async () => {
+    const { service, inventoryCache } = createService({
+      reserveOutcome: 'reserved',
+      db: ticketTypeDb({ existingConfirmed: true }),
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 2, requestId: 'tt-replay' },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    expect(result.status).toBe('confirmed');
+    expect(inventoryCache.releaseTicketType).toHaveBeenCalledWith(
+      EVENT_ID,
+      TICKET_TYPE_ID,
+      2,
+    );
+    expect(inventoryCache.syncTicketTypeCounter).not.toHaveBeenCalled();
+  });
+
+  it('DB エラー時は reserve した同じ Type と数量だけを release で戻す', async () => {
+    const { service, inventoryCache, dbClient } = createService({
+      reserveOutcome: 'reserved',
+      db: ticketTypeDb(),
+    });
+    dbClient.query.mockRejectedValueOnce(new Error('connection lost'));
+
+    await expect(
+      service.createPurchase(
+        EVENT_ID,
+        BUYER_ID,
+        { quantity: 3 },
+        { ticketTypeId: TICKET_TYPE_ID },
+      ),
+    ).rejects.toThrow('connection lost');
+
+    expect(inventoryCache.releaseTicketType).toHaveBeenCalledWith(
+      EVENT_ID,
+      TICKET_TYPE_ID,
+      3,
+    );
+  });
+
+  it('DB rejected（reserved）は Type 残数で CAS sync し、成立すれば release しない', async () => {
+    const { service, inventoryCache } = createService({
+      reserveOutcome: 'reserved',
+      reserveTicketTypeRevision: 'rev-42',
+      syncTicketTypeResult: true,
+      db: ticketTypeDb({ inventoryUpdated: false, remainingOnReject: 1 }),
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 3 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    expect(result.status).toBe('rejected');
+    // reserve が原子的に返した revision を使い、別途 getCounterVersion は呼ばない。
+    expect(
+      inventoryCache.getTicketTypeCounterRevision,
+    ).not.toHaveBeenCalled();
+    expect(inventoryCache.syncTicketTypeCounter).toHaveBeenCalledWith(
+      EVENT_ID,
+      TICKET_TYPE_ID,
+      1,
+      'rev-42',
+    );
+    expect(inventoryCache.releaseTicketType).not.toHaveBeenCalled();
+  });
+
+  it('DB rejected（reserved）で CAS sync が見送られた場合だけ正確に release する', async () => {
+    const { service, inventoryCache } = createService({
+      reserveOutcome: 'reserved',
+      syncTicketTypeResult: false,
+      db: ticketTypeDb({ inventoryUpdated: false, remainingOnReject: 1 }),
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 3 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    expect(result.status).toBe('rejected');
+    expect(inventoryCache.releaseTicketType).toHaveBeenCalledWith(
+      EVENT_ID,
+      TICKET_TYPE_ID,
+      3,
+    );
+  });
+
+  it('gate=unknown で confirmed した場合は Type 残数で CAS sync する', async () => {
+    const { service, inventoryCache } = createService({
+      reserveOutcome: 'unknown',
+      ticketTypeRevision: 'rev-9',
+      db: ticketTypeDb({ inventoryUpdated: true, remainingAfterUpdate: 5 }),
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 2 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    expect(result.status).toBe('confirmed');
+    expect(inventoryCache.syncTicketTypeCounter).toHaveBeenCalledWith(
+      EVENT_ID,
+      TICKET_TYPE_ID,
+      5,
+      'rev-9',
+    );
+  });
+
+  it('prefilter Type と transaction Type が異なる場合は cross-Type sync しない', async () => {
+    const { service, inventoryCache } = createService({
+      reserveOutcome: 'reserved',
+      // cache は OTHER を指すが、transaction は default（TICKET_TYPE_ID）を解決する。
+      plan: {
+        writerMode: 'ticket_type',
+        scope: { kind: 'single', ticketTypeId: OTHER_TICKET_TYPE_ID },
+      },
+      db: ticketTypeDb({
+        ticketTypeIds: [TICKET_TYPE_ID],
+        inventoryUpdated: true,
+        remainingAfterUpdate: 6,
+      }),
+    });
+
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 1,
+    });
+
+    expect(result.status).toBe('confirmed');
+    // reserve した OTHER の DB 残数を別 Type の key へ sync しない。安全側に release する。
+    expect(inventoryCache.syncTicketTypeCounter).not.toHaveBeenCalled();
+    expect(inventoryCache.releaseTicketType).toHaveBeenCalledWith(
+      EVENT_ID,
+      OTHER_TICKET_TYPE_ID,
+      1,
+    );
+  });
+
+  it('public response は Event 互換集計を維持し Type 内部値を露出しない', async () => {
+    const { service } = createService({
+      reserveOutcome: 'reserved',
+      db: ticketTypeDb({
+        inventoryUpdated: true,
+        remainingAfterUpdate: 6,
+        compatibilityRemaining: 9,
+      }),
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 2 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    // 公開 response は Event 互換集計（9）を返し、Type 残数（6）や内部値を露出しない。
+    expect(result.remainingQuantity).toBe(9);
+    expect(result).not.toHaveProperty('ticketTypeId');
+    expect(result).not.toHaveProperty('inventoryVersion');
   });
 });

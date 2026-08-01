@@ -109,7 +109,11 @@ API / Worker の主要な構造化ログと EMF record には、出力時点で�
 | --- | --- | --- | --- | --- |
 | PurchaseConfirmed | Count | API | Service | 購入確定数 |
 | PurchaseRejected | Count | API | Service, Reason | 購入拒否数（sold_out_precheck / DB 判定理由別） |
-| ValkeyFailOpen | Count | API | Service, Operation | 前段フィルタ障害で fail-open した回数。増加は Aurora 素通りの兆候 |
+| PurchaseRejectedPersisted | Count | API | Service | 新規 rejected row を DB に永続化した回数（rejected insert rate の観測元。replay は数えない。Issue #389） |
+| PurchaseSoldOutToPostgres | Count | API | Service | requestId 付き sold-out を Valkey で終了させず PostgreSQL へ通した回数（DB 到達率の観測元。Issue #389） |
+| TicketTypeScopeMismatch | Count | API | Service | prefilter で解決した Type と transaction が返す Type が不一致で、安全側処理（cross-Type sync 回避）を行った回数（Issue #389） |
+| CompensationFailure | Count | API | Service, Operation | PostgreSQL 失敗時などの補償（Ticket Type counter release）が失敗した回数（Issue #389） |
+| ValkeyFailOpen | Count | API | Service, Operation | 前段フィルタ障害で fail-open した回数。増加は Aurora 素通りの兆候。Operation に Ticket Type 単位操作（reserveTicketType 等）を含む（Issue #389 で追加） |
 | WorkerProcessingLagMs | Milliseconds | Worker | Service | SQS 送信から処理完了（削除）までの経過時間 |
 | PurchaseRequestOutcome | Count | API | Service, Outcome | 購入 API の技術的な成否分類（success / technical_failure / rate_limited / invalid_request）。SLI: 成功率の算出元（ADR-0016 / Issue #225） |
 | PurchaseRequestLatencyMs | Milliseconds | API | Service, Outcome | 購入 API の応答時間（Guard 通過後〜応答まで）。SLI: レイテンシ（ADR-0016 / Issue #225） |

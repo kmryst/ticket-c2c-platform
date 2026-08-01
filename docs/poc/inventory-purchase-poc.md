@@ -58,6 +58,59 @@ WHERE event_id = :event_id
   AND remaining_quantity >= :quantity;
 ```
 
+## Ticket Type 単位 Valkey 前段フィルタ（Issue #389）
+
+Event 単位在庫から Ticket Type 単位在庫への cutover に向けて、Valkey 前段フィルタを Ticket Type 単位へ対応させています。設計判断の背景・トレードオフ・rollback 境界は [ADR-0030](../adr/0030-ticket-type-valkey-inventory-compatibility.md)、正本 writer 側は [ADR-0029](../adr/0029-use-control-aware-postgresql-compatibility-writer.md) を参照します。Valkey は在庫の正本ではなく、実環境の seed・activation・rollback は Issue #378 / #335 Gate B が所有します。
+
+### namespace
+
+旧 Event 単位 key（`inventory:<eventId>` / `inventory:<eventId>:v`）は変更・削除しません。Ticket Type 用に衝突しない新 namespace を追加します。
+
+- `inventory:ticket-type:{<eventId>:<ticketTypeId>}:remaining`
+- `inventory:ticket-type:{<eventId>:<ticketTypeId>}:revision`
+
+counter と revision は hash tag `{<eventId>:<ticketTypeId>}` を共有し、Redis Cluster でも同じ hash slot に乗せます（同一 Lua script で両方に触れるため）。Valkey の CAS revision は counter 変更回数を数える Valkey ローカルの値で、#376 が PostgreSQL transaction から返す inventory version（在庫行の `version` 列）とは別物です。
+
+### 経路選択（writer mode 追従）
+
+前段フィルタが Event 単位 counter と Ticket Type 単位 counter のどちらを使うかは、`inventory_writer_control.writer_mode`（#378 所有）に追従します。Valkey 単独の activation switch は追加しません。
+
+- `legacy` mode: 従来どおり Event 単位 counter を使う。
+- `ticket_type` mode: Ticket Type 単位 counter を使う。
+
+sold-out prefilter より前に、`writer_mode` と Event の Ticket Type scope を event 単位に in-process cache（既定 TTL 5 秒、`TICKET_TYPE_PREFILTER_CACHE_TTL_MS` で変更可）で解決します。cache hit では PostgreSQL へ到達しないため、通常の sold-out request は Type 解決目的の DB クエリを発生させません。cache miss のときだけ `writer_mode` と Ticket Type 一覧を 1 接続でまとめて読みます。
+
+### Ticket Type 解決順
+
+1. 内部呼び出しで明示された `ticketTypeId`
+2. Event→単一/default Ticket Type cache
+3. cache miss のときだけ PostgreSQL 問い合わせ
+
+複数 Type かつ Type 省略で scope を安全に決められない場合は Valkey を bypass し、#376 の transaction に判断させます。保存済み requestId の replay は現在の Type 構成より優先され、Type 省略で保存された requestId は後から Type が増えても replay できます。
+
+### reserve / release / sync / 補償
+
+reserve の Lua script は「counter 存在確認 → 在庫比較 → 減算 → revision 更新 → race-safe な revision 取得」を原子的に行い、`reserved` 時だけ減算後の revision を返します。reserve / release / sync / revision / PostgreSQL 失敗時の補償は、すべて同じ `eventId + ticketTypeId` scope を使い、別 Type の counter を変更しません。
+
+- counter 未存在・Valkey 障害: `unknown` として PostgreSQL へ fail-open。
+- `release` / `sync` は存在しない counter を作りません。
+- reserve 後に新規在庫消費が成立しなかった場合（transaction error / rejected / idempotent replay / payload 相違 409）は、reserve した Type と数量だけを補償します。DB から sync する値は実際の Ticket Type 残数を使います。
+- prefilter で解決した Type と transaction が返す Type が異なる場合は cross-Type sync を行わず、安全側（reserve 分の release + log + metric）に倒します。
+
+### cache invalidation 境界（#379 向け）
+
+Event→default Type mapping cache は次の変更で最終的に反映されます。
+
+- 単一 Type の Event に 2 件目の Type を追加する（#379）。
+- writer mode を `legacy` <-> `ticket_type` へ切り替える（#378 の activation / rollback）。
+
+いずれも cache TTL の範囲で反映されます。即時反映が必要な #378 / #379 は TTL 経過を待つか、`TicketTypeResolverService.prime()` / `invalidate()` で明示更新します。in-process cache は ECS task ごとに独立するため、task 間で反映タイミングがずれます。
+
+### rollback
+
+- Gate B 前: `writer_mode = legacy` で新 Ticket Type 経路が自然に bypass され、直前の backend artifact へ戻せます。旧・新 namespace は削除しません。
+- Gate B 後: Valkey だけを独立 rollback せず、#378 の controlled rollback で在庫 read / write 全体を `ticket_type` から `legacy` へ戻します。
+
 ## ローカル実行手順
 
 依存関係をインストールする。

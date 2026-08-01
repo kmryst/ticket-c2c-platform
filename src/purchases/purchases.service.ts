@@ -8,6 +8,7 @@ import {
   Injectable,
   InternalServerErrorException,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import {
@@ -16,10 +17,17 @@ import {
   InventoryWriterMode,
   readInventoryWriterMode,
 } from '../database/inventory-writer-control';
-import { InventoryCacheService } from '../cache/inventory-cache.service';
+import {
+  InventoryCacheService,
+  TicketTypeReserveResult,
+} from '../cache/inventory-cache.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
 import { emitMetric } from '../observability/emf';
 import { traceLogFields } from '../observability/trace-context';
+import {
+  PrefilterPlan,
+  TicketTypeResolverService,
+} from './ticket-type-resolver.service';
 import {
   ParsedPurchaseInput,
   PurchaseRequestBody,
@@ -78,8 +86,14 @@ interface PurchaseTransactionOutcome {
   disposition: 'created' | 'replayed';
   // #377 producer が利用できる transaction 由来の内部interface。HTTPへはまだ返さない。
   inventoryChange: PurchaseInventoryChange | null;
-  // #389 までは Event 単位 Valkey counter を補正するため、互換aggregateを使う。
+  // Event 単位 Valkey counter（legacy path）を補正するための互換aggregate。
   compatibilityRemainingQuantity: number | null;
+  // #389: Ticket Type 単位 Valkey counter の補償に使う transaction 解決結果。
+  // resolvedTicketTypeId は transaction が確定した Type。prefilter で reserve した Type と
+  // 異なる場合は cross-Type sync を避ける。ticketTypeRemainingQuantity は ticket_type mode
+  // での実際の Type 残数（legacy mode や replay では null）。
+  resolvedTicketTypeId: string | null;
+  ticketTypeRemainingQuantity: number | null;
 }
 
 type QueryClient = {
@@ -88,11 +102,18 @@ type QueryClient = {
 
 @Injectable()
 export class PurchasesService {
+  private readonly resolver: TicketTypeResolverService;
+
   constructor(
     private readonly database: DatabaseService,
     private readonly inventoryCache: InventoryCacheService,
     private readonly domainEvents: DomainEventsService,
-  ) {}
+    // resolver は DI で共有 singleton を注入する。未注入（一部の単体テスト）では
+    // database から fallback で生成する。
+    @Optional() resolver?: TicketTypeResolverService,
+  ) {
+    this.resolver = resolver ?? new TicketTypeResolverService(database);
+  }
 
   async createPurchase(
     eventId: string,
@@ -103,6 +124,21 @@ export class PurchasesService {
   ): Promise<PurchaseResult> {
     const input = parsePurchaseInput(eventId, buyerId, body, selection);
 
+    // sold-out prefilter より前に、writer mode と Ticket Type scope を解決する。
+    // cache hit では DB へ到達しないため、通常の sold-out request は解決目的の
+    // DB クエリを発生させない（#389 受け入れ条件）。
+    const plan = await this.resolver.resolvePrefilterPlan(input.eventId);
+    if (plan.writerMode === 'ticket_type') {
+      return this.createPurchaseTicketType(input, plan);
+    }
+    return this.createPurchaseLegacy(input);
+  }
+
+  // createPurchaseLegacy は Event 単位 counter を使う従来経路です（writer mode = legacy）。
+  // #389 は旧 Event 単位 key の意味を変えないため、この経路は据え置きます。
+  private async createPurchaseLegacy(
+    input: ParsedPurchaseInput,
+  ): Promise<PurchaseResult> {
     const reserveOutcome = await this.inventoryCache.reserve(
       input.eventId,
       input.quantity,
@@ -208,6 +244,235 @@ export class PurchasesService {
     }
 
     return result;
+  }
+
+  // createPurchaseTicketType は Ticket Type 単位 counter を使う経路です
+  // （writer mode = ticket_type、Issue #389）。reserve / release / sync / revision と
+  // PostgreSQL 失敗時の補償を、すべて同じ eventId + ticketTypeId scope で行い、
+  // 別 Type の counter を変更しません。
+  private async createPurchaseTicketType(
+    input: ParsedPurchaseInput,
+    plan: Extract<PrefilterPlan, { writerMode: 'ticket_type' }>,
+  ): Promise<PurchaseResult> {
+    // prefilter scope の Type を解決する。
+    // 優先順: 明示 ticketTypeId > 単一/default Type cache > bypass（複数 Type）。
+    let prefilterTicketTypeId: string | null;
+    if (input.ticketTypeId) {
+      prefilterTicketTypeId = input.ticketTypeId;
+    } else if (plan.scope.kind === 'single') {
+      prefilterTicketTypeId = plan.scope.ticketTypeId;
+    } else {
+      // 複数 Type かつ Type 省略。scope を安全に決められないため Valkey を bypass し、
+      // #376 の transaction に判断させる。
+      prefilterTicketTypeId = null;
+    }
+
+    const reserve: TicketTypeReserveResult = prefilterTicketTypeId
+      ? await this.inventoryCache.reserveTicketType(
+          input.eventId,
+          prefilterTicketTypeId,
+          input.quantity,
+        )
+      : { outcome: 'unknown', revision: null };
+
+    // requestId なしの sold_out は即時前段拒否（DB へ到達させない）。
+    if (reserve.outcome === 'sold_out' && !input.requestId) {
+      emitMetric('PurchaseRejected', 1, 'Count', {
+        Reason: 'sold_out_precheck',
+      });
+      return {
+        purchaseId: null,
+        eventId: input.eventId,
+        buyerId: input.buyerId,
+        quantity: input.quantity,
+        status: 'rejected',
+        rejectionReason: 'sold_out_precheck',
+        remainingQuantity: null,
+      };
+    }
+
+    // requestId 付きの sold_out は Valkey で即時終了させず PostgreSQL へ進める
+    // （同じ payload の replay / 異なる payload の 409 / 在庫回復時の confirmed を
+    // DB が authoritative に決める）。DB 到達量を ID 値なしで観測する。
+    if (reserve.outcome === 'sold_out' && input.requestId) {
+      emitMetric('PurchaseSoldOutToPostgres', 1, 'Count');
+    }
+
+    const gate: 'reserved' | 'unknown' =
+      reserve.outcome === 'reserved' ? 'reserved' : 'unknown';
+
+    let outcome: PurchaseTransactionOutcome;
+    try {
+      outcome = await this.executePurchaseTransaction(input);
+    } catch (error) {
+      // transaction が確定していない場合だけ、reserve した Type と数量を補償する。
+      if (gate === 'reserved' && prefilterTicketTypeId) {
+        await this.compensateTicketTypeRelease(
+          input.eventId,
+          prefilterTicketTypeId,
+          input.quantity,
+        );
+      }
+      throw error;
+    }
+
+    const { result } = outcome;
+
+    if (result.status === 'confirmed') {
+      emitMetric('PurchaseConfirmed', 1, 'Count');
+    } else {
+      emitMetric('PurchaseRejected', 1, 'Count', {
+        Reason: result.rejectionReason ?? 'unknown',
+      });
+      // 新規 rejected row の永続化数（rejected insert rate の観測元）。replay は数えない。
+      if (outcome.disposition === 'created') {
+        emitMetric('PurchaseRejectedPersisted', 1, 'Count');
+      }
+    }
+
+    if (input.requestId && result.purchaseId !== null) {
+      await this.inventoryCache.markRequestSeen(
+        input.buyerId,
+        input.eventId,
+        input.requestId,
+      );
+    }
+
+    await this.reconcileTicketTypeCounter({
+      input,
+      prefilterTicketTypeId,
+      gate,
+      reservedRevision: reserve.revision,
+      outcome,
+    });
+
+    // replay は在庫を変えていないので domain event を再発行しない。
+    // 公開 response と既存 event payload は Event 互換集計を維持する（#377 / #379 まで）。
+    if (result.status === 'confirmed' && outcome.disposition === 'created') {
+      await this.domainEvents.publish('TicketPurchased', {
+        eventId: result.eventId,
+        purchaseId: result.purchaseId,
+        quantity: result.quantity,
+        remainingQuantity: result.remainingQuantity,
+      });
+      await this.domainEvents.publish('InventoryChanged', {
+        eventId: result.eventId,
+        remainingQuantity: result.remainingQuantity,
+      });
+    }
+
+    return result;
+  }
+
+  // reconcileTicketTypeCounter は transaction 後の Ticket Type counter 補償を行います。
+  // reserve した Type と transaction が確定した Type が異なる場合は cross-Type sync を避け、
+  // 安全側（reserve 分の release + log + metric）に倒します。
+  private async reconcileTicketTypeCounter(args: {
+    input: ParsedPurchaseInput;
+    prefilterTicketTypeId: string | null;
+    gate: 'reserved' | 'unknown';
+    reservedRevision: string | null;
+    outcome: PurchaseTransactionOutcome;
+  }): Promise<void> {
+    const { input, prefilterTicketTypeId, gate, reservedRevision, outcome } =
+      args;
+    const { result } = outcome;
+
+    // replay は新規在庫消費が成立していない。reserve した Type と数量だけを戻す。
+    if (outcome.disposition === 'replayed') {
+      if (gate === 'reserved' && prefilterTicketTypeId) {
+        await this.compensateTicketTypeRelease(
+          input.eventId,
+          prefilterTicketTypeId,
+          input.quantity,
+        );
+      }
+      return;
+    }
+
+    // prefilter で reserve した Type と transaction が確定した Type が異なる場合、
+    // 一方の DB 残数を別 Type の Valkey key へ sync しない。安全側に倒す。
+    const scopeMismatch =
+      prefilterTicketTypeId !== null &&
+      outcome.resolvedTicketTypeId !== null &&
+      prefilterTicketTypeId !== outcome.resolvedTicketTypeId;
+    if (scopeMismatch) {
+      emitMetric('TicketTypeScopeMismatch', 1, 'Count');
+      if (gate === 'reserved' && prefilterTicketTypeId) {
+        await this.compensateTicketTypeRelease(
+          input.eventId,
+          prefilterTicketTypeId,
+          input.quantity,
+        );
+      }
+      return;
+    }
+
+    const typeRemaining = outcome.ticketTypeRemainingQuantity;
+
+    if (result.status === 'confirmed') {
+      // gate=reserved は reserve の減算がそのまま在庫消費として成立済み。追加操作不要。
+      // gate=unknown（bypass / Valkey 障害 / 未 seed）は reserve していないため、
+      // counter が存在する場合だけ DB Type 残数へ CAS 補正する（未 seed の Type は作らない）。
+      if (
+        gate === 'unknown' &&
+        prefilterTicketTypeId &&
+        typeRemaining !== null
+      ) {
+        const revision =
+          await this.inventoryCache.getTicketTypeCounterRevision(
+            input.eventId,
+            prefilterTicketTypeId,
+          );
+        if (revision !== null) {
+          await this.inventoryCache.syncTicketTypeCounter(
+            input.eventId,
+            prefilterTicketTypeId,
+            typeRemaining,
+            revision,
+          );
+        }
+      }
+      return;
+    }
+
+    // rejected は新規在庫消費が成立しなかった。reserve 分を戻す。
+    // reserve で得た revision を使って DB Type 残数へ CAS sync できれば release 不要。
+    if (gate === 'reserved' && prefilterTicketTypeId && typeRemaining !== null) {
+      const synced =
+        reservedRevision !== null &&
+        (await this.inventoryCache.syncTicketTypeCounter(
+          input.eventId,
+          prefilterTicketTypeId,
+          typeRemaining,
+          reservedRevision,
+        ));
+      if (!synced) {
+        await this.compensateTicketTypeRelease(
+          input.eventId,
+          prefilterTicketTypeId,
+          input.quantity,
+        );
+      }
+    }
+  }
+
+  // compensateTicketTypeRelease は補償 release を実行し、失敗を観測します。
+  private async compensateTicketTypeRelease(
+    eventId: string,
+    ticketTypeId: string,
+    quantity: number,
+  ): Promise<void> {
+    const ok = await this.inventoryCache.releaseTicketType(
+      eventId,
+      ticketTypeId,
+      quantity,
+    );
+    if (!ok) {
+      emitMetric('CompensationFailure', 1, 'Count', {
+        Operation: 'releaseTicketType',
+      });
+    }
   }
 
   private async executePurchaseTransaction(
@@ -361,6 +626,13 @@ export class PurchasesService {
             }
           : null,
         compatibilityRemainingQuantity,
+        resolvedTicketTypeId: ticketTypeId,
+        // ticket_type mode では activeInventory が実際の Type 残数（confirmed は
+        // 更新後、rejected は現在値）。legacy mode では Ticket Type sync を行わないため null。
+        ticketTypeRemainingQuantity:
+          writerMode === 'ticket_type'
+            ? activeInventory.remaining_quantity
+            : null,
       };
     } catch (error) {
       try {
@@ -576,6 +848,8 @@ function replayOutcome(
     disposition: 'replayed',
     inventoryChange: null,
     compatibilityRemainingQuantity: null,
+    resolvedTicketTypeId: purchase.ticket_type_id,
+    ticketTypeRemainingQuantity: null,
   };
 }
 

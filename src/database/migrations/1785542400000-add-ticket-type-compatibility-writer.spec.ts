@@ -612,6 +612,16 @@ describeWithPostgres(
             syncCounter: jest.fn(async () => false),
             markRequestSeen: jest.fn(async () => undefined),
             wasRequestSeen: jest.fn(async () => true),
+            // Ticket Type 単位経路（Issue #389）。この #376 テストは DB 挙動の検証が目的のため、
+            // Valkey は fail-open（unknown / no-op）にして transaction を必ず走らせる。
+            reserveTicketType: jest.fn(async () => ({
+              outcome: 'unknown',
+              revision: null,
+            })),
+            releaseTicketType: jest.fn(async () => true),
+            getTicketTypeCounterRevision: jest.fn(async () => null),
+            syncTicketTypeCounter: jest.fn(async () => false),
+            initTicketTypeCounter: jest.fn(async () => undefined),
           } as unknown as InventoryCacheService,
           { publish } as unknown as DomainEventsService,
         );
@@ -620,6 +630,7 @@ describeWithPostgres(
           { connect: () => pool.connect() } as unknown as DatabaseService,
           {
             initCounter: jest.fn(async () => undefined),
+            initTicketTypeCounter: jest.fn(async () => undefined),
           } as unknown as InventoryCacheService,
           { publish } as unknown as DomainEventsService,
           { search: jest.fn(async () => null) } as unknown as SearchService,
