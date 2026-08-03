@@ -15,7 +15,8 @@ import { randomUUID } from 'node:crypto';
 import { Client as OpenSearchClient } from '@opensearch-project/opensearch';
 import { Client, Pool } from 'pg';
 import { DataSource } from 'typeorm';
-import { createOpenSearchClient } from '../opensearch';
+// review 8: test 専用の無署名 client 経路を使い、AWS runtime の trust 判断と混ぜない。
+import { createTestOpenSearchClient } from '../opensearch';
 import {
   applyEventMetadata,
   applyLegacyInventoryChanged,
@@ -23,6 +24,10 @@ import {
   ensureEventsIndex,
 } from './events-projection.store';
 import { buildVersionedInventoryChangedDetail } from '../messaging/inventory-event.contract';
+import {
+  toEventInventoryVersion,
+  toTicketTypeInventoryVersion,
+} from '../messaging/inventory-version';
 import { reconcileInventoryProjection } from './inventory-reconciliation.service';
 import { rebuildInventoryProjection } from './inventory-rebuild.service';
 import { Baseline1751594400000 } from '../database/migrations/1751594400000-baseline';
@@ -93,7 +98,7 @@ describeIntegration(
           `TEST_OPENSEARCH_URL host must be local/test container, got ${host}`,
         );
       }
-      opensearch = createOpenSearchClient(TEST_OPENSEARCH_URL as string);
+      opensearch = createTestOpenSearchClient(TEST_OPENSEARCH_URL as string);
       await opensearch.cluster.health({ wait_for_status: 'yellow', timeout: '30s' });
     });
 
@@ -247,10 +252,10 @@ describeIntegration(
         ticketTypeName: opts.name ?? 'GA',
         ticketTypeTotalQuantity: opts.typeTotal,
         ticketTypeRemainingQuantity: opts.typeRemaining,
-        inventoryVersion: opts.typeVersion,
+        inventoryVersion: toTicketTypeInventoryVersion(opts.typeVersion),
         eventTotalQuantity: opts.eventTotal,
         eventRemainingQuantity: opts.eventRemaining,
-        eventInventoryVersion: opts.eventVersion,
+        eventInventoryVersion: toEventInventoryVersion(opts.eventVersion),
       });
     }
 
@@ -580,6 +585,278 @@ describeIntegration(
           await rebuildInventoryProjection(client, opensearch, { index });
           const report = await reconcileInventoryProjection(client, opensearch, { index });
           expect(report.counts.unexpected_event_document).toBe(1);
+        } finally {
+          client.release();
+        }
+      });
+    });
+
+    // review 3: applied / stale / legacy_ignore / corruption を実 OpenSearch 2.19.1 の
+    // response.result を基に区別する。
+    describe('version guard outcome の区別（review 3）', () => {
+      it('new version は applied、lower stale と equal/same-value duplicate は stale', async () => {
+        await withHarness(async ({ index }) => {
+          const eventId = randomUUID();
+          const typeId = randomUUID();
+          const base = { typeTotal: 10, eventTotal: 10 };
+
+          const v1 = await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { ...base, typeRemaining: 9, typeVersion: 1, eventRemaining: 9, eventVersion: 1 }));
+          expect(v1).toBe('applied');
+
+          const v2 = await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { ...base, typeRemaining: 7, typeVersion: 2, eventRemaining: 7, eventVersion: 2 }));
+          expect(v2).toBe('applied');
+
+          // equal/same-value duplicate は version guard による no-op → stale。
+          const dup = await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { ...base, typeRemaining: 7, typeVersion: 2, eventRemaining: 7, eventVersion: 2 }));
+          expect(dup).toBe('stale');
+
+          // lower stale version → stale。
+          const stale = await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { ...base, typeRemaining: 9, typeVersion: 1, eventRemaining: 9, eventVersion: 1 }));
+          expect(stale).toBe('stale');
+        });
+      });
+
+      it('equal/different-value は contract corruption として throw する', async () => {
+        await withHarness(async ({ index }) => {
+          const eventId = randomUUID();
+          const typeId = randomUUID();
+          await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { typeTotal: 10, typeRemaining: 5, typeVersion: 2, eventTotal: 10, eventRemaining: 5, eventVersion: 2 }));
+          await expect(
+            applyVersionedInventoryChanged(opensearch, index,
+              versioned(eventId, typeId, { typeTotal: 10, typeRemaining: 4, typeVersion: 2, eventTotal: 10, eventRemaining: 4, eventVersion: 2 })),
+          ).rejects.toThrow();
+        });
+      });
+
+      it('Type stale + Event new、Type new + Event stale はどちらも applied', async () => {
+        await withHarness(async ({ index }) => {
+          const eventId = randomUUID();
+          const typeId = randomUUID();
+          // 基準: Type v5 / Event v5。
+          await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { typeTotal: 20, typeRemaining: 10, typeVersion: 5, eventTotal: 20, eventRemaining: 10, eventVersion: 5 }));
+
+          // Type stale（v3）+ Event new（v6）→ Event を更新したので applied。
+          const a = await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { typeTotal: 20, typeRemaining: 12, typeVersion: 3, eventTotal: 20, eventRemaining: 8, eventVersion: 6 }));
+          expect(a).toBe('applied');
+
+          // Type new（v7）+ Event stale（v4）→ Type を更新したので applied。
+          const b = await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { typeTotal: 20, typeRemaining: 6, typeVersion: 7, eventTotal: 20, eventRemaining: 8, eventVersion: 4 }));
+          expect(b).toBe('applied');
+        });
+      });
+
+      it('legacy は versioned state 前なら applied、versioned state 後なら legacy_ignore', async () => {
+        await withHarness(async ({ index }) => {
+          const eventId = randomUUID();
+          const typeId = randomUUID();
+          // versioned state 前の legacy → applied。
+          const before = await applyLegacyInventoryChanged(opensearch, index, { eventId, remainingQuantity: 50 });
+          expect(before).toBe('applied');
+          // versioned 反映。
+          await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { typeTotal: 100, typeRemaining: 40, typeVersion: 1, eventTotal: 100, eventRemaining: 40, eventVersion: 1 }));
+          // versioned state 後の legacy → 無視（legacy_ignore）。
+          const after = await applyLegacyInventoryChanged(opensearch, index, { eventId, remainingQuantity: 99 });
+          expect(after).toBe('legacy_ignore');
+        });
+      });
+    });
+
+    // review 5: location は set / preserve / clear の三値。
+    describe('EventListed の location set / preserve / clear（review 5）', () => {
+      const meta = (eventId: string, extra: Record<string, unknown>) => ({
+        eventId,
+        title: 'Loc Event',
+        eventType: 'music',
+        startsAt: '2032-01-01T00:00:00Z',
+        totalQuantity: 100,
+        remainingQuantity: 100,
+        ...extra,
+      });
+
+      async function geoHitCount(index: string, eventId: string): Promise<number> {
+        const res = await opensearch.search({
+          index,
+          body: {
+            query: {
+              bool: {
+                filter: [
+                  { term: { event_id: eventId } },
+                  { geo_distance: { distance: '50km', location: { lat: 35.6, lon: 139.7 } } },
+                ],
+              },
+            },
+          },
+        });
+        const total = (res.body?.hits?.total ?? 0) as unknown as
+          | number
+          | { value: number };
+        return typeof total === 'number' ? total : total.value;
+      }
+
+      it('set 後に field 省略の metadata 更新を受けても location は維持される（preserve）', async () => {
+        await withHarness(async ({ index, getDoc }) => {
+          const eventId = randomUUID();
+          await applyEventMetadata(opensearch, index, meta(eventId, { latitude: 35.6, longitude: 139.7 }));
+          await opensearch.indices.refresh({ index });
+          expect(await geoHitCount(index, eventId)).toBe(1);
+          // latitude / longitude を渡さない（field 省略）→ preserve。
+          await applyEventMetadata(opensearch, index, meta(eventId, { title: 'Updated' }));
+          await opensearch.indices.refresh({ index });
+          const doc = await getDoc(eventId);
+          expect(doc?.title).toBe('Updated');
+          expect(doc?.location).toBeDefined();
+          expect(await geoHitCount(index, eventId)).toBe(1);
+        });
+      });
+
+      it('set 後に null/null を受けると location field が削除され、geo 検索に残らない（clear）', async () => {
+        await withHarness(async ({ index, getDoc }) => {
+          const eventId = randomUUID();
+          const typeId = randomUUID();
+          await applyEventMetadata(opensearch, index, meta(eventId, { latitude: 35.6, longitude: 139.7 }));
+          // Ticket Type inventory と両 version を先に反映しておく。
+          await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { typeTotal: 100, typeRemaining: 60, typeVersion: 3, eventTotal: 100, eventRemaining: 60, eventVersion: 4 }));
+          await opensearch.indices.refresh({ index });
+          expect(await geoHitCount(index, eventId)).toBe(1);
+
+          // null/null → clear。
+          await applyEventMetadata(opensearch, index, meta(eventId, { latitude: null, longitude: null }));
+          await opensearch.indices.refresh({ index });
+          const doc = await getDoc(eventId);
+          expect(doc?.location).toBeUndefined();
+          expect(await geoHitCount(index, eventId)).toBe(0);
+          // clear 後も Ticket Type inventory と両 version は不変。
+          expect(findType(doc, typeId)?.remaining_quantity).toBe(60);
+          expect(findType(doc, typeId)?.inventory_version).toBe(3);
+          expect(doc?.event_inventory_version).toBe(4);
+          expect(doc?.event_remaining_quantity).toBe(60);
+        });
+      });
+
+      it('片側だけ指定など不正な部分 location は error になる（message を ack しない）', async () => {
+        await withHarness(async ({ index }) => {
+          const eventId = randomUUID();
+          await expect(
+            applyEventMetadata(opensearch, index, meta(eventId, { latitude: 35.6, longitude: null })),
+          ).rejects.toThrow();
+          await expect(
+            applyEventMetadata(opensearch, index, meta(eventId, { latitude: Number.NaN, longitude: 139.7 })),
+          ).rejects.toThrow();
+        });
+      });
+    });
+
+    // review 2: unversioned / malformed / missing_ticket_type を区別する。
+    describe('reconciliation の unversioned / malformed 区別（review 2）', () => {
+      it('EventListed-only の未購入 Event は unversioned=1、malformed=0、hasDiff=true', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent }) => {
+          const { eventId } = await seedEvent([5]);
+          // 購入前の EventListed だけを反映する（versioned inventory field を作らない）。
+          await applyEventMetadata(opensearch, index, {
+            eventId,
+            title: 'Unpurchased',
+            eventType: 'music',
+            startsAt: '2032-01-01T00:00:00Z',
+            totalQuantity: 5,
+            remainingQuantity: 5,
+          });
+          await opensearch.indices.refresh({ index });
+          const client = await pgClient();
+          try {
+            const report = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(report.counts.unversioned_projection).toBe(1);
+            expect(report.counts.malformed_projection).toBe(0);
+            expect(report.hasDiff).toBe(true);
+            // rebuild 後は全 category 0。
+            await rebuildInventoryProjection(client, opensearch, { index });
+            expect((await reconcileInventoryProjection(client, opensearch, { index })).totalDiffs).toBe(0);
+          } finally {
+            client.release();
+          }
+        });
+      });
+
+      it('versioned field の部分欠損は malformed、event_id だけの document も malformed', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent }) => {
+          const { eventId } = await seedEvent([5]);
+          // 部分的に versioned field を持つ（event_inventory_version だけ）壊れた document。
+          await opensearch.index({
+            index,
+            id: eventId,
+            body: { event_id: eventId, event_inventory_version: 3 },
+            refresh: true,
+          });
+          const client = await pgClient();
+          try {
+            const partial = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(partial.counts.malformed_projection).toBeGreaterThanOrEqual(1);
+            expect(partial.counts.unversioned_projection).toBe(0);
+
+            // event_id だけの document は legacy document として成立しない → malformed。
+            await opensearch.index({ index, id: eventId, body: { event_id: eventId }, refresh: true });
+            const onlyId = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(onlyId.counts.malformed_projection).toBeGreaterThanOrEqual(1);
+            expect(onlyId.counts.unversioned_projection).toBe(0);
+          } finally {
+            client.release();
+          }
+        });
+      });
+
+      it('特定 Type だけ欠落した正しい versioned document は missing_ticket_type', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent }) => {
+          const { eventId, typeIds } = await seedEvent([5, 3]);
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+            expect((await reconcileInventoryProjection(client, opensearch, { index })).totalDiffs).toBe(0);
+            // 正しい versioned document から 1 Type だけを取り除く。
+            await opensearch.update({
+              index,
+              id: eventId,
+              body: {
+                script: {
+                  lang: 'painless',
+                  source:
+                    "ctx._source.ticket_types.removeIf(t -> t.ticket_type_id == params.tid);",
+                  params: { tid: typeIds[1] },
+                },
+              },
+              refresh: true,
+            } as never);
+            const report = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(report.counts.missing_ticket_type).toBe(1);
+            expect(report.counts.malformed_projection).toBe(0);
+            expect(report.counts.unversioned_projection).toBe(0);
+          } finally {
+            client.release();
+          }
+        });
+      });
+    });
+
+    // review 10: rebuild は各 batch では refresh せず、return 直後に reconciliation 差分 0 を確認できる。
+    it('rebuild service return 直後の reconciliation が差分 0（final refresh の可視性）', async () => {
+      await withHarness(async ({ index, pgClient, seedEvent }) => {
+        await seedEvent([7, 4, 2]);
+        await seedEvent([9]);
+        const client = await pgClient();
+        try {
+          // bulkSize=1 で複数 bulk を発生させても、return 直後に差分 0（final refresh 済み）。
+          await rebuildInventoryProjection(client, opensearch, { index, bulkSize: 1 });
+          const report = await reconcileInventoryProjection(client, opensearch, { index });
+          expect(report.totalDiffs).toBe(0);
+          expect(report.hasDiff).toBe(false);
         } finally {
           client.release();
         }

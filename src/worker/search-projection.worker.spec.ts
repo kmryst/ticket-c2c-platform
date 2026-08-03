@@ -97,7 +97,7 @@ describe('SearchProjectionWorker.pollOnce', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    opensearchMock.update.mockResolvedValue({});
+    opensearchMock.update.mockResolvedValue({ body: { result: 'updated' } });
     sqsSend = jest.spyOn(SQSClient.prototype, 'send');
     worker = new SearchProjectionWorker(
       'https://sqs.example/queue',
@@ -274,7 +274,7 @@ describe('SearchProjectionWorker observability (Issue #203)', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    opensearchMock.update.mockResolvedValue({});
+    opensearchMock.update.mockResolvedValue({ body: { result: 'updated' } });
     sqsSend = jest.spyOn(SQSClient.prototype, 'send');
     logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
     worker = new SearchProjectionWorker(
@@ -393,5 +393,107 @@ describe('SearchProjectionWorker observability (Issue #203)', () => {
     // _traceContext は script params へ渡さない（業務 contract と分離）。
     const params = opensearchMock.update.mock.calls[0][0].body.script.params;
     expect(params).not.toHaveProperty('_traceContext');
+  });
+});
+
+// review 3 / 4: ProjectionOutcome の Operation / Outcome 分類を固定する。
+describe('SearchProjectionWorker ProjectionOutcome 分類（review 3 / 4）', () => {
+  let sqsSend: jest.SpyInstance;
+  let logSpy: jest.SpyInstance;
+  let worker: SearchProjectionWorker;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.METRICS_NAMESPACE = 'TicketC2C/test';
+    opensearchMock.update.mockResolvedValue({ body: { result: 'updated' } });
+    sqsSend = jest.spyOn(SQSClient.prototype, 'send');
+    logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    worker = new SearchProjectionWorker(
+      'https://sqs.example/queue',
+      'opensearch.example',
+    );
+  });
+
+  afterEach(() => {
+    sqsSend.mockRestore();
+    logSpy.mockRestore();
+    jest.restoreAllMocks();
+    delete process.env.METRICS_NAMESPACE;
+  });
+
+  function pollOnce(): Promise<void> {
+    return (worker as unknown as { pollOnce(): Promise<void> }).pollOnce();
+  }
+
+  function receive(messages: unknown[]): void {
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: messages });
+      }
+      return Promise.resolve({});
+    });
+  }
+
+  function outcomeRecord(): { Operation: string; Outcome: string } {
+    const line = logSpy.mock.calls
+      .map(([l]) => l)
+      .find(
+        (l): l is string =>
+          typeof l === 'string' && l.includes('ProjectionOutcome'),
+      );
+    expect(line).toBeDefined();
+    return JSON.parse(line as string);
+  }
+
+  it('versioned で version guard が no-op（result=noop）なら Outcome=stale', async () => {
+    opensearchMock.update.mockResolvedValue({ body: { result: 'noop' } });
+    receive([versionedInventoryMessage(VALID_UUID, 'rh1')]);
+    await pollOnce();
+    const rec = outcomeRecord();
+    expect(rec.Operation).toBe('InventoryChanged');
+    expect(rec.Outcome).toBe('stale');
+  });
+
+  it('versioned で更新した（result=updated）なら Outcome=applied', async () => {
+    opensearchMock.update.mockResolvedValue({ body: { result: 'updated' } });
+    receive([versionedInventoryMessage(VALID_UUID, 'rh1')]);
+    await pollOnce();
+    expect(outcomeRecord().Outcome).toBe('applied');
+  });
+
+  it('legacy で versioned state 前に反映（result=updated）なら Outcome=applied', async () => {
+    opensearchMock.update.mockResolvedValue({ body: { result: 'updated' } });
+    receive([legacyInventoryMessage(VALID_UUID, 'rh1')]);
+    await pollOnce();
+    const rec = outcomeRecord();
+    expect(rec.Operation).toBe('InventoryChanged');
+    expect(rec.Outcome).toBe('applied');
+  });
+
+  it('legacy で versioned state 後に無視（result=noop）なら Outcome=legacy_ignore', async () => {
+    opensearchMock.update.mockResolvedValue({ body: { result: 'noop' } });
+    receive([legacyInventoryMessage(VALID_UUID, 'rh1')]);
+    await pollOnce();
+    expect(outcomeRecord().Outcome).toBe('legacy_ignore');
+  });
+
+  it('InventoryChanged 処理中の OpenSearch write error は Operation=InventoryChanged/error（review 4）', async () => {
+    opensearchMock.update.mockRejectedValueOnce(new Error('opensearch write failed'));
+    receive([versionedInventoryMessage(VALID_UUID, 'rh1')]);
+    await expect(pollOnce()).rejects.toThrow('opensearch write failed');
+    const rec = outcomeRecord();
+    // error class（contract error ではない）から逆算せず、detail-type で InventoryChanged と分類する。
+    expect(rec.Operation).toBe('InventoryChanged');
+    expect(rec.Outcome).toBe('error');
+  });
+
+  it('EventListed 処理中の write error は Operation=EventMetadata/error（review 4）', async () => {
+    opensearchMock.update.mockRejectedValueOnce(new Error('metadata write failed'));
+    receive([eventListedMessage(VALID_UUID, 'rh1')]);
+    await expect(pollOnce()).rejects.toThrow('metadata write failed');
+    const rec = outcomeRecord();
+    expect(rec.Operation).toBe('EventMetadata');
+    expect(rec.Outcome).toBe('error');
   });
 });

@@ -69,8 +69,15 @@ export const EVENTS_INDEX_PROPERTIES: Record<string, Record<string, unknown>> = 
 // Event 集計（eventInventoryVersion）も独立に同じ規則で判定します。
 //
 // scripted_upsert=true とし、document 未存在（InventoryChanged 先着）でも upsert します。
+//
+// review 3: Ticket Type 側と Event 集計側のどちらかを実際に更新したかを `changed` で追跡し、
+// 両方とも stale / 同値 duplicate で何も変更していない場合は ctx.op='noop' にする。
+// これにより OpenSearch の update response.result が 'noop' となり、Worker は outcome を
+// 'stale' として区別できる（同一 version で異なる値は throw して corruption を error にする）。
 export const INVENTORY_VERSION_GUARD_SCRIPT = `
 long asLong(def v) { return ((Number) v).longValue(); }
+
+boolean changed = false;
 
 if (ctx._source.ticket_types == null) { ctx._source.ticket_types = new ArrayList(); }
 def types = ctx._source.ticket_types;
@@ -86,6 +93,7 @@ if (target == null) {
   nt.remaining_quantity = params.ticketTypeRemainingQuantity;
   nt.inventory_version = params.inventoryVersion;
   types.add(nt);
+  changed = true;
 } else {
   long stored = asLong(target.inventory_version);
   long incoming = asLong(params.inventoryVersion);
@@ -94,6 +102,7 @@ if (target == null) {
     target.total_quantity = params.ticketTypeTotalQuantity;
     target.remaining_quantity = params.ticketTypeRemainingQuantity;
     target.inventory_version = params.inventoryVersion;
+    changed = true;
   } else if (incoming == stored) {
     if (asLong(target.total_quantity) != asLong(params.ticketTypeTotalQuantity)
         || asLong(target.remaining_quantity) != asLong(params.ticketTypeRemainingQuantity)) {
@@ -108,6 +117,7 @@ if (ctx._source.event_inventory_version == null) {
   ctx._source.event_remaining_quantity = params.eventRemainingQuantity;
   ctx._source.total_quantity = params.eventTotalQuantity;
   ctx._source.remaining_quantity = params.eventRemainingQuantity;
+  changed = true;
 } else {
   long storedE = asLong(ctx._source.event_inventory_version);
   long incomingE = asLong(params.eventInventoryVersion);
@@ -117,6 +127,7 @@ if (ctx._source.event_inventory_version == null) {
     ctx._source.event_remaining_quantity = params.eventRemainingQuantity;
     ctx._source.total_quantity = params.eventTotalQuantity;
     ctx._source.remaining_quantity = params.eventRemainingQuantity;
+    changed = true;
   } else if (incomingE == storedE) {
     if (asLong(ctx._source.event_total_quantity) != asLong(params.eventTotalQuantity)
         || asLong(ctx._source.event_remaining_quantity) != asLong(params.eventRemainingQuantity)) {
@@ -125,39 +136,103 @@ if (ctx._source.event_inventory_version == null) {
   }
 }
 
-ctx._source.event_id = params.eventId;
+if (changed) {
+  ctx._source.event_id = params.eventId;
+} else {
+  // Ticket Type / Event ともに stale または同値 duplicate。version guard による no-op として
+  // 明示的に noop 化する（response.result='noop' → Worker outcome=stale）。
+  ctx.op = 'noop';
+}
 `.trim();
 
 // LEGACY_INVENTORY_SCRIPT は version なし旧 InventoryChanged を反映する Painless script です。
 // versioned state（event_inventory_version）が未作成のときだけ top-level 残数を更新し、
 // versioned state 作成後は Event 集計を巻き戻しません。
+//
+// review 3: versioned state 作成前に legacy 値を反映した場合は applied、versioned state 作成後で
+// 無視した場合は legacy_ignore として区別する。無視した場合は ctx.op='noop'（result='noop'）とし、
+// Worker が outcome を legacy_ignore と判定できるようにする。
 export const LEGACY_INVENTORY_SCRIPT = `
 if (ctx._source.event_inventory_version == null) {
   ctx._source.remaining_quantity = params.remainingQuantity;
+  ctx._source.event_id = params.eventId;
+} else {
+  ctx.op = 'noop';
 }
-ctx._source.event_id = params.eventId;
 `.trim();
 
 // EVENT_METADATA_SCRIPT は EventListed / EventUpdated の metadata だけを merge する
 // Painless script です。Ticket Type 在庫と version を削除・上書きしません。
 // InventoryChanged が先着していても upsert でき、EventListed 後着で metadata を補完します。
 // top-level total/remaining は「まだ在庫 event が反映されていない」ときだけ seed します。
+//
+// review 5: location 更新は set / clear / preserve の三値として扱う。
+// - locationAction='set'     : lat/lon を設定する
+// - locationAction='clear'   : ctx._source.remove('location') で削除する（online 開催化など）
+// - locationAction='preserve': field 省略。既存 location を触らない（旧 payload 互換）
+// 「field 省略」と「明示 null」を混同しないため、判定は applyEventMetadata 側で行う。
 export const EVENT_METADATA_SCRIPT = `
 ctx._source.event_id = params.eventId;
 ctx._source.title = params.title;
 ctx._source.event_type = params.eventType;
 ctx._source.starts_at = params.startsAt;
-if (params.hasLocation) {
+if (params.locationAction == 'set') {
   def loc = new HashMap();
   loc.lat = params.lat;
   loc.lon = params.lon;
   ctx._source.location = loc;
+} else if (params.locationAction == 'clear') {
+  ctx._source.remove('location');
 }
 if (ctx._source.event_inventory_version == null && ctx._source.remaining_quantity == null) {
   ctx._source.total_quantity = params.totalQuantity;
   ctx._source.remaining_quantity = params.remainingQuantity;
 }
 `.trim();
+
+// EventMetadataContractError は EventListed / EventUpdated の metadata contract 違反
+// （不正な部分 location など）を検出したときに投げるエラーです（review 5）。
+// Worker で握り潰さず throw させ、SQS message を ack させません（retry / DLQ へ進める）。
+export class EventMetadataContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EventMetadataContractError';
+  }
+}
+
+// LocationDirective は location 更新の三値です。
+type LocationDirective =
+  | { action: 'set'; lat: number; lon: number }
+  | { action: 'clear' }
+  | { action: 'preserve' };
+
+// resolveLocationDirective は latitude / longitude の組み合わせを set / clear / preserve に
+// 分類します。旧 payload 互換のため「field 省略（undefined）」と「明示 null」を混同しません。
+// 片方だけ存在 / 片方だけ null / NaN / Infinity など不整合は contract error とします（review 5）。
+export function resolveLocationDirective(
+  latitude: number | null | undefined,
+  longitude: number | null | undefined,
+): LocationDirective {
+  const latAbsent = latitude === undefined;
+  const lonAbsent = longitude === undefined;
+  if (latAbsent && lonAbsent) {
+    return { action: 'preserve' };
+  }
+  if (latitude === null && longitude === null) {
+    return { action: 'clear' };
+  }
+  if (
+    typeof latitude === 'number' &&
+    Number.isFinite(latitude) &&
+    typeof longitude === 'number' &&
+    Number.isFinite(longitude)
+  ) {
+    return { action: 'set', lat: latitude, lon: longitude };
+  }
+  throw new EventMetadataContractError(
+    'event metadata has invalid partial location: latitude and longitude must both be finite numbers, both explicit null, or both absent',
+  );
+}
 
 // buildVersionedInventoryScriptParams は versioned payload から script params を組み立てます。
 // script へ ID や値を文字列連結せず、すべて params 経由で渡すための単一箇所です。
@@ -192,15 +267,26 @@ function isVersionConflict(error: unknown): boolean {
 
 const MAX_CONFLICT_RETRIES = 5;
 
+// updateResultOf は OpenSearch update response から result 文字列（'noop' / 'updated' /
+// 'created' 等）を取り出します。ctx.op='noop' を設定した scripted update は 'noop' を返します。
+function updateResultOf(response: unknown): string | undefined {
+  const body = (response as { body?: { result?: unknown } })?.body;
+  return typeof body?.result === 'string' ? body.result : undefined;
+}
+
 // applyVersionedInventoryChanged は versioned InventoryChanged を単一 atomic scripted update で
 // 反映します。document 競合（409）は有限回 retry し、解消しなければ throw して
 // SQS message を削除させません。
+//
+// review 3: OpenSearch の実 response.result を基に、実際に Ticket Type / Event 集計の
+// いずれかを更新したか（'applied'）、両方 stale / 同値 duplicate で no-op だったか（'stale'）を返す。
+// 同一 version で異なる値（contract corruption）は script が throw するため、ここには到達しない。
 export async function applyVersionedInventoryChanged(
   client: Client,
   index: string,
   payload: VersionedInventoryChangedPayload,
-): Promise<void> {
-  await runWithConflictRetry(() =>
+): Promise<'applied' | 'stale'> {
+  const response = await runWithConflictRetry(() =>
     client.update({
       index,
       id: payload.eventId,
@@ -218,15 +304,18 @@ export async function applyVersionedInventoryChanged(
       refresh: true,
     }),
   );
+  return updateResultOf(response) === 'noop' ? 'stale' : 'applied';
 }
 
 // applyLegacyInventoryChanged は version なし旧 InventoryChanged を反映します。
+// review 3: versioned state 作成前に legacy 値を反映した場合は 'applied'、versioned state 作成後で
+// 無視した場合は 'legacy_ignore' を返す（script が ctx.op='noop' → result='noop'）。
 export async function applyLegacyInventoryChanged(
   client: Client,
   index: string,
   input: { eventId: string; remainingQuantity: number },
-): Promise<void> {
-  await runWithConflictRetry(() =>
+): Promise<'applied' | 'legacy_ignore'> {
+  const response = await runWithConflictRetry(() =>
     client.update({
       index,
       id: input.eventId,
@@ -246,6 +335,7 @@ export async function applyLegacyInventoryChanged(
       refresh: true,
     }),
   );
+  return updateResultOf(response) === 'noop' ? 'legacy_ignore' : 'applied';
 }
 
 // EventMetadata は EventListed / EventUpdated から反映する metadata です。
@@ -266,8 +356,12 @@ export async function applyEventMetadata(
   index: string,
   metadata: EventMetadata,
 ): Promise<void> {
-  const hasLocation =
-    metadata.latitude != null && metadata.longitude != null;
+  // location は set / clear / preserve の三値へ分類する（review 5）。不正な部分 location は
+  // ここで throw し、Worker が message を ack しない（EventMetadataContractError）。
+  const location = resolveLocationDirective(
+    metadata.latitude,
+    metadata.longitude,
+  );
   await runWithConflictRetry(() =>
     client.update({
       index,
@@ -283,9 +377,9 @@ export async function applyEventMetadata(
             title: metadata.title ?? null,
             eventType: metadata.eventType ?? null,
             startsAt: metadata.startsAt ?? null,
-            hasLocation,
-            lat: hasLocation ? metadata.latitude : null,
-            lon: hasLocation ? metadata.longitude : null,
+            locationAction: location.action,
+            lat: location.action === 'set' ? location.lat : null,
+            lon: location.action === 'set' ? location.lon : null,
             totalQuantity: metadata.totalQuantity ?? null,
             remainingQuantity: metadata.remainingQuantity ?? null,
           },
@@ -377,15 +471,18 @@ export interface ProjectionDocument {
 }
 
 // applyParsedInventoryChanged は parser 結果をそのまま反映する Worker 向け helper です。
+// review 3: OpenSearch の実 response を基に、Worker が emit する outcome を直接返す。
+// - versioned apply       -> 'applied'
+// - versioned stale/dup    -> 'stale'
+// - legacy（versioned 前）  -> 'applied'
+// - legacy（versioned 後）  -> 'legacy_ignore'
 export async function applyParsedInventoryChanged(
   client: Client,
   index: string,
   parsed: ParsedInventoryChanged,
-): Promise<'versioned' | 'legacy'> {
+): Promise<'applied' | 'stale' | 'legacy_ignore'> {
   if (parsed.kind === 'versioned') {
-    await applyVersionedInventoryChanged(client, index, parsed);
-    return 'versioned';
+    return applyVersionedInventoryChanged(client, index, parsed);
   }
-  await applyLegacyInventoryChanged(client, index, parsed);
-  return 'legacy';
+  return applyLegacyInventoryChanged(client, index, parsed);
 }

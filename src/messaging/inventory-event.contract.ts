@@ -17,17 +17,24 @@
 // - trace context（_traceContext）は業務 contract と分離し、parser は無視する。
 
 import { TRACE_CONTEXT_FIELD } from '../observability/trace-context';
+// UUID 形式判定と int4 上限は共有 primitive を使う（review 9: validation drift 防止）。
+import {
+  isUuidString,
+  POSTGRES_INT4_MAX,
+} from '../common/validation-primitives';
+// Ticket Type version と Event 集計 version は branded type で取り違えを compile error にする
+// （review 6）。runtime validation boundary（この parser）で branded 値へ変換する。
+import {
+  EventInventoryVersion,
+  TicketTypeInventoryVersion,
+  toEventInventoryVersion,
+  toTicketTypeInventoryVersion,
+} from './inventory-version';
 
 // SUPPORTED_INVENTORY_EVENT_VERSION は現在サポートする contract version です。
 // producer はこの値を発行し、consumer はこの値だけを受理します。将来の互換破壊は
 // 新しい version 番号と、consumer 側の明示的な分岐で扱います。
 export const SUPPORTED_INVENTORY_EVENT_VERSION = 1;
-
-// PostgreSQL INTEGER（int4）の上限。数量・version はこの範囲の safe integer に収めます。
-const POSTGRES_INT4_MAX = 2_147_483_647;
-
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // VersionedInventoryChangedPayload は producer が発行する version 付き payload の型です。
 // eventId / remainingQuantity は legacy 互換 field（旧 Worker が読む Event 集計残数）です。
@@ -48,13 +55,14 @@ export interface VersionedInventoryChangedPayload {
   ticketTypeTotalQuantity: number;
   ticketTypeRemainingQuantity: number;
   // inventoryVersion は対象 Ticket Type 単位の単調増加 version（#376 採番）です。
-  inventoryVersion: number;
+  // branded type で Event version との取り違えを compile error にします（review 6）。
+  inventoryVersion: TicketTypeInventoryVersion;
 
   // --- Event 互換集計 ---
   eventTotalQuantity: number;
   eventRemainingQuantity: number;
   // eventInventoryVersion は Event 互換集計単位の version です。Type version とは独立に比較します。
-  eventInventoryVersion: number;
+  eventInventoryVersion: EventInventoryVersion;
 }
 
 // ParsedInventoryChanged は runtime parser の戻り値です。
@@ -91,10 +99,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isUuid(value: unknown): value is string {
-  return typeof value === 'string' && UUID_PATTERN.test(value);
-}
-
 // finite かつ safe integer で 0 以上、int4 上限以内であることを検証します。
 function isNonNegativeInt(value: unknown): value is number {
   return (
@@ -120,7 +124,7 @@ export function parseInventoryChangedDetail(
     );
   }
 
-  if (!isUuid(detail.eventId)) {
+  if (!isUuidString(detail.eventId)) {
     throw new InventoryEventContractError(
       'InventoryChanged detail has missing or invalid eventId',
     );
@@ -153,7 +157,7 @@ export function parseInventoryChangedDetail(
       `unsupported inventoryEventVersion: ${String(detail.inventoryEventVersion)}`,
     );
   }
-  if (!isUuid(detail.ticketTypeId)) {
+  if (!isUuidString(detail.ticketTypeId)) {
     throw new InventoryEventContractError(
       'versioned InventoryChanged has missing or invalid ticketTypeId',
     );
@@ -224,10 +228,11 @@ export function parseInventoryChangedDetail(
     ticketTypeName: detail.ticketTypeName,
     ticketTypeTotalQuantity: detail.ticketTypeTotalQuantity,
     ticketTypeRemainingQuantity: detail.ticketTypeRemainingQuantity,
-    inventoryVersion: detail.inventoryVersion,
+    // runtime validation boundary で branded 値へ変換する（既に検証済みなので throw しない）。
+    inventoryVersion: toTicketTypeInventoryVersion(detail.inventoryVersion),
     eventTotalQuantity: detail.eventTotalQuantity,
     eventRemainingQuantity: detail.eventRemainingQuantity,
-    eventInventoryVersion: detail.eventInventoryVersion,
+    eventInventoryVersion: toEventInventoryVersion(detail.eventInventoryVersion),
   };
 }
 
@@ -240,10 +245,12 @@ export function buildVersionedInventoryChangedDetail(input: {
   ticketTypeName: string;
   ticketTypeTotalQuantity: number;
   ticketTypeRemainingQuantity: number;
-  inventoryVersion: number;
+  // 呼び出し側は DB / runtime boundary で branded 値へ変換して渡す。
+  // これにより Type version と Event version の入れ替えが compile error になる（review 6）。
+  inventoryVersion: TicketTypeInventoryVersion;
   eventTotalQuantity: number;
   eventRemainingQuantity: number;
-  eventInventoryVersion: number;
+  eventInventoryVersion: EventInventoryVersion;
 }): VersionedInventoryChangedPayload {
   return {
     eventId: input.eventId,

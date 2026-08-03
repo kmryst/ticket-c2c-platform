@@ -22,6 +22,14 @@ import {
 } from '../cache/inventory-cache.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
 import { buildVersionedInventoryChangedDetail } from '../messaging/inventory-event.contract';
+// Type version / Event 集計 version は branded type で取り違えを compile error にする（review 6）。
+// DB boundary で number → branded へ変換する field 固有 constructor を使う。
+import {
+  EventInventoryVersion,
+  TicketTypeInventoryVersion,
+  toEventInventoryVersion,
+  toTicketTypeInventoryVersion,
+} from '../messaging/inventory-version';
 import { emitMetric } from '../observability/emf';
 import { traceLogFields } from '../observability/trace-context';
 import {
@@ -33,10 +41,11 @@ import {
   PurchaseRequestBody,
   PurchaseResult,
 } from './purchase.types';
-
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const POSTGRES_INT4_MAX = 2_147_483_647;
+// UUID 形式判定と int4 上限は共有 primitive を使う（review 9: validation drift 防止）。
+import {
+  isUuidString,
+  POSTGRES_INT4_MAX,
+} from '../common/validation-primitives';
 
 interface PurchaseTicketTypeSelection {
   // #379 が controller から渡すまでは、integration test と内部呼出しだけが使う。
@@ -95,12 +104,12 @@ interface PurchaseInventoryChange {
   ticketTypeName: string;
   ticketTypeTotalQuantity: number;
   ticketTypeRemainingQuantity: number;
-  // inventoryVersion は対象 Ticket Type 単位の version（#376 採番）。
-  inventoryVersion: number;
+  // inventoryVersion は対象 Ticket Type 単位の version（#376 採番）。branded type（review 6）。
+  inventoryVersion: TicketTypeInventoryVersion;
   eventTotalQuantity: number;
   eventRemainingQuantity: number;
-  // eventInventoryVersion は Event 互換集計単位の version（Type version とは独立）。
-  eventInventoryVersion: number;
+  // eventInventoryVersion は Event 互換集計単位の version（Type version とは独立）。branded type。
+  eventInventoryVersion: EventInventoryVersion;
 }
 
 interface PurchaseTransactionOutcome {
@@ -716,20 +725,49 @@ export class PurchasesService {
         compatibilityInventory.rows[0].remaining_quantity;
       const eventAggregate = compatibilityInventory.rows[0];
 
-      // #377: versioned InventoryChanged 用の Ticket Type 単位 state を同じ transaction から取得する。
-      // legacy mode でも #336 trigger が default Type へ mirror 済みのため、ticketTypeId で読める。
-      const ticketTypeState = await client.query<TicketTypeStateRow>(
-        `
-          SELECT tt.name,
-                 tti.total_quantity,
-                 tti.remaining_quantity,
-                 tti.version
-          FROM ticket_type_inventory tti
-          JOIN ticket_types tt ON tt.id = tti.ticket_type_id
-          WHERE tti.ticket_type_id = $1
-        `,
-        [ticketTypeId],
-      );
+      // #377 producer 用 versioned snapshot は COMMIT 前に完全に組み立てる（review 1 / 7）。
+      // 呼び出し元は「throw したなら DB 未 commit」を前提に Valkey 予約を補償するため、
+      // rowCount 検証・version の branded 変換・inventoryChange 構築という fallible な処理を
+      // すべて COMMIT より前に済ませる。COMMIT 後には query / validation / await / throw を置かない。
+      //
+      // ticketTypeState JOIN は confirmed 分岐内でだけ発行する（review 7）。rejected / sold-out
+      // path では発行せず、無駄な round trip と lock 保持時間を作らない。confirmed のとき、
+      // ticket_type_inventory row が見つからないのは schema 不整合であり、silent に legacy 化
+      // させず（COMMIT せず）fail させる。legacy mode でも #336 trigger が default Type へ mirror
+      // 済みのため ticketTypeId で読める。
+      let inventoryChange: PurchaseInventoryChange | null = null;
+      if (confirmed) {
+        const ticketTypeState = await client.query<TicketTypeStateRow>(
+          `
+            SELECT tt.name,
+                   tti.total_quantity,
+                   tti.remaining_quantity,
+                   tti.version
+            FROM ticket_type_inventory tti
+            JOIN ticket_types tt ON tt.id = tti.ticket_type_id
+            WHERE tti.ticket_type_id = $1
+          `,
+          [ticketTypeId],
+        );
+        if (!ticketTypeState.rowCount) {
+          throw new InternalServerErrorException(
+            'ticket type inventory state is not configured',
+          );
+        }
+        const typeState = ticketTypeState.rows[0];
+        inventoryChange = {
+          ticketTypeId,
+          ticketTypeName: typeState.name,
+          ticketTypeTotalQuantity: typeState.total_quantity,
+          ticketTypeRemainingQuantity: typeState.remaining_quantity,
+          // DB boundary で number → branded へ変換する（review 6）。Type / Event を取り違えない。
+          inventoryVersion: toTicketTypeInventoryVersion(typeState.version),
+          eventTotalQuantity: eventAggregate.total_quantity,
+          eventRemainingQuantity: eventAggregate.remaining_quantity,
+          eventInventoryVersion: toEventInventoryVersion(eventAggregate.version),
+        };
+      }
+
       const remainingQuantityAfter = confirmed
         ? compatibilityRemainingQuantity
         : null;
@@ -760,10 +798,19 @@ export class PurchasesService {
         ],
       );
 
+      // ticket_type mode では activeInventory が実際の Type 残数（confirmed は更新後、
+      // rejected は現在値）。legacy mode では Ticket Type sync を行わないため null。
+      // COMMIT 前に確定させ、COMMIT 後は組み立て済みの値を返すだけにする（review 1）。
+      const ticketTypeRemainingQuantity =
+        writerMode === 'ticket_type' ? activeInventory.remaining_quantity : null;
+      const purchaseId = purchase.rows[0].id;
+
       await client.query('COMMIT');
 
+      // COMMIT 成功後は、既に構築済みの結果を組み立てて返すだけにする。
+      // query / validation / await / 例外を投げ得る処理は置かない（review 1）。
       const result: PurchaseResult = {
-        purchaseId: purchase.rows[0].id,
+        purchaseId,
         eventId: input.eventId,
         buyerId: input.buyerId,
         quantity: input.quantity,
@@ -772,40 +819,13 @@ export class PurchasesService {
         remainingQuantity: remainingQuantityAfter,
       };
 
-      // confirmed のときだけ versioned snapshot を作る。ticket_type_inventory row が
-      // 見つからないのは schema 不整合であり、silent に legacy 化させず fail させる。
-      let inventoryChange: PurchaseInventoryChange | null = null;
-      if (confirmed) {
-        if (!ticketTypeState.rowCount) {
-          throw new InternalServerErrorException(
-            'ticket type inventory state is not configured',
-          );
-        }
-        const typeState = ticketTypeState.rows[0];
-        inventoryChange = {
-          ticketTypeId,
-          ticketTypeName: typeState.name,
-          ticketTypeTotalQuantity: typeState.total_quantity,
-          ticketTypeRemainingQuantity: typeState.remaining_quantity,
-          inventoryVersion: typeState.version,
-          eventTotalQuantity: eventAggregate.total_quantity,
-          eventRemainingQuantity: eventAggregate.remaining_quantity,
-          eventInventoryVersion: eventAggregate.version,
-        };
-      }
-
       return {
         result,
         disposition: 'created',
         inventoryChange,
         compatibilityRemainingQuantity,
         resolvedTicketTypeId: ticketTypeId,
-        // ticket_type mode では activeInventory が実際の Type 残数（confirmed は
-        // 更新後、rejected は現在値）。legacy mode では Ticket Type sync を行わないため null。
-        ticketTypeRemainingQuantity:
-          writerMode === 'ticket_type'
-            ? activeInventory.remaining_quantity
-            : null,
+        ticketTypeRemainingQuantity,
         writerModeUsed: writerMode,
       };
     } catch (error) {
@@ -1059,10 +1079,10 @@ function parsePurchaseInput(
   body: unknown,
   selection: PurchaseTicketTypeSelection,
 ): ParsedPurchaseInput {
-  if (!UUID_PATTERN.test(eventId)) {
+  if (!isUuidString(eventId)) {
     throw new BadRequestException('eventId must be a UUID');
   }
-  if (!UUID_PATTERN.test(buyerId)) {
+  if (!isUuidString(buyerId)) {
     throw new BadRequestException('authenticated user id must be a UUID');
   }
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
@@ -1095,7 +1115,7 @@ function parsePurchaseInput(
   if (
     selection.ticketTypeId !== undefined &&
     (typeof selection.ticketTypeId !== 'string' ||
-      !UUID_PATTERN.test(selection.ticketTypeId))
+      !isUuidString(selection.ticketTypeId))
   ) {
     throw new BadRequestException('ticketTypeId must be a UUID');
   }

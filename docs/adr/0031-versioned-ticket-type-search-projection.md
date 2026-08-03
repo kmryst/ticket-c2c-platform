@@ -83,6 +83,23 @@ idempotent no-op、== かつ差異は contract corruption として error、< �
 document 競合時の retry は有限回にし、解消しなければ throw して SQS message を削除しない。
 Worker と rebuild は同じ version guard script を共有する。
 
+script は Ticket Type 側と Event 集計側のどちらかを実際に更新したかを追跡し、両方とも stale
+または同値 duplicate で何も変更していない場合だけ `ctx.op='noop'` にする。Worker はこの
+OpenSearch update result を基に `ProjectionOutcome` を出す。少なくとも一方を更新すれば
+`applied`、両方 no-op なら `stale`（同値 duplicate も version guard による no-op として stale に
+含める）、versioned state 作成後に version なし legacy を無視した場合は `legacy_ignore`。
+同一 version で値が異なる場合は stale 扱いせず contract corruption として error（script が throw）。
+`ProjectionOutcome` の Operation は catch 時の error class から逆算せず、envelope の detail-type
+から決める（InventoryChanged 処理中の OpenSearch write error / contract corruption /
+conflict retry 枯渇はすべて InventoryChanged/error、EventListed・EventUpdated の write error は
+EventMetadata/error）。
+
+EventListed / EventUpdated の location 更新は set / clear / preserve の三値として扱う。緯度経度が
+両方 finite number なら set、両方明示 null なら `ctx._source.remove('location')` で clear、
+両 field とも payload に存在しなければ preserve（既存 location を触らない）。旧 payload 互換のため
+「field 省略」と「明示 null」を混同しない。片側だけ指定 / 片側だけ null / NaN / Infinity は
+metadata contract error として失敗させ、SQS message を ack しない。
+
 ### legacy compatibility
 
 新 Worker は versioned InventoryChanged / version なし旧 InventoryChanged / 旧・新
@@ -103,9 +120,16 @@ eventId / ticketTypeId / trace id / error message を metric dimension に含め
 ### reconciliation / rebuild（Aurora を正本とする）
 
 read-only reconciliation は Aurora と OpenSearch を変更せず、missing / unexpected document・
-Ticket Type / Event 集計の total / remaining / version 差分・malformed projection を検出する。
-REPEATABLE READ READ ONLY、bounded keyset pagination、machine-readable JSON、category 別件数、
-exit code で差分 0 / 差分あり / 実行エラーを区別する。
+Ticket Type / Event 集計の total / remaining / version 差分・unversioned projection・
+malformed projection を検出する。REPEATABLE READ READ ONLY、bounded keyset pagination、
+machine-readable JSON、category 別件数、exit code で差分 0 / 差分あり / 実行エラーを区別する。
+
+`unversioned_projection` は EventListed だけが反映された購入前の正常な legacy/metadata
+document（versioned inventory field が未作成）を指す。これを malformed と混同しない。versioned
+field が部分的に壊れている・ticket_types 要素が不正・event_id だけで legacy document としても
+成立しないものは `malformed_projection`、versioned document の構造は正常だが特定 Type だけ
+無い場合は `missing_ticket_type`。unversioned は compatibility 期間中に発生し得るため rebuild で
+収束させる。malformed または同一 version で異なる値は rebuild / activation を止めて調査する。
 
 rebuild は Aurora を正本として bounded keyset pagination + bounded bulk size で reindex する。
 restart 可能・idempotent・Worker と同じ atomic version guard を共有する。index 全削除や破壊的
@@ -113,6 +137,11 @@ recreate をしない。bulk API が HTTP 200 でも item error が 1 件でも�
 version N の処理前 / 途中 / 後に event N+1 が届いても N+1 を巻き戻さない。DB と OpenSearch 双方へ
 接続できる既存 API artifact から command override で実行する。新しい scheduler / 常駐 service /
 transactional outbox / EventBridge target DLQ / SQS FIFO は追加しない。
+
+rebuild は各 bulk request では refresh せず、全 bulk が成功した後に対象 index を一度だけ明示
+refresh する（recovery primitive の MTTR と OpenSearch への indexing pressure を下げる）。
+final refresh が失敗した場合は rebuild 成功として返さない。処理対象が 0 件なら refresh しない。
+Worker の単発 write（version guard / legacy / metadata）は従来どおり即時 refresh する。
 
 ### mixed Worker rollout 制約
 
@@ -165,6 +194,9 @@ rollback / recovery 方針は次に統一する。
 ## 再検討のトリガー
 
 - Ticket Type 数が 1 Event あたり大きく増え、nested 配列の再 index コストが問題になる。
+- 実運用規模で rebuild 時間・refresh / indexing pressure・cluster health・Gate B の許容時間が
+  問題になる。その場合は rebuild の refresh 戦略（final 一括 refresh の粒度）や index settings
+  （`refresh_interval`、replica 数、bulk サイズ）を再検討する。
 - M-12 / L-30 で定期実行・alarm・transactional outbox・SQS FIFO の採否を確定する。
 - SQS を FIFO へ切り替える（ADR-0004 の再検討と連動）。
 - OpenSearch の major version 更新で Painless / nested の挙動が変わる。

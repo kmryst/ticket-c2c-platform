@@ -33,10 +33,7 @@ import {
   ensureEventsIndex,
 } from '../search/events-projection.store';
 // InventoryChanged の runtime parser（Issue #377）。壊れた versioned payload は throw します。
-import {
-  InventoryEventContractError,
-  parseInventoryChangedDetail,
-} from '../messaging/inventory-event.contract';
+import { parseInventoryChangedDetail } from '../messaging/inventory-event.contract';
 
 // EventBridgeEnvelope は SQS body に入る EventBridge イベントの外形です。
 interface EventBridgeEnvelope {
@@ -159,13 +156,16 @@ export class SearchProjectionWorker {
             span.recordException(error);
           }
           span.setStatus({ code: SpanStatusCode.ERROR });
-          // malformed contract を含む処理失敗を低カーディナリティ metric で記録します。
+          // review 4: 処理 Operation は error class から逆算せず、envelope の detail-type から
+          // 決定する。InventoryChanged 処理中の OpenSearch write error / Painless contract
+          // corruption / conflict retry 枯渇は InventoryChanged/error として記録する。
+          // EventListed / EventUpdated の write error は EventMetadata/error。
+          // TicketPurchased / unknown は無理に EventMetadata へ分類しない（metric を出さない）。
           // message は ack されず、visibility timeout 後に再配信 / DLQ へ進みます。
-          const operation =
-            error instanceof InventoryEventContractError
-              ? 'InventoryChanged'
-              : 'EventMetadata';
-          this.emitOutcome(operation, 'error');
+          const operation = operationForDetailType(envelope['detail-type']);
+          if (operation) {
+            this.emitOutcome(operation, 'error');
+          }
           throw error;
         } finally {
           span.end();
@@ -219,15 +219,13 @@ export class SearchProjectionWorker {
         // 壊れた versioned payload は parser が throw し、SQS message を削除させません。
         // version guard は OpenSearch 側の atomic scripted update が担います。
         const parsed = parseInventoryChangedDetail(detail);
-        const applied = await applyParsedInventoryChanged(
+        // review 3: OpenSearch の実 response を基に applied / stale / legacy_ignore を区別する。
+        const outcome = await applyParsedInventoryChanged(
           this.opensearch,
           EVENTS_INDEX,
           parsed,
         );
-        this.emitOutcome(
-          'InventoryChanged',
-          applied === 'versioned' ? 'applied' : 'legacy_ignore',
-        );
+        this.emitOutcome('InventoryChanged', outcome);
         console.log('updated inventory', {
           eventId,
           kind: parsed.kind,
@@ -258,6 +256,21 @@ export class SearchProjectionWorker {
       Outcome: outcome,
     });
   }
+}
+
+// operationForDetailType は envelope の detail-type から ProjectionOutcome の Operation を
+// 決定します（review 4）。error class からの逆算をやめ、catch へ入る前に決まる detail-type で
+// 有限 Operation を選ぶ。TicketPurchased / unknown は無理に EventMetadata へ分類せず null を返す。
+function operationForDetailType(
+  detailType: string,
+): 'InventoryChanged' | 'EventMetadata' | null {
+  if (detailType === 'InventoryChanged') {
+    return 'InventoryChanged';
+  }
+  if (detailType === 'EventListed' || detailType === 'EventUpdated') {
+    return 'EventMetadata';
+  }
+  return null;
 }
 
 function sleep(ms: number): Promise<void> {

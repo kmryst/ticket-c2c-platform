@@ -8,6 +8,13 @@
 // - OpenSearch は在庫の正本ではないため、この reader は PostgreSQL からのみ読む。
 // - 逆同期（OpenSearch → PostgreSQL）は行わない。
 
+import {
+  EventInventoryVersion,
+  TicketTypeInventoryVersion,
+  toEventInventoryVersion,
+  toTicketTypeInventoryVersion,
+} from '../messaging/inventory-version';
+
 // SqlClient は pg の PoolClient / Client が満たす最小 query interface です。
 export interface SqlClient {
   query<R extends Record<string, unknown>>(
@@ -17,12 +24,13 @@ export interface SqlClient {
 }
 
 // AuthoritativeTicketType は Ticket Type 単位の正本 state です。
+// review 6: version は DB read boundary で branded 値へ変換し、Event version との取り違えを防ぐ。
 export interface AuthoritativeTicketType {
   ticketTypeId: string;
   name: string;
   totalQuantity: number;
   remainingQuantity: number;
-  inventoryVersion: number;
+  inventoryVersion: TicketTypeInventoryVersion;
 }
 
 // AuthoritativeEventInventory は 1 Event 分の正本 snapshot です。
@@ -30,7 +38,7 @@ export interface AuthoritativeEventInventory {
   eventId: string;
   eventTotalQuantity: number;
   eventRemainingQuantity: number;
-  eventInventoryVersion: number;
+  eventInventoryVersion: EventInventoryVersion;
   ticketTypes: AuthoritativeTicketType[];
 }
 
@@ -108,7 +116,8 @@ export async function* iterateAuthoritativeInventory(
         name: row.name,
         totalQuantity: row.total_quantity,
         remainingQuantity: row.remaining_quantity,
-        inventoryVersion: row.version,
+        // DB read boundary で branded 値へ変換する（review 6）。
+        inventoryVersion: toTicketTypeInventoryVersion(row.version),
       });
       typesByEvent.set(row.event_id, list);
     }
@@ -118,7 +127,8 @@ export async function* iterateAuthoritativeInventory(
         eventId: aggregate.event_id,
         eventTotalQuantity: aggregate.total_quantity,
         eventRemainingQuantity: aggregate.remaining_quantity,
-        eventInventoryVersion: aggregate.version,
+        // DB read boundary で branded 値へ変換する（review 6）。
+        eventInventoryVersion: toEventInventoryVersion(aggregate.version),
         ticketTypes: typesByEvent.get(aggregate.event_id) ?? [],
       };
     }

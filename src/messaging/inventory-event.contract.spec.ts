@@ -9,6 +9,10 @@ import {
   parseInventoryChangedDetail,
   SUPPORTED_INVENTORY_EVENT_VERSION,
 } from './inventory-event.contract';
+import {
+  toEventInventoryVersion,
+  toTicketTypeInventoryVersion,
+} from './inventory-version';
 
 const EVENT_ID = '11111111-1111-1111-1111-111111111111';
 const TYPE_ID = '22222222-2222-2222-2222-222222222222';
@@ -151,14 +155,60 @@ describe('buildVersionedInventoryChangedDetail', () => {
       ticketTypeName: 'GA',
       ticketTypeTotalQuantity: 50,
       ticketTypeRemainingQuantity: 40,
-      inventoryVersion: 3,
+      inventoryVersion: toTicketTypeInventoryVersion(3),
       eventTotalQuantity: 100,
       eventRemainingQuantity: 90,
-      eventInventoryVersion: 5,
+      eventInventoryVersion: toEventInventoryVersion(5),
     });
     expect(detail.remainingQuantity).toBe(90);
     expect(detail.inventoryEventVersion).toBe(SUPPORTED_INVENTORY_EVENT_VERSION);
     // producer が組んだ payload は parser を通る（round-trip）。
     expect(parseInventoryChangedDetail(detail).kind).toBe('versioned');
+  });
+});
+
+// review 6: Type version と Event 集計 version を branded type で取り違えられないことを固定する。
+describe('dual-version の branded type（review 6）', () => {
+  it('producer -> payload -> parser -> script params で 2 値が入れ替わらない', () => {
+    // fixture は両 version に異なる値を使う（swap bug を検出できるように）。
+    const TYPE_VERSION = 7;
+    const EVENT_VERSION = 41;
+    const detail = buildVersionedInventoryChangedDetail({
+      eventId: EVENT_ID,
+      ticketTypeId: TYPE_ID,
+      ticketTypeName: 'GA',
+      ticketTypeTotalQuantity: 50,
+      ticketTypeRemainingQuantity: 40,
+      inventoryVersion: toTicketTypeInventoryVersion(TYPE_VERSION),
+      eventTotalQuantity: 100,
+      eventRemainingQuantity: 90,
+      eventInventoryVersion: toEventInventoryVersion(EVENT_VERSION),
+    });
+    // serialized JSON 上は number のまま。
+    expect(detail.inventoryVersion).toBe(TYPE_VERSION);
+    expect(detail.eventInventoryVersion).toBe(EVENT_VERSION);
+
+    const parsed = parseInventoryChangedDetail(detail);
+    expect(parsed.kind).toBe('versioned');
+    if (parsed.kind !== 'versioned') return;
+    // parser 通過後も Type / Event version が保持され、入れ替わっていない。
+    expect(parsed.inventoryVersion).toBe(TYPE_VERSION);
+    expect(parsed.eventInventoryVersion).toBe(EVENT_VERSION);
+  });
+
+  it('Type version へ Event version を代入すると compile error になる（swap 防止）', () => {
+    buildVersionedInventoryChangedDetail({
+      eventId: EVENT_ID,
+      ticketTypeId: TYPE_ID,
+      ticketTypeName: 'GA',
+      ticketTypeTotalQuantity: 50,
+      ticketTypeRemainingQuantity: 40,
+      // @ts-expect-error EventInventoryVersion は TicketTypeInventoryVersion へ代入できない。
+      inventoryVersion: toEventInventoryVersion(41),
+      eventTotalQuantity: 100,
+      eventRemainingQuantity: 90,
+      // @ts-expect-error TicketTypeInventoryVersion は EventInventoryVersion へ代入できない。
+      eventInventoryVersion: toTicketTypeInventoryVersion(7),
+    });
   });
 });

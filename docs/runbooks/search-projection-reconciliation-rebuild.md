@@ -43,7 +43,20 @@ node dist/src/search/inventory-reconciliation.cli.js --page-size 200
 
 出力は machine-readable JSON（`counts` に category 別件数、`findings` に bounded なサンプル、
 `hasDiff`）。secret は含めない。差分 category は missing / unexpected document、Ticket Type /
-Event 集計の total / remaining / version 差分、malformed projection。
+Event 集計の total / remaining / version 差分、`unversioned_projection`、`malformed_projection`。
+
+`unversioned_projection` と `malformed_projection` は意味が異なるため区別して扱う。
+
+- `unversioned_projection`: EventListed だけが反映された購入前の正常な legacy/metadata document
+  （versioned inventory field が未作成）。compatibility 期間中は発生し得る。rebuild で収束させる。
+- `malformed_projection` / 同一 version で異なる値（contract corruption）: rebuild / activation を
+  止めて調査する。versioned field の部分欠損・不正な ticket_types 要素・event_id だけで legacy
+  document としても成立しないものが malformed。
+
+Worker outcome（`ProjectionOutcome`）では、version guard による no-op（lower stale および
+equal かつ同値 duplicate）は `Outcome=stale`、少なくとも一方を更新した場合は `applied`、
+versioned state 作成後に version なし legacy を無視した場合は `legacy_ignore`、処理失敗は `error`。
+同一 version で値が異なる contract corruption は stale ではなく error として表面化する。
 
 ## rebuild / reindex（Aurora を正本に再構築）
 

@@ -19,6 +19,11 @@ import {
 } from './inventory-projection-source';
 
 // ReconciliationCategory は検出する差分カテゴリの有限集合です。
+//
+// review 2: EventListed だけが反映された未購入の正常な legacy/metadata document を
+// malformed 扱いしないため、`unversioned_projection` を追加する。versioned inventory field が
+// すべて未作成で legacy/metadata document として妥当なものは unversioned（rebuild で収束させる）。
+// versioned field が部分的に壊れている・legacy document としても成立しないものは malformed。
 export type ReconciliationCategory =
   | 'missing_event_document'
   | 'unexpected_event_document'
@@ -30,6 +35,7 @@ export type ReconciliationCategory =
   | 'event_total_mismatch'
   | 'event_remaining_mismatch'
   | 'event_version_mismatch'
+  | 'unversioned_projection'
   | 'malformed_projection';
 
 const ALL_CATEGORIES: ReconciliationCategory[] = [
@@ -43,6 +49,7 @@ const ALL_CATEGORIES: ReconciliationCategory[] = [
   'event_total_mismatch',
   'event_remaining_mismatch',
   'event_version_mismatch',
+  'unversioned_projection',
   'malformed_projection',
 ];
 
@@ -78,6 +85,11 @@ interface RawProjectionDoc {
   event_remaining_quantity?: unknown;
   event_inventory_version?: unknown;
   ticket_types?: unknown;
+  // legacy / metadata document 判定に使う top-level field（review 2）。
+  remaining_quantity?: unknown;
+  title?: unknown;
+  event_type?: unknown;
+  starts_at?: unknown;
 }
 
 // reconcileInventoryProjection は正本と projection を比較し、差分レポートを返します。
@@ -173,11 +185,43 @@ function compareEvent(
   const docEventVersion = asIntOrNull(doc.event_inventory_version);
   const docEventTotal = asIntOrNull(doc.event_total_quantity);
   const docEventRemaining = asIntOrNull(doc.event_remaining_quantity);
+
+  // review 2: versioned inventory field がすべて未作成かを判定する。
+  // EventListed だけが反映された購入前の document（InventoryChanged 未着）は versioned field を
+  // 持たない。これを malformed としないため、unversioned / malformed を明確に切り分ける。
+  const ticketTypesIsArray = Array.isArray(doc.ticket_types);
+  const ticketTypesEmpty =
+    doc.ticket_types == null ||
+    (ticketTypesIsArray && (doc.ticket_types as unknown[]).length === 0);
+  const allVersionedAbsent =
+    doc.event_inventory_version == null &&
+    doc.event_total_quantity == null &&
+    doc.event_remaining_quantity == null &&
+    ticketTypesEmpty;
+
+  if (allVersionedAbsent) {
+    // versioned field が全て未作成。legacy top-level 残数か metadata を持つ妥当な
+    // legacy/metadata document なら unversioned（compatibility 期間に発生し得る。rebuild で収束）。
+    // event_id だけのように legacy document としても成立しないものは malformed。
+    const legacyRemaining = asIntOrNull(doc.remaining_quantity);
+    const hasMetadata =
+      typeof doc.title === 'string' ||
+      typeof doc.event_type === 'string' ||
+      typeof doc.starts_at === 'string';
+    if (legacyRemaining !== null || hasMetadata) {
+      record(eventId, 'unversioned_projection');
+    } else {
+      record(eventId, 'malformed_projection');
+    }
+    return;
+  }
+
+  // versioned field が一部でも存在する。完全に妥当な versioned document でなければ malformed。
   if (
     docEventVersion === null ||
     docEventTotal === null ||
     docEventRemaining === null ||
-    !Array.isArray(doc.ticket_types)
+    !ticketTypesIsArray
   ) {
     record(eventId, 'malformed_projection');
     return;

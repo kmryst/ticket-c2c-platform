@@ -70,6 +70,8 @@ export async function rebuildInventoryProjection(
 
   const flush = async (): Promise<void> => {
     if (ops.length === 0) return;
+    // review 10: 各 bulk request では refresh しない（毎 batch の同期 segment refresh を避け、
+    // rebuild の MTTR と OpenSearch への indexing pressure を下げる）。
     await sendBulk(opensearch, ops);
     bulkRequests += 1;
     ops = [];
@@ -100,6 +102,14 @@ export async function rebuildInventoryProjection(
   }
   await flush();
 
+  // review 10: 全 bulk が成功した後、対象 index を一度だけ明示 refresh する。
+  // - final refresh が失敗した場合は rebuild 成功として返さない（throw）。
+  // - 処理対象が 0 件（bulk を 1 度も送っていない）なら不要な refresh をしない。
+  // これにより service return 直後の reconciliation が最新 projection を確実に読める。
+  if (bulkRequests > 0) {
+    await opensearch.indices.refresh({ index });
+  }
+
   return {
     index,
     processedEvents,
@@ -109,11 +119,12 @@ export async function rebuildInventoryProjection(
 }
 
 // sendBulk は bulk request を送り、HTTP 200 でも item error があれば throw します。
+// refresh は rebuild 完了後に index 全体で一度だけ行う（毎 batch では refresh しない。review 10）。
 async function sendBulk(
   opensearch: Client,
   ops: Record<string, unknown>[],
 ): Promise<void> {
-  const response = await opensearch.bulk({ body: ops, refresh: true });
+  const response = await opensearch.bulk({ body: ops });
   const body = response.body as {
     errors?: boolean;
     items?: Array<Record<string, { status?: number; error?: unknown }>>;
