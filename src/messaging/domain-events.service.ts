@@ -16,6 +16,8 @@ import {
   TRACE_CONTEXT_FIELD,
   traceLogFields,
 } from '../observability/trace-context';
+// emitMetric は publish 結果を低カーディナリティ metric（EMF）で記録します（Issue #377）。
+import { emitMetric } from '../observability/emf';
 
 // DomainEventType は technology-stack.md で定義したドメインイベントです。
 export type DomainEventType =
@@ -53,7 +55,7 @@ export class DomainEventsService {
       : detail;
 
     try {
-      await this.client.send(
+      const response = await this.client.send(
         new PutEventsCommand({
           Entries: [
             {
@@ -65,6 +67,24 @@ export class DomainEventsService {
           ],
         }),
       );
+
+      // HTTP 成功でも FailedEntryCount > 0 / entry error を見逃さない（Issue #377）。
+      // Purchase transaction や成功済み API response は rollback しない（結果整合の projection）。
+      const failedEntry = (response.Entries ?? []).find(
+        (entry) => entry.ErrorCode || entry.ErrorMessage,
+      );
+      if ((response.FailedEntryCount ?? 0) > 0 || failedEntry) {
+        // entry error の ErrorCode（AWS 側の有限集合）だけを log 属性として残す。
+        // ErrorMessage は payload 断片を含み得るため log にも metric dimension にも出さない。
+        console.error('EventBridge publish returned entry failure', {
+          detailType,
+          errorCode: failedEntry?.ErrorCode,
+          ...traceLogFields(),
+        });
+        this.emitPublishOutcome(detailType, 'partial_failure');
+        return;
+      }
+      this.emitPublishOutcome(detailType, 'success');
     } catch (error) {
       // イベント発行失敗で API 応答を失敗させない。次のイベントで追いつく場合はあるが、
       // 最終イベントが欠損すると projection は古いまま残る。
@@ -74,6 +94,20 @@ export class DomainEventsService {
         { detailType, ...traceLogFields() },
         error,
       );
+      this.emitPublishOutcome(detailType, 'sdk_error');
     }
+  }
+
+  // emitPublishOutcome は publish 結果を低カーディナリティ metric で記録します（Issue #377）。
+  // dimension は DetailType（有限集合）と Outcome（success / partial_failure / sdk_error）だけ。
+  // eventId / ticketTypeId / trace id / error message は dimension に含めません。
+  private emitPublishOutcome(
+    detailType: DomainEventType,
+    outcome: 'success' | 'partial_failure' | 'sdk_error',
+  ): void {
+    emitMetric('DomainEventPublish', 1, 'Count', {
+      DetailType: detailType,
+      Outcome: outcome,
+    });
   }
 }

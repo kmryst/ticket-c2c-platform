@@ -132,18 +132,38 @@ function createFakeDbClient(behavior: FakeDbBehavior) {
       };
     }
     if (
-      text.includes('SELECT remaining_quantity') &&
+      text.includes('SELECT total_quantity, remaining_quantity, version') &&
       text.includes('FROM ticket_inventory')
     ) {
+      // #377: Event 互換集計（total / remaining / version）を同じ transaction から読む。
       return {
         rowCount: 1,
         rows: [
           {
+            total_quantity: 100,
             remaining_quantity:
               behavior.compatibilityRemaining ??
               behavior.remainingAfterUpdate ??
               behavior.remainingOnReject ??
               0,
+            version: 1,
+          },
+        ],
+      };
+    }
+    if (
+      text.includes('FROM ticket_type_inventory tti') &&
+      text.includes('JOIN ticket_types tt')
+    ) {
+      // #377: versioned InventoryChanged 用の Ticket Type 単位 state。
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            name: 'General Admission',
+            total_quantity: 100,
+            remaining_quantity: behavior.remainingAfterUpdate ?? 0,
+            version: 1,
           },
         ],
       };
@@ -514,17 +534,67 @@ describe('PurchasesService の compatibility writer（Issue #376）', () => {
     expect(update).toContain('ticket_type_id = $2');
     expect(update).toContain('remaining_quantity >= $3');
     expect(update).toContain('RETURNING remaining_quantity, version');
+    // public result は Event 集計残数を維持し、内部 version を漏らさない（#377）。
     expect(result.remainingQuantity).toBe(9);
     expect(result).not.toHaveProperty('ticketTypeId');
     expect(result).not.toHaveProperty('inventoryVersion');
+    expect(result).not.toHaveProperty('eventInventoryVersion');
     expect(domainEvents.publish).toHaveBeenCalledWith(
       'TicketPurchased',
       expect.objectContaining({ remainingQuantity: 9 }),
     );
+    // #377: versioned InventoryChanged。legacy 互換 field（eventId / remainingQuantity）を
+    // 保ちつつ、transaction 由来の Ticket Type state（remaining=6）と Event 集計（remaining=9）を
+    // 独立 version 付きで発行する。
     expect(domainEvents.publish).toHaveBeenCalledWith('InventoryChanged', {
       eventId: EVENT_ID,
       remainingQuantity: 9,
+      inventoryEventVersion: 1,
+      ticketTypeId: TICKET_TYPE_ID,
+      ticketTypeName: 'General Admission',
+      ticketTypeTotalQuantity: 100,
+      ticketTypeRemainingQuantity: 6,
+      inventoryVersion: 1,
+      eventTotalQuantity: 100,
+      eventRemainingQuantity: 9,
+      eventInventoryVersion: 1,
     });
+  });
+
+  it('TicketPurchased publish が失敗しても InventoryChanged publish を試行する（#377）', async () => {
+    const { service, domainEvents } = createService({
+      reserveOutcome: 'unknown',
+      db: {
+        writerMode: 'ticket_type',
+        inventoryUpdated: true,
+        remainingAfterUpdate: 6,
+        compatibilityRemaining: 9,
+      },
+    });
+    (domainEvents.publish as jest.Mock).mockImplementation(
+      async (detailType: string) => {
+        if (detailType === 'TicketPurchased') {
+          throw new Error('TicketPurchased publish failed');
+        }
+      },
+    );
+
+    await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 2 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    // TicketPurchased の失敗にかかわらず InventoryChanged を試行する。
+    expect(domainEvents.publish).toHaveBeenCalledWith(
+      'InventoryChanged',
+      expect.objectContaining({
+        eventId: EVENT_ID,
+        inventoryEventVersion: 1,
+        ticketTypeId: TICKET_TYPE_ID,
+      }),
+    );
   });
 
   it('ticketTypeId省略の既存keyは現在Typeが複数でも保存済み結果をreplayする', async () => {

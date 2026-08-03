@@ -101,3 +101,4 @@ YYYY-MM-DD
 | [0028](./0028-use-db-trigger-bridge-for-ticket-type-expand.md) | Ticket Type 移行の expand 段階に DB trigger bridge を採用する | Accepted |
 | [0029](./0029-use-control-aware-postgresql-compatibility-writer.md) | Ticket Type在庫切替にcontrol-aware PostgreSQL compatibility writerを採用する | Accepted |
 | [0030](./0030-ticket-type-valkey-inventory-compatibility.md) | Ticket Type 単位の Valkey 在庫前段フィルタを compatibility artifact として実装する | Accepted |
+| [0031](./0031-versioned-ticket-type-search-projection.md) | version 付き Ticket Type 在庫 event と検索 projection を実装する | Accepted |

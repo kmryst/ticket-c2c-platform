@@ -1392,7 +1392,8 @@ module "dashboard" {
 
   aurora_cluster_identifier = "${var.name}-aurora"
 
-  sqs_dlq_name = "${var.name}-search-projection-dlq"
+  sqs_dlq_name          = "${var.name}-search-projection-dlq"
+  sqs_source_queue_name = module.search_projection_queue.queue_name
 
   cloudfront_distribution_id = local.https_enabled ? module.cloudfront[0].distribution_id : null
   waf_web_acl_name           = local.https_enabled ? "${var.name}-app-waf" : null

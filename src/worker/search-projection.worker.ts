@@ -26,6 +26,17 @@ import { emitMetric } from '../observability/emf';
 // createOpenSearchClient は AWS 上では SigV4 署名付きクライアントを返します（production-readiness M-3）。
 import { createOpenSearchClient } from '../opensearch';
 import { EVENTS_INDEX } from '../search/search.service';
+// projection store は versioned / legacy / metadata の atomic scripted update を提供します（Issue #377）。
+import {
+  applyEventMetadata,
+  applyParsedInventoryChanged,
+  ensureEventsIndex,
+} from '../search/events-projection.store';
+// InventoryChanged の runtime parser（Issue #377）。壊れた versioned payload は throw します。
+import {
+  InventoryEventContractError,
+  parseInventoryChangedDetail,
+} from '../messaging/inventory-event.contract';
 
 // EventBridgeEnvelope は SQS body に入る EventBridge イベントの外形です。
 interface EventBridgeEnvelope {
@@ -67,31 +78,13 @@ export class SearchProjectionWorker {
     this.running = false;
   }
 
-  // ensureIndex は初回起動時に geo_point を含む mapping で index を作成します。
+  // ensureIndex は index の存在を保証し、mapping を additive に適用します（Issue #377）。
+  // 既存 index にも putMapping で versioned field（ticket_types / event_inventory_version 等）を
+  // 追加します。早期 return せず additive 適用するため、既存 index で新 field が欠落しません。
+  // mapping 適用に失敗した場合は throw し、message consumption を開始しません。
   private async ensureIndex(): Promise<void> {
-    const exists = await this.opensearch.indices.exists({
-      index: EVENTS_INDEX,
-    });
-    if (exists.body) {
-      return;
-    }
-    await this.opensearch.indices.create({
-      index: EVENTS_INDEX,
-      body: {
-        mappings: {
-          properties: {
-            event_id: { type: 'keyword' },
-            title: { type: 'text' },
-            event_type: { type: 'keyword' },
-            starts_at: { type: 'date' },
-            location: { type: 'geo_point' },
-            total_quantity: { type: 'integer' },
-            remaining_quantity: { type: 'integer' },
-          },
-        },
-      },
-    });
-    console.log(`created index: ${EVENTS_INDEX}`);
+    await ensureEventsIndex(this.opensearch, EVENTS_INDEX);
+    console.log(`ensured index mapping: ${EVENTS_INDEX}`);
   }
 
   private async pollOnce(): Promise<void> {
@@ -166,6 +159,13 @@ export class SearchProjectionWorker {
             span.recordException(error);
           }
           span.setStatus({ code: SpanStatusCode.ERROR });
+          // malformed contract を含む処理失敗を低カーディナリティ metric で記録します。
+          // message は ack されず、visibility timeout 後に再配信 / DLQ へ進みます。
+          const operation =
+            error instanceof InventoryEventContractError
+              ? 'InventoryChanged'
+              : 'EventMetadata';
+          this.emitOutcome(operation, 'error');
           throw error;
         } finally {
           span.end();
@@ -192,24 +192,22 @@ export class SearchProjectionWorker {
     switch (detailType) {
       case 'EventListed':
       case 'EventUpdated': {
-        // イベント全体を upsert します。lat/lon がない場合 location は持ちません。
-        const doc: Record<string, unknown> = {
-          event_id: eventId,
+        // metadata だけを merge します。Ticket Type 在庫と version は削除・上書きしません
+        // （EVENT_METADATA_SCRIPT。InventoryChanged 先着時も upsert で耐えます）。
+        await applyEventMetadata(this.opensearch, EVENTS_INDEX, {
+          eventId,
           title: detail.title,
-          event_type: detail.eventType,
-          starts_at: detail.startsAt,
-          total_quantity: detail.totalQuantity,
-          remaining_quantity: detail.remainingQuantity,
-        };
-        if (detail.latitude != null && detail.longitude != null) {
-          doc.location = { lat: detail.latitude, lon: detail.longitude };
-        }
-        await this.opensearch.index({
-          index: EVENTS_INDEX,
-          id: eventId,
-          body: doc,
-          refresh: true,
+          eventType: detail.eventType,
+          startsAt: detail.startsAt,
+          latitude: detail.latitude as number | null | undefined,
+          longitude: detail.longitude as number | null | undefined,
+          totalQuantity: detail.totalQuantity as number | null | undefined,
+          remainingQuantity: detail.remainingQuantity as
+            | number
+            | null
+            | undefined,
         });
+        this.emitOutcome('EventMetadata', 'applied');
         console.log('indexed event', {
           eventId,
           detailType,
@@ -218,28 +216,27 @@ export class SearchProjectionWorker {
         break;
       }
       case 'InventoryChanged': {
-        // 残在庫のみの部分更新です。イベント本体が未投入でも upsert で耐えます。
-        await this.opensearch.update({
-          index: EVENTS_INDEX,
-          id: eventId,
-          body: {
-            doc: {
-              event_id: eventId,
-              remaining_quantity: detail.remainingQuantity,
-            },
-            doc_as_upsert: true,
-          },
-          refresh: true,
-        });
+        // 壊れた versioned payload は parser が throw し、SQS message を削除させません。
+        // version guard は OpenSearch 側の atomic scripted update が担います。
+        const parsed = parseInventoryChangedDetail(detail);
+        const applied = await applyParsedInventoryChanged(
+          this.opensearch,
+          EVENTS_INDEX,
+          parsed,
+        );
+        this.emitOutcome(
+          'InventoryChanged',
+          applied === 'versioned' ? 'applied' : 'legacy_ignore',
+        );
         console.log('updated inventory', {
           eventId,
-          remainingQuantity: detail.remainingQuantity,
+          kind: parsed.kind,
           ...traceLogFields(),
         });
         break;
       }
       case 'TicketPurchased':
-        // 検索プロジェクションの在庫更新は InventoryChanged が担うため、ここでは記録のみ行います。
+        // 在庫 projection の更新源は InventoryChanged に固定します。ここでは記録のみ行います。
         console.log('ticket purchased', { eventId, ...traceLogFields() });
         break;
       default:
@@ -248,6 +245,18 @@ export class SearchProjectionWorker {
           ...traceLogFields(),
         });
     }
+  }
+
+  // emitOutcome は Worker の projection 処理結果を低カーディナリティ dimension で記録します
+  // （Issue #377）。Operation / Outcome は有限集合のみで、ID や trace は dimension に含めません。
+  private emitOutcome(
+    operation: 'InventoryChanged' | 'EventMetadata',
+    outcome: 'applied' | 'stale' | 'legacy_ignore' | 'error',
+  ): void {
+    emitMetric('ProjectionOutcome', 1, 'Count', {
+      Operation: operation,
+      Outcome: outcome,
+    });
   }
 }
 

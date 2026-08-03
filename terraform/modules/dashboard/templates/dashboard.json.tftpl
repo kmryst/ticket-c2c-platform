@@ -236,6 +236,27 @@
           ]
         }
       }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": ${base_y + 30},
+      "width": 24,
+      "height": 6,
+      "properties": {
+        "title": "Search Projection source queue: backlog / oldest age（Issue #377）",
+        "view": "timeSeries",
+        "region": "${region}",
+        "period": 300,
+        "metrics": [
+          ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${sqs_source_queue_name}", {"stat": "Maximum", "label": "source backlog (visible)"}],
+          ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", "${sqs_source_queue_name}", {"stat": "Maximum", "label": "oldest message age (s)", "yAxis": "right"}]
+        ],
+        "yAxis": {
+          "left": {"label": "messages", "min": 0},
+          "right": {"label": "seconds", "min": 0}
+        }
+      }
     }
   ]
 }

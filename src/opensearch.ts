@@ -10,15 +10,23 @@ import { Client } from '@opensearch-project/opensearch';
 import { AwsSigv4Signer } from '@opensearch-project/opensearch/aws';
 import { getOptionalEnv } from './config';
 
-// createOpenSearchClient は endpoint（スキームなしのホスト名）からクライアントを生成します。
+// createOpenSearchClient は endpoint からクライアントを生成します。
+// endpoint は次の 2 形式を受け付けます（Issue #377）:
+// - スキーム付き URL（例: http://127.0.0.1:9200、https://example.com）: そのまま node に使う。
+//   local / CI の security plugin 無効な HTTP endpoint を扱えるよう、常に https:// を付けない。
+//   http:// を明示した endpoint は SigV4 署名を付けない（AWS SigV4 経路と混同しない）。
+// - スキームなしホスト名（AWS の OpenSearch ドメイン endpoint）: https:// を付け、
+//   AWS_REGION がある場合は SigV4 署名を付与する（AWS HTTPS + SigV4）。
 export function createOpenSearchClient(endpoint: string): Client {
-  const node = `https://${endpoint}`;
+  const hasScheme = /^https?:\/\//i.test(endpoint);
+  const node = hasScheme ? endpoint : `https://${endpoint}`;
+  const isHttp = node.toLowerCase().startsWith('http://');
 
   // ECS Fargate は AWS_REGION / AWS_DEFAULT_REGION をタスクへ自動注入します。
-  // どちらも無い環境（ローカル）は AWS 外とみなし、無署名クライアントにします。
+  // region が無い、または明示 HTTP endpoint（local / CI）の場合は無署名クライアントにします。
   const region =
     getOptionalEnv('AWS_REGION') ?? getOptionalEnv('AWS_DEFAULT_REGION');
-  if (!region) {
+  if (!region || isHttp) {
     return new Client({ node });
   }
 

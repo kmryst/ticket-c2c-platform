@@ -21,6 +21,7 @@ import {
   TicketTypeReserveResult,
 } from '../cache/inventory-cache.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
+import { buildVersionedInventoryChangedDetail } from '../messaging/inventory-event.contract';
 import { emitMetric } from '../observability/emf';
 import { traceLogFields } from '../observability/trace-context';
 import {
@@ -56,7 +57,18 @@ interface InventoryRow {
 }
 
 interface CompatibilityInventoryRow {
+  total_quantity: number;
   remaining_quantity: number;
+  version: number;
+}
+
+// TicketTypeStateRow は versioned InventoryChanged 用の Ticket Type 単位 state です
+// （Issue #377）。同じ transaction から Type の名称・総数・残数・version を取得します。
+interface TicketTypeStateRow {
+  name: string;
+  total_quantity: number;
+  remaining_quantity: number;
+  version: number;
 }
 
 interface ExistingPurchaseRow {
@@ -74,10 +86,21 @@ interface PurchaseRow {
   id: string;
 }
 
+// PurchaseInventoryChange は #377 producer が versioned InventoryChanged を組み立てるための
+// transaction 由来 snapshot です。Ticket Type 単位 state と Event 互換集計を、いずれも
+// Purchase 更新と同じ PostgreSQL transaction から取得します（publish 後の再 query はしない）。
+// 公開 Purchase response へ内部 version を漏らさないため、この型は HTTP へ返しません。
 interface PurchaseInventoryChange {
   ticketTypeId: string;
-  remainingQuantity: number;
+  ticketTypeName: string;
+  ticketTypeTotalQuantity: number;
+  ticketTypeRemainingQuantity: number;
+  // inventoryVersion は対象 Ticket Type 単位の version（#376 採番）。
   inventoryVersion: number;
+  eventTotalQuantity: number;
+  eventRemainingQuantity: number;
+  // eventInventoryVersion は Event 互換集計単位の version（Type version とは独立）。
+  eventInventoryVersion: number;
 }
 
 interface PurchaseTransactionOutcome {
@@ -292,19 +315,49 @@ export class PurchasesService {
   private async publishPurchaseDomainEvents(
     outcome: PurchaseTransactionOutcome,
   ): Promise<void> {
-    const { result } = outcome;
-    if (result.status === 'confirmed' && outcome.disposition === 'created') {
+    const { result, inventoryChange } = outcome;
+    if (
+      result.status !== 'confirmed' ||
+      outcome.disposition !== 'created' ||
+      !inventoryChange
+    ) {
+      return;
+    }
+
+    // TicketPurchased の publish が失敗しても、続く InventoryChanged publish を必ず試行する。
+    // publish() は内部で例外を握るため通常 throw しないが、万一の throw でも
+    // InventoryChanged（在庫 projection の更新源）へ影響させないよう明示的に隔離する。
+    try {
       await this.domainEvents.publish('TicketPurchased', {
         eventId: result.eventId,
         purchaseId: result.purchaseId,
         quantity: result.quantity,
         remainingQuantity: result.remainingQuantity,
       });
-      await this.domainEvents.publish('InventoryChanged', {
-        eventId: result.eventId,
-        remainingQuantity: result.remainingQuantity,
+    } catch (error) {
+      console.error('TicketPurchased publish threw; continuing to InventoryChanged', {
+        ...traceLogFields(),
+        error: error instanceof Error ? error.message : 'unknown',
       });
     }
+
+    // versioned InventoryChanged: legacy 互換 field（eventId / remainingQuantity）を保ちつつ、
+    // transaction 由来の Ticket Type 単位 state と Event 集計 version を追加する（Issue #377）。
+    const versionedDetail = buildVersionedInventoryChangedDetail({
+      eventId: result.eventId,
+      ticketTypeId: inventoryChange.ticketTypeId,
+      ticketTypeName: inventoryChange.ticketTypeName,
+      ticketTypeTotalQuantity: inventoryChange.ticketTypeTotalQuantity,
+      ticketTypeRemainingQuantity: inventoryChange.ticketTypeRemainingQuantity,
+      inventoryVersion: inventoryChange.inventoryVersion,
+      eventTotalQuantity: inventoryChange.eventTotalQuantity,
+      eventRemainingQuantity: inventoryChange.eventRemainingQuantity,
+      eventInventoryVersion: inventoryChange.eventInventoryVersion,
+    });
+    await this.domainEvents.publish(
+      'InventoryChanged',
+      versionedDetail as unknown as Record<string, unknown>,
+    );
   }
 
   // createPurchaseTicketType は Ticket Type 単位 counter を使う経路です
@@ -644,10 +697,11 @@ export class PurchasesService {
 
       // trigger mirror後のEvent aggregateを同じtransactionから取得する。
       // 旧public APIと既存event contractは#379/#377までEvent単位の残数を維持する。
+      // #377: versioned InventoryChanged 用に total / version も同じ transaction から取得する。
       const compatibilityInventory =
         await client.query<CompatibilityInventoryRow>(
           `
-            SELECT remaining_quantity
+            SELECT total_quantity, remaining_quantity, version
             FROM ticket_inventory
             WHERE event_id = $1
           `,
@@ -660,6 +714,22 @@ export class PurchasesService {
       }
       const compatibilityRemainingQuantity =
         compatibilityInventory.rows[0].remaining_quantity;
+      const eventAggregate = compatibilityInventory.rows[0];
+
+      // #377: versioned InventoryChanged 用の Ticket Type 単位 state を同じ transaction から取得する。
+      // legacy mode でも #336 trigger が default Type へ mirror 済みのため、ticketTypeId で読める。
+      const ticketTypeState = await client.query<TicketTypeStateRow>(
+        `
+          SELECT tt.name,
+                 tti.total_quantity,
+                 tti.remaining_quantity,
+                 tti.version
+          FROM ticket_type_inventory tti
+          JOIN ticket_types tt ON tt.id = tti.ticket_type_id
+          WHERE tti.ticket_type_id = $1
+        `,
+        [ticketTypeId],
+      );
       const remainingQuantityAfter = confirmed
         ? compatibilityRemainingQuantity
         : null;
@@ -702,16 +772,32 @@ export class PurchasesService {
         remainingQuantity: remainingQuantityAfter,
       };
 
+      // confirmed のときだけ versioned snapshot を作る。ticket_type_inventory row が
+      // 見つからないのは schema 不整合であり、silent に legacy 化させず fail させる。
+      let inventoryChange: PurchaseInventoryChange | null = null;
+      if (confirmed) {
+        if (!ticketTypeState.rowCount) {
+          throw new InternalServerErrorException(
+            'ticket type inventory state is not configured',
+          );
+        }
+        const typeState = ticketTypeState.rows[0];
+        inventoryChange = {
+          ticketTypeId,
+          ticketTypeName: typeState.name,
+          ticketTypeTotalQuantity: typeState.total_quantity,
+          ticketTypeRemainingQuantity: typeState.remaining_quantity,
+          inventoryVersion: typeState.version,
+          eventTotalQuantity: eventAggregate.total_quantity,
+          eventRemainingQuantity: eventAggregate.remaining_quantity,
+          eventInventoryVersion: eventAggregate.version,
+        };
+      }
+
       return {
         result,
         disposition: 'created',
-        inventoryChange: confirmed
-          ? {
-              ticketTypeId,
-              remainingQuantity: activeInventory.remaining_quantity,
-              inventoryVersion: activeInventory.version,
-            }
-          : null,
+        inventoryChange,
         compatibilityRemainingQuantity,
         resolvedTicketTypeId: ticketTypeId,
         // ticket_type mode では activeInventory が実際の Type 残数（confirmed は

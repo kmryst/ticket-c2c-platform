@@ -10,7 +10,9 @@ import { getOptionalEnv } from '../config';
 import { createOpenSearchClient } from '../opensearch';
 
 // EVENTS_INDEX は Worker が書き込み、API が読む検索プロジェクションの index 名です。
-export const EVENTS_INDEX = 'events';
+// projection store（events-projection.store.ts）を単一の正本とし、ここから再輸出します。
+export { EVENTS_INDEX } from './events-projection.store';
+import { EVENTS_INDEX } from './events-projection.store';
 
 // SearchParams はイベント検索の条件です。system-requirements.md の検索 3 条件に対応します。
 export interface SearchParams {

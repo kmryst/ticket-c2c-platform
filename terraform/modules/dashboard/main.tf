@@ -46,7 +46,8 @@ locals {
 
     aurora_cluster_identifier = var.aurora_cluster_identifier
 
-    sqs_dlq_name = var.sqs_dlq_name
+    sqs_dlq_name          = var.sqs_dlq_name
+    sqs_source_queue_name = var.sqs_source_queue_name
 
     cloudfront_distribution_id = coalesce(var.cloudfront_distribution_id, "")
     waf_web_acl_name           = coalesce(var.waf_web_acl_name, "")

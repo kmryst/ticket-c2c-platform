@@ -1,0 +1,135 @@
+// ファイル概要:
+// このファイルは Aurora PostgreSQL（正本）から OpenSearch projection を再構築する
+// rebuild / reindex primitive です（Issue #377 / ADR-0031）。
+//
+// 要件:
+// - bounded keyset pagination + bounded bulk size。restart 可能・idempotent。
+// - Worker と同じ atomic version guard（INVENTORY_VERSION_GUARD_SCRIPT）を bulk update で共有。
+// - index 全削除や破壊的 recreate をしない（ensureEventsIndex は additive）。
+// - bulk API が HTTP 200 でも item error が 1 件でもあれば失敗させる。
+// - snapshot version N の処理前 / 途中 / 後に event N+1 が届いても N+1 を巻き戻さない
+//   （version guard が stale payload を no-op にする）。
+// - DB と OpenSearch 双方へ接続できる既存 API artifact から command override で実行する。
+//   このファイルは AWS 上で自動実行しない（scheduler / 常駐 service を追加しない）。
+
+import type { Client } from '@opensearch-project/opensearch';
+import { buildVersionedInventoryChangedDetail } from '../messaging/inventory-event.contract';
+import {
+  buildVersionedInventoryBulkOps,
+  ensureEventsIndex,
+  EVENTS_INDEX,
+} from './events-projection.store';
+import {
+  DEFAULT_PAGE_SIZE,
+  iterateAuthoritativeInventory,
+  SqlClient,
+} from './inventory-projection-source';
+
+// DEFAULT_BULK_SIZE は 1 bulk request で送る update 操作数の上限（bounded）です。
+export const DEFAULT_BULK_SIZE = 200;
+
+export interface RebuildOptions {
+  index?: string;
+  pageSize?: number;
+  bulkSize?: number;
+}
+
+export interface RebuildReport {
+  index: string;
+  processedEvents: number;
+  processedTicketTypes: number;
+  bulkRequests: number;
+}
+
+// RebuildBulkItemError は bulk item error を握り潰さず表面化させるためのエラーです。
+export class RebuildBulkItemError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RebuildBulkItemError';
+  }
+}
+
+// rebuildInventoryProjection は正本 snapshot を bulk update で projection へ反映します。
+// version guard により、既に新しい event が反映済みの Type / Event 集計は巻き戻しません。
+export async function rebuildInventoryProjection(
+  sql: SqlClient,
+  opensearch: Client,
+  options: RebuildOptions = {},
+): Promise<RebuildReport> {
+  const index = options.index ?? EVENTS_INDEX;
+  const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
+  const bulkSize = Math.max(1, Math.min(options.bulkSize ?? DEFAULT_BULK_SIZE, 1000));
+
+  // rebuild 前に mapping を additive に保証する（破壊的 recreate はしない）。
+  await ensureEventsIndex(opensearch, index);
+
+  let processedEvents = 0;
+  let processedTicketTypes = 0;
+  let bulkRequests = 0;
+  let ops: Record<string, unknown>[] = [];
+
+  const flush = async (): Promise<void> => {
+    if (ops.length === 0) return;
+    await sendBulk(opensearch, ops);
+    bulkRequests += 1;
+    ops = [];
+  };
+
+  for await (const authoritative of iterateAuthoritativeInventory(sql, pageSize)) {
+    processedEvents += 1;
+    for (const type of authoritative.ticketTypes) {
+      const payload = buildVersionedInventoryChangedDetail({
+        eventId: authoritative.eventId,
+        ticketTypeId: type.ticketTypeId,
+        ticketTypeName: type.name,
+        ticketTypeTotalQuantity: type.totalQuantity,
+        ticketTypeRemainingQuantity: type.remainingQuantity,
+        inventoryVersion: type.inventoryVersion,
+        eventTotalQuantity: authoritative.eventTotalQuantity,
+        eventRemainingQuantity: authoritative.eventRemainingQuantity,
+        eventInventoryVersion: authoritative.eventInventoryVersion,
+      });
+      const [action, body] = buildVersionedInventoryBulkOps(index, payload);
+      ops.push(action, body);
+      processedTicketTypes += 1;
+      // bulk size は「update 操作数」で bound する（ops.length は 2 行/操作）。
+      if (ops.length >= bulkSize * 2) {
+        await flush();
+      }
+    }
+  }
+  await flush();
+
+  return {
+    index,
+    processedEvents,
+    processedTicketTypes,
+    bulkRequests,
+  };
+}
+
+// sendBulk は bulk request を送り、HTTP 200 でも item error があれば throw します。
+async function sendBulk(
+  opensearch: Client,
+  ops: Record<string, unknown>[],
+): Promise<void> {
+  const response = await opensearch.bulk({ body: ops, refresh: true });
+  const body = response.body as {
+    errors?: boolean;
+    items?: Array<Record<string, { status?: number; error?: unknown }>>;
+  };
+  if (!body?.errors) {
+    return;
+  }
+  // errors=true の場合、最初の item error を特定して throw する（partial failure を成功扱いしない）。
+  for (const item of body.items ?? []) {
+    const op = Object.values(item)[0];
+    if (op?.error) {
+      throw new RebuildBulkItemError(
+        `rebuild bulk item failed with status ${String(op.status)}`,
+      );
+    }
+  }
+  // errors=true だが個別 error を特定できない場合も安全側で失敗させる。
+  throw new RebuildBulkItemError('rebuild bulk reported errors');
+}
