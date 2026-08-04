@@ -73,13 +73,22 @@ integer・数量 0 以上・remaining <= total・version 0 以上・必須 field
 
 Ticket Type UUID を dynamic field 名にせず、明示 mapping された nested 配列
 （`ticket_types`）で保持する（mapping explosion 回避）。`ensureEventsIndex()` は未存在時に完全
-mapping で作成し、存在時も idempotent な additive `putMapping` を適用する。mapping 適用失敗時は
-message consumption を開始しない。
+mapping で作成し、存在時も idempotent な additive `putMapping` を適用する。
+
+mapping の作成・更新は Worker の起動処理から分離し、deploy 時に 1 回だけ実行する独立した
+migration ステップ（`search-index-migrate` CLI）として扱う（PostgreSQL の DDL を起動時適用では
+なく versioned migrations で扱う Issue #92 と同じ分離）。Worker 起動時に mapping 更新 API を
+無条件で呼ぶと、OpenSearch の一時不調だけで Worker 起動全体が失敗する新しい障害モードになる
+ため、Worker の起動処理は index の存在確認だけを行い、存在しなければ throw して message
+consumption を開始しない（dynamic mapping での index 自動作成もさせない）。AWS deploy
+pipeline への CLI 自動組み込みは別 Issue で扱う（runbook 参照）。
 
 version 比較は Node.js 側の read→compare→write ではなく、OpenSearch 側の Painless scripted
 update（単一 atomic update）で行う。script へ ID や値を文字列連結せず、すべて params で渡す。
 Ticket Type state と Event 集計を独立に判定する（incoming > stored は apply、== かつ同値は
 idempotent no-op、== かつ差異は contract corruption として error、< は stale no-op）。
+「== かつ差異」の判定は Ticket Type 側では total / remaining に加えて name の相違も含む
+（同一 version・値相違は contract corruption、の保証に name を含める）。
 document 競合時の retry は有限回にし、解消しなければ throw して SQS message を削除しない。
 Worker と rebuild は同じ version guard script を共有する。
 
@@ -119,10 +128,24 @@ eventId / ticketTypeId / trace id / error message を metric dimension に含め
 
 ### reconciliation / rebuild（Aurora を正本とする）
 
+Aurora は在庫（versioned Ticket Type / Event 集計）だけでなく、event metadata
+（events table の title / event_type / starts_at / location）の正本でもある。したがって
+rebuild は在庫と併せて metadata も Aurora から復元し、reconciliation は metadata の欠損・
+不一致も検出する。
+
 read-only reconciliation は Aurora と OpenSearch を変更せず、missing / unexpected document・
-Ticket Type / Event 集計の total / remaining / version 差分・unversioned projection・
-malformed projection を検出する。REPEATABLE READ READ ONLY、bounded keyset pagination、
-machine-readable JSON、category 別件数、exit code で差分 0 / 差分あり / 実行エラーを区別する。
+Ticket Type / Event 集計の total / remaining / version 差分・metadata mismatch・
+contract corruption・unversioned projection・malformed projection を検出する。REPEATABLE READ
+READ ONLY、bounded keyset pagination、machine-readable JSON、category 別件数、exit code で
+差分 0 / 差分あり / 実行エラーを区別する。
+
+`contract_corruption` は「projection の version が正本の version と一致しているのに値
+（total / remaining / name）が異なる」状態で、書き込みパスの version guard script が本来防ぐ
+べき真の破損シグナル。単に projection の version が遅れているための値差分（cross-store
+snapshot が非原子的なための許容される一時的なズレ。version mismatch 系 category で記録）とは
+区別して記録し、runbook の停止条件と対応させる。範囲外の値（負数、quantity の int4 超過など。
+quantity は int4、version は OpenSearch mapping 上 long で上限が異なる）は正常な mismatch では
+なく `malformed_projection` として分類する。
 
 `unversioned_projection` は EventListed だけが反映された購入前の正常な legacy/metadata
 document（versioned inventory field が未作成）を指す。これを malformed と混同しない。versioned
@@ -149,6 +172,13 @@ Worker の単発 write（version guard / legacy / metadata）は従来どおり�
 全置換で versioned field を消し得る。したがって mixed Worker 期間は新 projection を active 扱い
 しない。old Worker 0 件確認後に rebuild / reconciliation する。versioned state 作成後、
 pre-version-guard Worker だけへ独立 rollback しない。controlled rollout は #378 が所有する。
+
+認識している制約: rolling deployment 中は旧 Worker（version guard なし、`remaining_quantity` を
+無条件上書き）が新 Worker の適用済み残数を一時的に巻き戻し得るため、検索結果の表示残数に
+一時的なブレが生じ得る。PostgreSQL が正本である以上、在庫超過や二重販売には直結せず、次の
+InventoryChanged で自己修復する結果整合の範囲の事象としてコードでは対処しない（rollout 中の
+一時的な結果整合性として受け入れる）。Gate B の reconciliation / rebuild は全 Worker の
+入れ替え完了後に実行する（runbook 参照）。
 
 ## 根拠
 

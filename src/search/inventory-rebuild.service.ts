@@ -3,6 +3,8 @@
 // rebuild / reindex primitive です（Issue #377 / ADR-0031）。
 //
 // 要件:
+// - 在庫（versioned Ticket Type / Event 集計）に加えて、events table が正本として持つ
+//   metadata（title / event_type / starts_at / location）も復元する。
 // - bounded keyset pagination + bounded bulk size。restart 可能・idempotent。
 // - Worker と同じ atomic version guard（INVENTORY_VERSION_GUARD_SCRIPT）を bulk update で共有。
 // - index 全削除や破壊的 recreate をしない（ensureEventsIndex は additive）。
@@ -15,6 +17,7 @@
 import type { Client } from '@opensearch-project/opensearch';
 import { buildVersionedInventoryChangedDetail } from '../messaging/inventory-event.contract';
 import {
+  buildEventMetadataBulkOps,
   buildVersionedInventoryBulkOps,
   ensureEventsIndex,
   EVENTS_INDEX,
@@ -77,8 +80,34 @@ export async function rebuildInventoryProjection(
     ops = [];
   };
 
+  // pushOps は bulk update 1 操作（2 行）を積み、bulk size（update 操作数）で bound する。
+  const pushOps = async (
+    op: [Record<string, unknown>, Record<string, unknown>],
+  ): Promise<void> => {
+    ops.push(op[0], op[1]);
+    if (ops.length >= bulkSize * 2) {
+      await flush();
+    }
+  };
+
   for await (const authoritative of iterateAuthoritativeInventory(sql, pageSize)) {
     processedEvents += 1;
+    // title / event_type / starts_at / location は events table（正本）に保存されているため、
+    // rebuild は在庫だけでなく metadata も復元する。EVENT_METADATA_SCRIPT を共有するので
+    // versioned 在庫 field は削除・上書きしない（在庫は version guard script が所有する）。
+    // location は正本に無ければ clear（明示 null ペア）で stale な location を残さない。
+    await pushOps(
+      buildEventMetadataBulkOps(index, {
+        eventId: authoritative.eventId,
+        title: authoritative.metadata.title,
+        eventType: authoritative.metadata.eventType,
+        startsAt: authoritative.metadata.startsAt,
+        latitude: authoritative.metadata.latitude,
+        longitude: authoritative.metadata.longitude,
+        totalQuantity: authoritative.eventTotalQuantity,
+        remainingQuantity: authoritative.eventRemainingQuantity,
+      }),
+    );
     for (const type of authoritative.ticketTypes) {
       const payload = buildVersionedInventoryChangedDetail({
         eventId: authoritative.eventId,
@@ -91,13 +120,8 @@ export async function rebuildInventoryProjection(
         eventRemainingQuantity: authoritative.eventRemainingQuantity,
         eventInventoryVersion: authoritative.eventInventoryVersion,
       });
-      const [action, body] = buildVersionedInventoryBulkOps(index, payload);
-      ops.push(action, body);
+      await pushOps(buildVersionedInventoryBulkOps(index, payload));
       processedTicketTypes += 1;
-      // bulk size は「update 操作数」で bound する（ops.length は 2 行/操作）。
-      if (ops.length >= bulkSize * 2) {
-        await flush();
-      }
     }
   }
   await flush();

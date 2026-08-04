@@ -20,6 +20,8 @@
     "projection:reconcile:local": "ts-node src/search/inventory-reconciliation.cli.ts",
     "projection:rebuild": "node dist/src/search/inventory-rebuild.cli.js",
     "projection:rebuild:local": "ts-node src/search/inventory-rebuild.cli.ts",
+    "search-index:migrate": "node dist/src/search/search-index-migrate.cli.js",
+    "search-index:migrate:local": "ts-node src/search/search-index-migrate.cli.ts",
     "smoke:staging": "ts-node --project tsconfig.scripts.json scripts/staging/smoke-test.ts",
     "smoke:dev": "ts-node --project tsconfig.scripts.json scripts/staging/smoke-test.ts",
     "migration:run": "node dist/src/database/run-migrations.js",

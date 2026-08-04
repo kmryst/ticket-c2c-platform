@@ -518,6 +518,10 @@ describeIntegration(
             versioned(eventId, existingType, { typeTotal: 5, typeRemaining: 1, typeVersion: 99, eventTotal: 5, eventRemaining: 1, eventVersion: 99 }));
           const mismatch = await reconcileInventoryProjection(client, opensearch, { index });
           expect(mismatch.hasDiff).toBe(true);
+          // version が異なる値差分は通常の version 遅延カテゴリであり、
+          // contract_corruption（同一 version・値相違）には分類されない（fix 6）。
+          expect(mismatch.counts.contract_corruption).toBe(0);
+          expect(mismatch.counts.ticket_type_version_mismatch).toBe(1);
         } finally {
           client.release();
         }
@@ -857,6 +861,223 @@ describeIntegration(
           const report = await reconcileInventoryProjection(client, opensearch, { index });
           expect(report.totalDiffs).toBe(0);
           expect(report.hasDiff).toBe(false);
+        } finally {
+          client.release();
+        }
+      });
+    });
+
+    // fix 1: rebuild は events table（正本）の metadata も復元し、reconciliation が
+    // metadata 欠損・不一致を metadata_mismatch として検知する。
+    describe('rebuild の metadata 復元と metadata_mismatch 検知（fix 1）', () => {
+      it('rebuild 後の document に title / event_type / starts_at が正本どおり含まれる', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent, getDoc }) => {
+          const { eventId } = await seedEvent([5]);
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+            const doc = await getDoc(eventId);
+            expect(doc?.title).toBe('projection fixture');
+            expect(doc?.event_type).toBe('music');
+            expect(Date.parse(doc?.starts_at as string)).toBe(
+              Date.parse('2032-01-01T00:00:00Z'),
+            );
+            // metadata を含めて reconciliation 差分 0。
+            const report = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(report.totalDiffs).toBe(0);
+          } finally {
+            client.release();
+          }
+        });
+      });
+
+      it('metadata が欠損 / 不一致の document を metadata_mismatch として検知し、rebuild で収束する', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent }) => {
+          const { eventId } = await seedEvent([5]);
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+            // title を正本と異なる値へ書き換える（在庫 field は触らない）。
+            await opensearch.update({
+              index,
+              id: eventId,
+              body: {
+                script: {
+                  lang: 'painless',
+                  source: "ctx._source.title = 'tampered title';",
+                },
+              },
+              refresh: true,
+            } as never);
+            const tampered = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(tampered.counts.metadata_mismatch).toBe(1);
+            expect(tampered.hasDiff).toBe(true);
+
+            // metadata field を丸ごと削除しても（欠損）検知できる。
+            await opensearch.update({
+              index,
+              id: eventId,
+              body: {
+                script: {
+                  lang: 'painless',
+                  source:
+                    "ctx._source.remove('title'); ctx._source.remove('event_type'); ctx._source.remove('starts_at');",
+                },
+              },
+              refresh: true,
+            } as never);
+            const missing = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(missing.counts.metadata_mismatch).toBe(1);
+
+            // rebuild が metadata を復元し、差分 0 へ収束する。
+            await rebuildInventoryProjection(client, opensearch, { index });
+            expect(
+              (await reconcileInventoryProjection(client, opensearch, { index })).totalDiffs,
+            ).toBe(0);
+          } finally {
+            client.release();
+          }
+        });
+      });
+    });
+
+    // fix 4: legacy InventoryChanged 先着後の EventListed でも total_quantity を seed できる。
+    it('legacy 先着 → EventListed 後着で total_quantity が seed され、legacy 残数は保持される（fix 4）', async () => {
+      await withHarness(async ({ index, getDoc }) => {
+        const eventId = randomUUID();
+        // legacy InventoryChanged 先着（remaining_quantity だけが設定される）。
+        await applyLegacyInventoryChanged(opensearch, index, { eventId, remainingQuantity: 50 });
+        expect((await getDoc(eventId))?.total_quantity).toBeUndefined();
+        // EventListed 後着。total_quantity は seed し、legacy 残数（50）は上書きしない。
+        await applyEventMetadata(opensearch, index, {
+          eventId,
+          title: 'Legacy First',
+          eventType: 'music',
+          startsAt: '2032-01-01T00:00:00Z',
+          totalQuantity: 100,
+          remainingQuantity: 100,
+        });
+        const doc = await getDoc(eventId);
+        expect(doc?.total_quantity).toBe(100);
+        expect(doc?.remaining_quantity).toBe(50);
+      });
+    });
+
+    // fix 5: 同一 version・同一数量でも name 相違は contract corruption として throw する。
+    it('同一 version で name だけが異なる payload も contract corruption として throw する（fix 5）', async () => {
+      await withHarness(async ({ index }) => {
+        const eventId = randomUUID();
+        const typeId = randomUUID();
+        await applyVersionedInventoryChanged(opensearch, index,
+          versioned(eventId, typeId, { typeTotal: 10, typeRemaining: 5, typeVersion: 2, eventTotal: 10, eventRemaining: 5, eventVersion: 2, name: 'GA' }));
+        await expect(
+          applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { typeTotal: 10, typeRemaining: 5, typeVersion: 2, eventTotal: 10, eventRemaining: 5, eventVersion: 2, name: 'VIP' })),
+        ).rejects.toThrow();
+      });
+    });
+
+    // fix 6: 同一 version・値相違（真の破損）を contract_corruption として、
+    // version 遅延による通常の値差分と区別して検知する。
+    it('同一 version で値が異なる projection を contract_corruption として検知する（fix 6）', async () => {
+      await withHarness(async ({ index, pgClient, seedEvent }) => {
+        const { eventId } = await seedEvent([5]);
+        const client = await pgClient();
+        try {
+          await rebuildInventoryProjection(client, opensearch, { index });
+          expect(
+            (await reconcileInventoryProjection(client, opensearch, { index })).totalDiffs,
+          ).toBe(0);
+          // version を進めずに残数だけを書き換える（version guard script が防ぐべき破損状態）。
+          await opensearch.update({
+            index,
+            id: eventId,
+            body: {
+              script: {
+                lang: 'painless',
+                source:
+                  'for (t in ctx._source.ticket_types) { t.remaining_quantity = t.remaining_quantity - 1; } ' +
+                  'ctx._source.event_remaining_quantity = ctx._source.event_remaining_quantity - 1;',
+              },
+            },
+            refresh: true,
+          } as never);
+          const report = await reconcileInventoryProjection(client, opensearch, { index });
+          // Ticket Type 側と Event 集計側の両方が corruption として記録される。
+          expect(report.counts.contract_corruption).toBeGreaterThanOrEqual(1);
+          // version 遅延による通常カテゴリには分類されない（区別の確認）。
+          expect(report.counts.ticket_type_remaining_mismatch).toBe(0);
+          expect(report.counts.event_remaining_mismatch).toBe(0);
+          expect(report.hasDiff).toBe(true);
+        } finally {
+          client.release();
+        }
+      });
+    });
+
+    // fix 7: 範囲外の値（負数など）は正常な mismatch ではなく malformed として分類する。
+    // version は long 範囲（int4 超過を許容）、quantity は int4 範囲で境界が異なることも固定する。
+    it('範囲外の quantity / version を malformed_projection として検知する（fix 7）', async () => {
+      await withHarness(async ({ index, pgClient, seedEvent }) => {
+        const { eventId, typeIds } = await seedEvent([5]);
+        const client = await pgClient();
+        try {
+          // 負数の quantity / version を持つ壊れた document。
+          await opensearch.index({
+            index,
+            id: eventId,
+            body: {
+              event_id: eventId,
+              event_total_quantity: 5,
+              event_remaining_quantity: -2,
+              event_inventory_version: 0,
+              ticket_types: [
+                {
+                  ticket_type_id: typeIds[0],
+                  name: 'General Admission',
+                  total_quantity: 5,
+                  remaining_quantity: 3,
+                  inventory_version: -1,
+                },
+              ],
+            },
+            refresh: true,
+          });
+          const broken = await reconcileInventoryProjection(client, opensearch, { index });
+          expect(broken.counts.malformed_projection).toBeGreaterThanOrEqual(1);
+          expect(broken.counts.event_remaining_mismatch).toBe(0);
+
+          // version は long mapping（int4 超過は正当な範囲）。malformed にはならず、
+          // 正本（int4 範囲）との差は通常の version mismatch として分類される。
+          await opensearch.index({
+            index,
+            id: eventId,
+            body: {
+              event_id: eventId,
+              title: 'projection fixture',
+              event_type: 'music',
+              starts_at: '2032-01-01T00:00:00.000Z',
+              total_quantity: 5,
+              remaining_quantity: 5,
+              event_total_quantity: 5,
+              event_remaining_quantity: 5,
+              event_inventory_version: 2147483648,
+              ticket_types: [
+                {
+                  ticket_type_id: typeIds[0],
+                  name: 'General Admission',
+                  total_quantity: 5,
+                  remaining_quantity: 5,
+                  inventory_version: 0,
+                },
+              ],
+            },
+            refresh: true,
+          });
+          const longVersion = await reconcileInventoryProjection(client, opensearch, { index });
+          expect(longVersion.counts.malformed_projection).toBe(0);
+          expect(longVersion.counts.contract_corruption).toBe(0);
+          expect(longVersion.counts.event_version_mismatch).toBe(1);
         } finally {
           client.release();
         }

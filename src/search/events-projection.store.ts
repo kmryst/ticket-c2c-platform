@@ -65,6 +65,8 @@ export const EVENTS_INDEX_PROPERTIES: Record<string, Record<string, unknown>> = 
 //   incoming > stored          -> apply
 //   incoming == stored & 同値   -> idempotent no-op
 //   incoming == stored & 差異   -> contract corruption として throw
+//     （Ticket Type 側は total / remaining に加えて name の相違も corruption として扱う。
+//       ADR-0031 の「同一 version・値相違は contract corruption」保証は name を含む）
 //   incoming < stored          -> stale no-op
 // Event 集計（eventInventoryVersion）も独立に同じ規則で判定します。
 //
@@ -105,7 +107,8 @@ if (target == null) {
     changed = true;
   } else if (incoming == stored) {
     if (asLong(target.total_quantity) != asLong(params.ticketTypeTotalQuantity)
-        || asLong(target.remaining_quantity) != asLong(params.ticketTypeRemainingQuantity)) {
+        || asLong(target.remaining_quantity) != asLong(params.ticketTypeRemainingQuantity)
+        || target.name != params.ticketTypeName) {
       throw new IllegalStateException("ticket type inventory contract corruption at version " + incoming);
     }
   }
@@ -165,6 +168,10 @@ if (ctx._source.event_inventory_version == null) {
 // Painless script です。Ticket Type 在庫と version を削除・上書きしません。
 // InventoryChanged が先着していても upsert でき、EventListed 後着で metadata を補完します。
 // top-level total/remaining は「まだ在庫 event が反映されていない」ときだけ seed します。
+// seed 判定は total_quantity / remaining_quantity を独立に行う。legacy InventoryChanged が
+// 先着して remaining_quantity だけが設定済みでも、後続の EventListed / EventUpdated で
+// total_quantity を seed できるようにする（remaining は legacy 値を保持し、上書きしない）。
+// versioned state（event_inventory_version）作成後はどちらも触らない（巻き戻し防止の不変条件）。
 //
 // review 5: location 更新は set / clear / preserve の三値として扱う。
 // - locationAction='set'     : lat/lon を設定する
@@ -184,9 +191,13 @@ if (params.locationAction == 'set') {
 } else if (params.locationAction == 'clear') {
   ctx._source.remove('location');
 }
-if (ctx._source.event_inventory_version == null && ctx._source.remaining_quantity == null) {
-  ctx._source.total_quantity = params.totalQuantity;
-  ctx._source.remaining_quantity = params.remainingQuantity;
+if (ctx._source.event_inventory_version == null) {
+  if (ctx._source.total_quantity == null) {
+    ctx._source.total_quantity = params.totalQuantity;
+  }
+  if (ctx._source.remaining_quantity == null) {
+    ctx._source.remaining_quantity = params.remainingQuantity;
+  }
 }
 `.trim();
 
@@ -350,6 +361,37 @@ export interface EventMetadata {
   remainingQuantity?: number | null;
 }
 
+// buildEventMetadataUpdateBody は metadata merge 用 scripted update の request body を
+// 組み立てます。Worker の単発 update と rebuild の bulk update が同じ script / params 組み立てを
+// 共有するための単一箇所です。不正な部分 location はここで throw します（review 5）。
+function buildEventMetadataUpdateBody(
+  metadata: EventMetadata,
+): Record<string, unknown> {
+  const location = resolveLocationDirective(
+    metadata.latitude,
+    metadata.longitude,
+  );
+  return {
+    scripted_upsert: true,
+    script: {
+      lang: 'painless',
+      source: EVENT_METADATA_SCRIPT,
+      params: {
+        eventId: metadata.eventId,
+        title: metadata.title ?? null,
+        eventType: metadata.eventType ?? null,
+        startsAt: metadata.startsAt ?? null,
+        locationAction: location.action,
+        lat: location.action === 'set' ? location.lat : null,
+        lon: location.action === 'set' ? location.lon : null,
+        totalQuantity: metadata.totalQuantity ?? null,
+        remainingQuantity: metadata.remainingQuantity ?? null,
+      },
+    },
+    upsert: {},
+  };
+}
+
 // applyEventMetadata は EventListed / EventUpdated の metadata だけを merge します。
 export async function applyEventMetadata(
   client: Client,
@@ -357,38 +399,36 @@ export async function applyEventMetadata(
   metadata: EventMetadata,
 ): Promise<void> {
   // location は set / clear / preserve の三値へ分類する（review 5）。不正な部分 location は
-  // ここで throw し、Worker が message を ack しない（EventMetadataContractError）。
-  const location = resolveLocationDirective(
-    metadata.latitude,
-    metadata.longitude,
-  );
+  // body 組み立て時に throw し、Worker が message を ack しない（EventMetadataContractError）。
+  const body = buildEventMetadataUpdateBody(metadata);
   await runWithConflictRetry(() =>
     client.update({
       index,
       id: metadata.eventId,
       retry_on_conflict: MAX_CONFLICT_RETRIES,
-      body: {
-        scripted_upsert: true,
-        script: {
-          lang: 'painless',
-          source: EVENT_METADATA_SCRIPT,
-          params: {
-            eventId: metadata.eventId,
-            title: metadata.title ?? null,
-            eventType: metadata.eventType ?? null,
-            startsAt: metadata.startsAt ?? null,
-            locationAction: location.action,
-            lat: location.action === 'set' ? location.lat : null,
-            lon: location.action === 'set' ? location.lon : null,
-            totalQuantity: metadata.totalQuantity ?? null,
-            remainingQuantity: metadata.remainingQuantity ?? null,
-          },
-        },
-        upsert: {},
-      },
+      body,
       refresh: true,
     }),
   );
+}
+
+// buildEventMetadataBulkOps は rebuild 用に metadata merge の bulk update 2 行を返します。
+// Worker と同じ EVENT_METADATA_SCRIPT を共有するため、rebuild が復元した metadata も
+// versioned 在庫 field を削除・上書きしません。
+export function buildEventMetadataBulkOps(
+  index: string,
+  metadata: EventMetadata,
+): [Record<string, unknown>, Record<string, unknown>] {
+  return [
+    {
+      update: {
+        _index: index,
+        _id: metadata.eventId,
+        retry_on_conflict: MAX_CONFLICT_RETRIES,
+      },
+    },
+    buildEventMetadataUpdateBody(metadata),
+  ];
 }
 
 // buildVersionedInventoryBulkOps は rebuild 用に bulk update の 2 行（action + body）を返します。
@@ -430,7 +470,13 @@ async function runWithConflictRetry<T>(op: () => Promise<T>): Promise<T> {
 // ensureEventsIndex は index の存在を保証し、mapping を additive に適用します。
 // - 未存在: 完全 mapping で作成
 // - 存在: idempotent な additive putMapping（既存 field は破壊しない）
-// mapping 適用に失敗した場合は throw し、呼び出し側は message consumption を開始しません。
+// mapping 適用に失敗した場合は throw します。
+//
+// 呼び出し元は「deploy 時に 1 回だけ実行する migration ステップ」に限定します
+// （search-index-migrate CLI と、operator が手動起動する rebuild）。Worker の起動処理からは
+// 呼び出しません（起動のたびに mapping 更新 API へ依存すると、OpenSearch の一時不調が
+// Worker 起動全体を失敗させる新しい障害モードになるため。DB スキーマを起動時 DDL ではなく
+// TypeORM versioned migrations で扱うのと同じ分離です。Issue #92 と同型）。
 export async function ensureEventsIndex(
   client: Client,
   index: string = EVENTS_INDEX,
@@ -451,6 +497,32 @@ export async function ensureEventsIndex(
     index,
     body: { properties },
   });
+}
+
+// EventsIndexMissingError は events index が未作成のまま Worker を起動したことを表すエラーです。
+export class EventsIndexMissingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EventsIndexMissingError';
+  }
+}
+
+// assertEventsIndexExists は index の存在だけを確認します（mapping 更新 API は呼びません）。
+// Worker の起動処理はこの read-only 確認だけに依存し、mapping 適用（ensureEventsIndex）は
+// deploy 時 1 回の migration ステップ（search-index-migrate CLI）が担います。
+// index が無い場合は fail closed に throw し、dynamic mapping での index 自動作成
+// （nested mapping の欠落した壊れた mapping）を防ぎます。
+export async function assertEventsIndexExists(
+  client: Client,
+  index: string = EVENTS_INDEX,
+): Promise<void> {
+  const exists = await client.indices.exists({ index });
+  if (!exists.body) {
+    throw new EventsIndexMissingError(
+      `events index "${index}" does not exist. Run the search index migration ` +
+        '(npm run search-index:migrate) before starting the worker.',
+    );
+  }
 }
 
 // ProjectionDocument は reconciliation / rebuild が OpenSearch から読む document 形です。

@@ -8,9 +8,11 @@
 // 必要なら再実行します（runbook 参照）。
 
 import type { Client } from '@opensearch-project/opensearch';
+import { POSTGRES_INT4_MAX } from '../common/validation-primitives';
 import { EVENTS_INDEX } from './events-projection.store';
 import {
   AuthoritativeEventInventory,
+  AuthoritativeEventMetadata,
   beginReadOnlySnapshot,
   DEFAULT_PAGE_SIZE,
   endReadOnlySnapshot,
@@ -24,6 +26,16 @@ import {
 // malformed 扱いしないため、`unversioned_projection` を追加する。versioned inventory field が
 // すべて未作成で legacy/metadata document として妥当なものは unversioned（rebuild で収束させる）。
 // versioned field が部分的に壊れている・legacy document としても成立しないものは malformed。
+//
+// `contract_corruption` は「projection の version が正本と一致しているのに値（total /
+// remaining / name）が異なる」状態を指す。単に projection の version が遅れているための
+// 値差分（cross-store snapshot が非原子的なための許容される一時的なズレ）とは意味が異なり、
+// 書き込みパスの version guard script が本来防ぐべき真の破損シグナルである。
+// runbook の停止条件（rebuild / activation を止めて調査）はこのカテゴリと対応する。
+//
+// `metadata_mismatch` は events table（正本）の title / event_type / starts_at / location と
+// projection の対応 field の不一致（欠損を含む）を指す。rebuild が metadata も復元するため、
+// rebuild 後の検証で metadata 欠損を見逃さない。
 export type ReconciliationCategory =
   | 'missing_event_document'
   | 'unexpected_event_document'
@@ -35,6 +47,8 @@ export type ReconciliationCategory =
   | 'event_total_mismatch'
   | 'event_remaining_mismatch'
   | 'event_version_mismatch'
+  | 'metadata_mismatch'
+  | 'contract_corruption'
   | 'unversioned_projection'
   | 'malformed_projection';
 
@@ -49,6 +63,8 @@ const ALL_CATEGORIES: ReconciliationCategory[] = [
   'event_total_mismatch',
   'event_remaining_mismatch',
   'event_version_mismatch',
+  'metadata_mismatch',
+  'contract_corruption',
   'unversioned_projection',
   'malformed_projection',
 ];
@@ -85,11 +101,12 @@ interface RawProjectionDoc {
   event_remaining_quantity?: unknown;
   event_inventory_version?: unknown;
   ticket_types?: unknown;
-  // legacy / metadata document 判定に使う top-level field（review 2）。
+  // legacy / metadata document 判定と metadata 比較に使う top-level field。
   remaining_quantity?: unknown;
   title?: unknown;
   event_type?: unknown;
   starts_at?: unknown;
+  location?: unknown;
 }
 
 // reconcileInventoryProjection は正本と projection を比較し、差分レポートを返します。
@@ -182,9 +199,10 @@ function compareEvent(
   const eventId = authoritative.eventId;
 
   // Event 集計の比較（version / total / remaining）。projection 側が malformed なら別カテゴリ。
-  const docEventVersion = asIntOrNull(doc.event_inventory_version);
-  const docEventTotal = asIntOrNull(doc.event_total_quantity);
-  const docEventRemaining = asIntOrNull(doc.event_remaining_quantity);
+  // quantity は int4 範囲、version は long 範囲（OpenSearch mapping）で個別に境界チェックする。
+  const docEventVersion = asVersionOrNull(doc.event_inventory_version);
+  const docEventTotal = asQuantityOrNull(doc.event_total_quantity);
+  const docEventRemaining = asQuantityOrNull(doc.event_remaining_quantity);
 
   // review 2: versioned inventory field がすべて未作成かを判定する。
   // EventListed だけが反映された購入前の document（InventoryChanged 未着）は versioned field を
@@ -203,7 +221,7 @@ function compareEvent(
     // versioned field が全て未作成。legacy top-level 残数か metadata を持つ妥当な
     // legacy/metadata document なら unversioned（compatibility 期間に発生し得る。rebuild で収束）。
     // event_id だけのように legacy document としても成立しないものは malformed。
-    const legacyRemaining = asIntOrNull(doc.remaining_quantity);
+    const legacyRemaining = asQuantityOrNull(doc.remaining_quantity);
     const hasMetadata =
       typeof doc.title === 'string' ||
       typeof doc.event_type === 'string' ||
@@ -226,14 +244,31 @@ function compareEvent(
     record(eventId, 'malformed_projection');
     return;
   }
-  if (docEventTotal !== authoritative.eventTotalQuantity) {
-    record(eventId, 'event_total_mismatch');
-  }
-  if (docEventRemaining !== authoritative.eventRemainingQuantity) {
-    record(eventId, 'event_remaining_mismatch');
-  }
-  if (docEventVersion !== authoritative.eventInventoryVersion) {
+  if (docEventVersion === authoritative.eventInventoryVersion) {
+    // version が正本と一致しているのに値が異なるのは、version guard script が本来防ぐべき
+    // 真の破損（contract corruption）。通常の version 遅延による値差分と区別して記録する。
+    if (
+      docEventTotal !== authoritative.eventTotalQuantity ||
+      docEventRemaining !== authoritative.eventRemainingQuantity
+    ) {
+      record(eventId, 'contract_corruption');
+    }
+  } else {
+    // version が異なる場合の値差分は、cross-store snapshot が非原子的なための
+    // 許容される一時的なズレ（ファイル冒頭コメント参照）。従来カテゴリで記録する。
     record(eventId, 'event_version_mismatch');
+    if (docEventTotal !== authoritative.eventTotalQuantity) {
+      record(eventId, 'event_total_mismatch');
+    }
+    if (docEventRemaining !== authoritative.eventRemainingQuantity) {
+      record(eventId, 'event_remaining_mismatch');
+    }
+  }
+
+  // metadata の比較（title / event_type / starts_at / location）。events table が正本であり、
+  // rebuild も metadata を復元するため、欠損・不一致は metadata_mismatch として検知する。
+  if (!metadataMatches(authoritative.metadata, doc)) {
+    record(eventId, 'metadata_mismatch');
   }
 
   // Ticket Type の比較。
@@ -259,25 +294,38 @@ function compareEvent(
       record(eventId, 'missing_ticket_type', at.ticketTypeId);
       continue;
     }
-    const dtTotal = asIntOrNull((dt as { total_quantity?: unknown }).total_quantity);
-    const dtRemaining = asIntOrNull(
+    const dtTotal = asQuantityOrNull(
+      (dt as { total_quantity?: unknown }).total_quantity,
+    );
+    const dtRemaining = asQuantityOrNull(
       (dt as { remaining_quantity?: unknown }).remaining_quantity,
     );
-    const dtVersion = asIntOrNull(
+    const dtVersion = asVersionOrNull(
       (dt as { inventory_version?: unknown }).inventory_version,
     );
     if (dtTotal === null || dtRemaining === null || dtVersion === null) {
       record(eventId, 'malformed_projection', at.ticketTypeId);
       continue;
     }
-    if (dtTotal !== at.totalQuantity) {
-      record(eventId, 'ticket_type_total_mismatch', at.ticketTypeId);
-    }
-    if (dtRemaining !== at.remainingQuantity) {
-      record(eventId, 'ticket_type_remaining_mismatch', at.ticketTypeId);
-    }
-    if (dtVersion !== at.inventoryVersion) {
+    if (dtVersion === at.inventoryVersion) {
+      // 同一 version で total / remaining / name が異なるのは contract corruption
+      //（version guard script の保証と同じ判定基準。name も含む）。
+      const dtName = (dt as { name?: unknown }).name;
+      if (
+        dtTotal !== at.totalQuantity ||
+        dtRemaining !== at.remainingQuantity ||
+        dtName !== at.name
+      ) {
+        record(eventId, 'contract_corruption', at.ticketTypeId);
+      }
+    } else {
       record(eventId, 'ticket_type_version_mismatch', at.ticketTypeId);
+      if (dtTotal !== at.totalQuantity) {
+        record(eventId, 'ticket_type_total_mismatch', at.ticketTypeId);
+      }
+      if (dtRemaining !== at.remainingQuantity) {
+        record(eventId, 'ticket_type_remaining_mismatch', at.ticketTypeId);
+      }
     }
   }
 
@@ -380,6 +428,66 @@ function emptyCounts(): Record<ReconciliationCategory, number> {
   return counts;
 }
 
-function asIntOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+// asQuantityOrNull は quantity 系 field（OpenSearch mapping: integer、正本: int4）の
+// 境界チェック付き読み取りです。contract（isNonNegativeInt）と同じ「finite safe integer・
+// 0 以上・int4 上限以内」を課し、範囲外（負数・int4 超過・非整数）は不正な projection として
+// null を返します（呼び出し側で malformed_projection に分類される）。
+function asQuantityOrNull(value: unknown): number | null {
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= POSTGRES_INT4_MAX
+    ? value
+    : null;
+}
+
+// asVersionOrNull は version 系 field（OpenSearch mapping: long）の境界チェック付き
+// 読み取りです。quantity と異なり上限は long 側（JS で正確に扱える safe integer 上限）で
+// bound します。負数・非整数・safe integer 超過は不正な projection として null を返します。
+function asVersionOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+// COORDINATE_TOLERANCE は location 比較の許容誤差です。正本は NUMERIC(9,6)（小数 6 桁）で
+// 丸めるため、event payload 由来の高精度値と正本値の差は最大でも 5e-7。1e-6 未満なら同値とみなす。
+const COORDINATE_TOLERANCE = 1e-6;
+
+// metadataMatches は events table（正本）の metadata と projection の対応 field を比較します。
+// starts_at は表記揺れ（timezone / ミリ秒表記）を吸収するため epoch ms で比較します。
+function metadataMatches(
+  authoritative: AuthoritativeEventMetadata,
+  doc: RawProjectionDoc,
+): boolean {
+  if (doc.title !== authoritative.title) {
+    return false;
+  }
+  if (doc.event_type !== authoritative.eventType) {
+    return false;
+  }
+  if (
+    typeof doc.starts_at !== 'string' ||
+    Number.isNaN(Date.parse(doc.starts_at)) ||
+    Date.parse(doc.starts_at) !== Date.parse(authoritative.startsAt)
+  ) {
+    return false;
+  }
+  const location = doc.location as { lat?: unknown; lon?: unknown } | null | undefined;
+  if (authoritative.latitude === null || authoritative.longitude === null) {
+    // 正本に location が無ければ projection にも無いこと（stale location を許容しない）。
+    return location === null || location === undefined;
+  }
+  if (
+    location === null ||
+    location === undefined ||
+    typeof location.lat !== 'number' ||
+    typeof location.lon !== 'number'
+  ) {
+    return false;
+  }
+  return (
+    Math.abs(location.lat - authoritative.latitude) < COORDINATE_TOLERANCE &&
+    Math.abs(location.lon - authoritative.longitude) < COORDINATE_TOLERANCE
+  );
 }

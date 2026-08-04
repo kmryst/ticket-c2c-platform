@@ -3,7 +3,8 @@
 // （production-readiness L-5 / Issue #200、versioned 対応 Issue #377）。
 // pollOnce の「1 件処理 → 直後にその 1 件だけ DeleteMessage」という逐次処理を仕様として固定し、
 // versioned / legacy InventoryChanged と EventListed / EventUpdated の分岐、malformed payload を
-// ack しないこと、mapping 適用失敗で poll を開始しないことを検証します。
+// ack しないこと、index 未存在 / 存在確認失敗で poll を開始しないことを検証します
+// （mapping 適用は search-index-migrate CLI に分離済み。fix 8）。
 //
 // OpenSearch へは接続しません（createOpenSearchClient を module モック、
 // SQSClient.prototype.send を spy に差し替え）。実 mapping / Painless script の挙動は
@@ -188,6 +189,86 @@ describe('SearchProjectionWorker.pollOnce', () => {
     expect(deletedReceiptHandles()).toEqual(['rh1']);
   });
 
+  it('eventId 欠損の versioned InventoryChanged は throw し、message を削除しない（fix 3）', async () => {
+    // eventId だけが欠けた versioned payload。warn-and-skip で silent ack せず、
+    // parser の contract 判定（InventoryEventContractError）で throw させる。
+    const missingEventId = {
+      MessageId: 'mid-missing-eventid',
+      ReceiptHandle: 'rh-missing',
+      Body: JSON.stringify({
+        'detail-type': 'InventoryChanged',
+        detail: {
+          remainingQuantity: 40,
+          inventoryEventVersion: 1,
+          ticketTypeId: TYPE_UUID,
+          ticketTypeName: 'GA',
+          ticketTypeTotalQuantity: 50,
+          ticketTypeRemainingQuantity: 40,
+          inventoryVersion: 3,
+          eventTotalQuantity: 50,
+          eventRemainingQuantity: 40,
+          eventInventoryVersion: 3,
+        },
+      }),
+    };
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: [missingEventId] });
+      }
+      return Promise.resolve({});
+    });
+
+    await expect(pollOnce()).rejects.toThrow('eventId');
+    expect(opensearchMock.update).not.toHaveBeenCalled();
+    expect(deletedReceiptHandles()).toEqual([]);
+  });
+
+  it('eventId 欠損の legacy InventoryChanged も throw し、message を削除しない（fix 3）', async () => {
+    const missingEventId = {
+      MessageId: 'mid-missing-legacy',
+      ReceiptHandle: 'rh-missing-legacy',
+      Body: JSON.stringify({
+        'detail-type': 'InventoryChanged',
+        detail: { remainingQuantity: 7 },
+      }),
+    };
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: [missingEventId] });
+      }
+      return Promise.resolve({});
+    });
+
+    await expect(pollOnce()).rejects.toThrow('eventId');
+    expect(opensearchMock.update).not.toHaveBeenCalled();
+    expect(deletedReceiptHandles()).toEqual([]);
+  });
+
+  it('eventId 欠損の EventListed は従来どおり warn して skip（ack）する', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const missingEventId = {
+      MessageId: 'mid-missing-listed',
+      ReceiptHandle: 'rh-missing-listed',
+      Body: JSON.stringify({
+        'detail-type': 'EventListed',
+        detail: { title: 'no id' },
+      }),
+    };
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: [missingEventId] });
+      }
+      return Promise.resolve({});
+    });
+
+    await pollOnce();
+
+    expect(opensearchMock.update).not.toHaveBeenCalled();
+    // metadata 系は在庫の正確性へ影響しないため、意図的な warn-and-skip（ack）を維持する。
+    expect(deletedReceiptHandles()).toEqual(['rh-missing-listed']);
+    warnSpy.mockRestore();
+  });
+
   it('malformed な versioned payload は throw し、message を削除しない', async () => {
     // ticketTypeId が UUID でない部分 versioned payload。legacy へフォールバックさせない。
     const broken = {
@@ -217,7 +298,9 @@ describe('SearchProjectionWorker.pollOnce', () => {
   });
 });
 
-describe('SearchProjectionWorker.start (ensureIndex)', () => {
+// fix 8: mapping 更新（ensureEventsIndex）は Worker 起動処理から分離し、deploy 時 1 回の
+// migration ステップ（search-index-migrate CLI）が担う。Worker 起動は index の存在確認だけを行う。
+describe('SearchProjectionWorker.start (assertIndexExists)', () => {
   let worker: SearchProjectionWorker;
 
   beforeEach(() => {
@@ -228,41 +311,34 @@ describe('SearchProjectionWorker.start (ensureIndex)', () => {
     );
   });
 
-  function ensureIndex(): Promise<void> {
-    return (worker as unknown as { ensureIndex(): Promise<void> }).ensureIndex();
+  function assertIndexExists(): Promise<void> {
+    return (
+      worker as unknown as { assertIndexExists(): Promise<void> }
+    ).assertIndexExists();
   }
 
-  it('既存 index でも putMapping で additive に mapping を適用する', async () => {
+  it('既存 index では存在確認だけを行い、mapping 更新 API（putMapping / create）を呼ばない', async () => {
     opensearchMock.indices.exists.mockResolvedValue({ body: true });
-    opensearchMock.indices.putMapping.mockResolvedValue({});
 
-    await ensureIndex();
+    await assertIndexExists();
 
+    expect(opensearchMock.indices.exists).toHaveBeenCalledTimes(1);
     expect(opensearchMock.indices.create).not.toHaveBeenCalled();
-    expect(opensearchMock.indices.putMapping).toHaveBeenCalledTimes(1);
-    const props = opensearchMock.indices.putMapping.mock.calls[0][0].body
-      .properties as Record<string, unknown>;
-    expect(props).toHaveProperty('ticket_types');
-    expect(props).toHaveProperty('event_inventory_version');
-  });
-
-  it('未存在 index は完全 mapping で作成する', async () => {
-    opensearchMock.indices.exists.mockResolvedValue({ body: false });
-    opensearchMock.indices.create.mockResolvedValue({});
-
-    await ensureIndex();
-
-    expect(opensearchMock.indices.create).toHaveBeenCalledTimes(1);
     expect(opensearchMock.indices.putMapping).not.toHaveBeenCalled();
   });
 
-  it('mapping 適用失敗時は throw し、message consumption を開始しない', async () => {
-    opensearchMock.indices.exists.mockResolvedValue({ body: true });
-    opensearchMock.indices.putMapping.mockRejectedValue(
-      new Error('mapping failed'),
-    );
+  it('index 未存在なら throw し、dynamic mapping での自動作成をさせない', async () => {
+    opensearchMock.indices.exists.mockResolvedValue({ body: false });
 
-    await expect(ensureIndex()).rejects.toThrow('mapping failed');
+    await expect(assertIndexExists()).rejects.toThrow('does not exist');
+    expect(opensearchMock.indices.create).not.toHaveBeenCalled();
+    expect(opensearchMock.indices.putMapping).not.toHaveBeenCalled();
+  });
+
+  it('存在確認自体の失敗は throw し、message consumption を開始しない', async () => {
+    opensearchMock.indices.exists.mockRejectedValue(new Error('exists failed'));
+
+    await expect(assertIndexExists()).rejects.toThrow('exists failed');
   });
 });
 

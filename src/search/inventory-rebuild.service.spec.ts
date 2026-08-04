@@ -24,6 +24,12 @@ function fakeSql(eventCount = 1): SqlClient {
             total_quantity: 100,
             remaining_quantity: 90,
             version: 2,
+            // events table（正本）の metadata（fix 1: rebuild は metadata も復元する）。
+            title: 'fixture event',
+            event_type: 'music',
+            starts_at: new Date('2032-01-01T00:00:00Z'),
+            location_latitude: null,
+            location_longitude: null,
           })),
           rowCount: eventIds.length,
         };
@@ -71,11 +77,17 @@ function fakeOpensearch(
 
 describe('rebuildInventoryProjection', () => {
   it('bulk が errors=false なら成功する', async () => {
-    const { os } = fakeOpensearch({ errors: false, items: [] });
+    const { os, bulk } = fakeOpensearch({ errors: false, items: [] });
     const report = await rebuildInventoryProjection(fakeSql(), os);
     expect(report.processedEvents).toBe(1);
     expect(report.processedTicketTypes).toBe(1);
     expect(report.bulkRequests).toBe(1);
+    // fix 1: metadata 復元操作 + versioned 在庫操作の 2 操作（4 行）を 1 bulk で送る。
+    const body = (bulk.mock.calls[0][0] as { body: unknown[] }).body;
+    expect(body).toHaveLength(4);
+    const scripts = JSON.stringify(body);
+    expect(scripts).toContain('params.title');
+    expect(scripts).toContain('params.inventoryVersion');
   });
 
   it('bulk が HTTP 200 でも item error があれば throw する（partial failure を成功扱いしない）', async () => {
@@ -93,11 +105,12 @@ describe('rebuildInventoryProjection', () => {
   // review 10: rebuild は各 bulk では refresh せず、全 bulk 成功後に一度だけ index を refresh する。
   it('bulkSize=1 で複数 bulk が発生しても refresh は最後に一度だけ（各 bulk では refresh しない）', async () => {
     const { os, bulk, refresh } = fakeOpensearch({ errors: false, items: [] });
-    // 3 event / 各 1 Type、bulkSize=1 で 3 回の bulk request を発生させる。
+    // 3 event / 各 1 Type、bulkSize=1。各 event は metadata + versioned の 2 操作を生むため
+    // 6 回の bulk request になる（fix 1 で metadata 復元操作が加わった）。
     const report = await rebuildInventoryProjection(fakeSql(3), os, {
       bulkSize: 1,
     });
-    expect(report.bulkRequests).toBe(3);
+    expect(report.bulkRequests).toBe(6);
     // bulk request は refresh:true を持たない。
     for (const call of bulk.mock.calls) {
       expect((call[0] as { refresh?: unknown }).refresh).toBeUndefined();

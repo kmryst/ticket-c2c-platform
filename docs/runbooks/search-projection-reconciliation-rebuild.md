@@ -11,7 +11,8 @@ OpenSearch から PostgreSQL への逆同期は行わない。
 - owner: Search Projection failure domain（Issue #377）。Gate B の呼び出し順序・cross-store checker・
   evidence・activation・controlled rollback は #378 が所有する。
 - 停止条件: 次のいずれかに該当したら、rebuild / activation を進めず調査する。
-  - reconciliation が `contract corruption`（同一 version で値が異なる）を示す。
+  - reconciliation が `contract_corruption`（projection の version が正本と一致しているのに
+    total / remaining / name が異なる）または `malformed_projection` を示す。
   - mixed Worker 期間（pre-version-guard Worker が 0 件でない）。
   - PostgreSQL 正本自体の不整合が疑われる（#376 の failure domain。この runbook では扱わない）。
 
@@ -43,15 +44,24 @@ node dist/src/search/inventory-reconciliation.cli.js --page-size 200
 
 出力は machine-readable JSON（`counts` に category 別件数、`findings` に bounded なサンプル、
 `hasDiff`）。secret は含めない。差分 category は missing / unexpected document、Ticket Type /
-Event 集計の total / remaining / version 差分、`unversioned_projection`、`malformed_projection`。
+Event 集計の total / remaining / version 差分、`metadata_mismatch`、`contract_corruption`、
+`unversioned_projection`、`malformed_projection`。
 
-`unversioned_projection` と `malformed_projection` は意味が異なるため区別して扱う。
+category ごとに意味と対応が異なるため区別して扱う。
 
 - `unversioned_projection`: EventListed だけが反映された購入前の正常な legacy/metadata document
   （versioned inventory field が未作成）。compatibility 期間中は発生し得る。rebuild で収束させる。
-- `malformed_projection` / 同一 version で異なる値（contract corruption）: rebuild / activation を
-  止めて調査する。versioned field の部分欠損・不正な ticket_types 要素・event_id だけで legacy
-  document としても成立しないものが malformed。
+- `metadata_mismatch`: events table（正本）の title / event_type / starts_at / location と
+  projection の対応 field の不一致（欠損を含む）。これらの metadata は Aurora に authoritative に
+  保存されており、rebuild が在庫と併せて復元するため、rebuild で収束させる。
+- `contract_corruption`: projection の version が正本の version と一致しているのに
+  total / remaining / name が異なる状態。単に projection の version が遅れているための値差分
+  （cross-store snapshot が非原子的なための許容される一時的なズレ。version mismatch 系
+  category で記録される）とは別物で、書き込みパスの version guard script が本来防ぐべき
+  真の破損シグナル。rebuild / activation を止めて調査する。
+- `malformed_projection`: versioned field の部分欠損・不正な ticket_types 要素・範囲外の値
+  （負数、quantity の int4 超過など）・event_id だけで legacy document としても成立しないもの。
+  rebuild / activation を止めて調査する。
 
 Worker outcome（`ProjectionOutcome`）では、version guard による no-op（lower stale および
 equal かつ同値 duplicate）は `Outcome=stale`、少なくとも一方を更新した場合は `applied`、
@@ -63,15 +73,38 @@ versioned state 作成後に version なし legacy を無視した場合は `leg
 Worker と同じ atomic version guard を共有するため、rebuild 中に届いた新しい event（version N+1）を
 巻き戻さない。restart 可能・idempotent。index を全削除しない（mapping は additive）。
 
+Aurora は在庫（versioned Ticket Type / Event 集計）だけでなく event metadata
+（title / event_type / starts_at / location）の正本でもあるため、rebuild は metadata も
+Aurora から復元する。rebuild 後の reconciliation では、在庫差分に加えて `metadata_mismatch`
+（metadata の欠損・不一致）が 0 であることも確認する。
+
 ```bash
 # rebuild 前後に reconciliation を実行して収束を確認する。
 node dist/src/search/inventory-reconciliation.cli.js   # before
 node dist/src/search/inventory-rebuild.cli.js --page-size 200 --bulk-size 200
-node dist/src/search/inventory-reconciliation.cli.js   # after（差分 0 を確認）
+node dist/src/search/inventory-reconciliation.cli.js   # after（metadata_mismatch を含め差分 0 を確認）
 ```
 
 bulk API が HTTP 200 でも item error が 1 件でもあれば rebuild は失敗する（exit 1）。失敗時は
 原因を確認し、restart（再実行）する。
+
+## mapping migration（deploy 時 1 回の独立ステップ）
+
+OpenSearch events index の mapping 作成・additive 更新（`ensureEventsIndex`）は、Worker の
+起動処理から分離した独立の migration ステップとして実行する（PostgreSQL の DDL を起動時ではなく
+`db-migrate-<env>.yml` / `migration:run:local` で扱うのと同じパターン）。Worker の起動処理は
+index の存在確認だけを行い、mapping 更新 API を呼ばない（OpenSearch の一時不調が Worker 起動
+全体を失敗させる障害モードを持ち込まないため）。
+
+```bash
+# mapping を含む変更のリリースでは、新 Worker 起動前に 1 回だけ実行する。
+# 未存在なら完全 mapping で index を作成し、存在すれば idempotent な additive putMapping を適用する。
+node dist/src/search/search-index-migrate.cli.js
+# ローカル: npm run search-index:migrate:local
+```
+
+AWS 環境では既存 API artifact の command override（ECS run-task）から実行できる。deploy
+pipeline（`deploy-backend-<env>.yml` 相当）への自動組み込みは別 Issue で扱う。
 
 ## mixed Worker 期間の制約
 
@@ -79,6 +112,11 @@ bulk API が HTTP 200 でも item error が 1 件でもあれば rebuild は失�
   全置換で versioned field を消し得る。
 - したがって mixed Worker 期間（pre-version-guard Worker が 0 件でない）は、新 projection を
   active 扱いしない。
+- Worker rolling deployment 中は、旧 Worker（version guard なし）が新 Worker の適用済み残数を
+  一時的に上書きし得るため、検索結果の表示残数に一時的なブレが生じ得る。PostgreSQL が正本で
+  ある以上、在庫超過や二重販売には直結せず、次の InventoryChanged で自己修復する結果整合の
+  範囲の事象である。Gate B の reconciliation / rebuild は、全 Worker の入れ替えが完了してから
+  実行する。
 - old Worker が 0 件であることを確認してから rebuild / reconciliation する。
 - versioned state 作成後、pre-version-guard Worker だけへ独立 rollback しない。
 

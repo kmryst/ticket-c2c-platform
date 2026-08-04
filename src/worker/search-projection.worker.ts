@@ -30,7 +30,7 @@ import { EVENTS_INDEX } from '../search/search.service';
 import {
   applyEventMetadata,
   applyParsedInventoryChanged,
-  ensureEventsIndex,
+  assertEventsIndexExists,
 } from '../search/events-projection.store';
 // InventoryChanged の runtime parser（Issue #377）。壊れた versioned payload は throw します。
 import { parseInventoryChangedDetail } from '../messaging/inventory-event.contract';
@@ -53,9 +53,9 @@ export class SearchProjectionWorker {
     this.opensearch = createOpenSearchClient(opensearchEndpoint);
   }
 
-  // start は index の存在を保証してから消費ループへ入ります。
+  // start は index の存在を確認してから消費ループへ入ります（mapping 更新 API は呼びません）。
   async start(): Promise<void> {
-    await this.ensureIndex();
+    await this.assertIndexExists();
     console.log('search-projection worker started', {
       queueUrl: this.queueUrl,
     });
@@ -75,13 +75,14 @@ export class SearchProjectionWorker {
     this.running = false;
   }
 
-  // ensureIndex は index の存在を保証し、mapping を additive に適用します（Issue #377）。
-  // 既存 index にも putMapping で versioned field（ticket_types / event_inventory_version 等）を
-  // 追加します。早期 return せず additive 適用するため、既存 index で新 field が欠落しません。
-  // mapping 適用に失敗した場合は throw し、message consumption を開始しません。
-  private async ensureIndex(): Promise<void> {
-    await ensureEventsIndex(this.opensearch, EVENTS_INDEX);
-    console.log(`ensured index mapping: ${EVENTS_INDEX}`);
+  // assertIndexExists は index の存在だけを read-only に確認します。
+  // mapping の作成・additive putMapping は Worker 起動処理から分離し、deploy 時に 1 回だけ
+  // 実行する migration ステップ（search-index-migrate CLI）が担います（DB スキーマを起動時
+  // DDL ではなく versioned migrations で扱うのと同じ分離。Issue #92 と同型）。
+  // index が無い場合は throw し、dynamic mapping での自動作成と message consumption を防ぎます。
+  private async assertIndexExists(): Promise<void> {
+    await assertEventsIndexExists(this.opensearch, EVENTS_INDEX);
+    console.log(`confirmed index exists: ${EVENTS_INDEX}`);
   }
 
   private async pollOnce(): Promise<void> {
@@ -179,6 +180,31 @@ export class SearchProjectionWorker {
   private async processEnvelope(envelope: EventBridgeEnvelope): Promise<void> {
     const detailType = envelope['detail-type'];
     const detail = envelope.detail;
+
+    // InventoryChanged は eventId の有無にかかわらず必ず parser に判定を委ねる。
+    // eventId 欠損・不正は contract 違反として parser が throw し、SQS message を ack しない
+    // （warn-and-skip で silent ack すると在庫 event が失われ、DLQ にも現れない）。
+    if (detailType === 'InventoryChanged') {
+      // 壊れた versioned payload は parser が throw し、SQS message を削除させません。
+      // version guard は OpenSearch 側の atomic scripted update が担います。
+      const parsed = parseInventoryChangedDetail(detail);
+      // review 3: OpenSearch の実 response を基に applied / stale / legacy_ignore を区別する。
+      const outcome = await applyParsedInventoryChanged(
+        this.opensearch,
+        EVENTS_INDEX,
+        parsed,
+      );
+      this.emitOutcome(operationForDetailType(detailType)!, outcome);
+      console.log('updated inventory', {
+        eventId: parsed.eventId,
+        kind: parsed.kind,
+        ...traceLogFields(),
+      });
+      return;
+    }
+
+    // InventoryChanged 以外の detail-type では、eventId 欠損時の warn-and-skip（ack）を
+    // 従来どおり維持する（metadata 系 event の欠損は在庫の正確性へ影響しないため）。
     const eventId = detail.eventId as string | undefined;
 
     if (!eventId) {
@@ -207,28 +233,10 @@ export class SearchProjectionWorker {
             | null
             | undefined,
         });
-        this.emitOutcome('EventMetadata', 'applied');
+        this.emitOutcome(operationForDetailType(detailType)!, 'applied');
         console.log('indexed event', {
           eventId,
           detailType,
-          ...traceLogFields(),
-        });
-        break;
-      }
-      case 'InventoryChanged': {
-        // 壊れた versioned payload は parser が throw し、SQS message を削除させません。
-        // version guard は OpenSearch 側の atomic scripted update が担います。
-        const parsed = parseInventoryChangedDetail(detail);
-        // review 3: OpenSearch の実 response を基に applied / stale / legacy_ignore を区別する。
-        const outcome = await applyParsedInventoryChanged(
-          this.opensearch,
-          EVENTS_INDEX,
-          parsed,
-        );
-        this.emitOutcome('InventoryChanged', outcome);
-        console.log('updated inventory', {
-          eventId,
-          kind: parsed.kind,
           ...traceLogFields(),
         });
         break;
@@ -258,19 +266,25 @@ export class SearchProjectionWorker {
   }
 }
 
+// OPERATION_BY_DETAIL_TYPE は detail-type → ProjectionOutcome Operation の単一の対応表です。
+// 成功パス（processEnvelope）とエラーパス（handleMessage の catch）の両方がこの表を使い、
+// マッピングの二重実装による将来の drift を防ぎます（review 4 / fix 9）。
+const OPERATION_BY_DETAIL_TYPE: Record<
+  string,
+  'InventoryChanged' | 'EventMetadata'
+> = {
+  InventoryChanged: 'InventoryChanged',
+  EventListed: 'EventMetadata',
+  EventUpdated: 'EventMetadata',
+};
+
 // operationForDetailType は envelope の detail-type から ProjectionOutcome の Operation を
 // 決定します（review 4）。error class からの逆算をやめ、catch へ入る前に決まる detail-type で
 // 有限 Operation を選ぶ。TicketPurchased / unknown は無理に EventMetadata へ分類せず null を返す。
 function operationForDetailType(
   detailType: string,
 ): 'InventoryChanged' | 'EventMetadata' | null {
-  if (detailType === 'InventoryChanged') {
-    return 'InventoryChanged';
-  }
-  if (detailType === 'EventListed' || detailType === 'EventUpdated') {
-    return 'EventMetadata';
-  }
-  return null;
+  return OPERATION_BY_DETAIL_TYPE[detailType] ?? null;
 }
 
 function sleep(ms: number): Promise<void> {

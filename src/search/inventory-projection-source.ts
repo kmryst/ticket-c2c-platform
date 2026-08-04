@@ -33,12 +33,25 @@ export interface AuthoritativeTicketType {
   inventoryVersion: TicketTypeInventoryVersion;
 }
 
+// AuthoritativeEventMetadata は events table（正本）が持つ検索用 metadata です。
+// title / event_type / starts_at / location は在庫と同じくこのサービスの PostgreSQL に
+// authoritative に保存されているため、rebuild はこれらも Aurora から復元できる。
+export interface AuthoritativeEventMetadata {
+  title: string;
+  eventType: string;
+  // startsAt は ISO 8601 文字列（timestamptz を UTC で normalize）。
+  startsAt: string;
+  latitude: number | null;
+  longitude: number | null;
+}
+
 // AuthoritativeEventInventory は 1 Event 分の正本 snapshot です。
 export interface AuthoritativeEventInventory {
   eventId: string;
   eventTotalQuantity: number;
   eventRemainingQuantity: number;
   eventInventoryVersion: EventInventoryVersion;
+  metadata: AuthoritativeEventMetadata;
   ticketTypes: AuthoritativeTicketType[];
 }
 
@@ -50,6 +63,13 @@ interface EventAggregateRow extends Record<string, unknown> {
   total_quantity: number;
   remaining_quantity: number;
   version: number;
+  // events table（正本）の検索用 metadata。pg driver は timestamptz を Date で、
+  // NUMERIC を文字列で返すため、boundary で ISO 文字列 / number へ変換する。
+  title: string;
+  event_type: string;
+  starts_at: Date | string;
+  location_latitude: string | number | null;
+  location_longitude: string | number | null;
 }
 
 interface TicketTypeRow extends Record<string, unknown> {
@@ -75,10 +95,19 @@ export async function* iterateAuthoritativeInventory(
     const aggregates: { rows: EventAggregateRow[]; rowCount: number | null } =
       await client.query<EventAggregateRow>(
       `
-        SELECT event_id, total_quantity, remaining_quantity, version
-        FROM ticket_inventory
-        WHERE ($1::uuid IS NULL OR event_id > $1::uuid)
-        ORDER BY event_id ASC
+        SELECT ti.event_id,
+               ti.total_quantity,
+               ti.remaining_quantity,
+               ti.version,
+               e.title,
+               e.event_type,
+               e.starts_at,
+               e.location_latitude,
+               e.location_longitude
+        FROM ticket_inventory ti
+        JOIN events e ON e.id = ti.event_id
+        WHERE ($1::uuid IS NULL OR ti.event_id > $1::uuid)
+        ORDER BY ti.event_id ASC
         LIMIT $2
       `,
       [lastEventId, boundedPageSize],
@@ -129,6 +158,13 @@ export async function* iterateAuthoritativeInventory(
         eventRemainingQuantity: aggregate.remaining_quantity,
         // DB read boundary で branded 値へ変換する（review 6）。
         eventInventoryVersion: toEventInventoryVersion(aggregate.version),
+        metadata: {
+          title: aggregate.title,
+          eventType: aggregate.event_type,
+          startsAt: toIsoString(aggregate.starts_at),
+          latitude: toCoordinateOrNull(aggregate.location_latitude),
+          longitude: toCoordinateOrNull(aggregate.location_longitude),
+        },
         ticketTypes: typesByEvent.get(aggregate.event_id) ?? [],
       };
     }
@@ -138,6 +174,28 @@ export async function* iterateAuthoritativeInventory(
       return;
     }
   }
+}
+
+// toIsoString は pg driver が返す timestamptz（Date または文字列）を ISO 8601 文字列へ
+// normalize します。正本の値であり、ここで不正なら fail closed に throw します。
+function toIsoString(value: Date | string): string {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`authoritative starts_at is not a valid timestamp: ${String(value)}`);
+  }
+  return date.toISOString();
+}
+
+// toCoordinateOrNull は NUMERIC(9,6) の文字列表現を number へ変換します（NULL は null のまま）。
+function toCoordinateOrNull(value: string | number | null): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`authoritative coordinate is not a finite number: ${String(value)}`);
+  }
+  return parsed;
 }
 
 // beginReadOnlySnapshot は REPEATABLE READ READ ONLY transaction を開始します。
