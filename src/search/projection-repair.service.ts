@@ -6,8 +6,9 @@
 // 対象:
 // - unexpected_event_document: OpenSearch 側にあって正本（events / ticket_inventory）に無い
 //   document の個別削除（orphan document）。
-// - unexpected_ticket_type: document 自体は正当で、正本（ticket_types）に無い Type 要素だけが
-//   余剰な場合の該当要素の個別除去。
+// - unexpected_ticket_type: document 自体は正当で、対象 event の正本 Type 集合に属さない
+//   Type 要素だけが余剰な場合の該当要素の個別除去。帰属判定は reconciliation と同じく
+//   (event_id, ticket_type_id) の複合で行う（別 event に正当に存在する Type の誤混入も対象）。
 // - contract_corruption: projection の version が正本と一致しているのに値（total / remaining /
 //   name）が異なる真の破損の、正本値による上書き修復。version guard script
 //   （INVENTORY_VERSION_GUARD_SCRIPT）は同一 version・値相違を throw で拒否するため、
@@ -46,7 +47,10 @@ export type RepairMode =
 export type RepairRefusalReason =
   // 正本に該当 event が存在する（orphan ではない）。削除してはいけない。
   | 'event_exists_in_authoritative'
-  // 正本に該当 ticket type が存在する（orphan ではない）。除去してはいけない。
+  // 正本上、対象 event に正当に属する ticket type（orphan ではない）。除去してはいけない。
+  // 判定は (event_id, ticket_type_id) の複合。ticket_type_id 単体のグローバル存在確認では
+  // ない（別 event に正当に存在する Type が対象 event の document へ誤混入したケースを
+  // 除去できなくなるため。reconciliation の unexpected_ticket_type と同じ per-event 基準）。
   | 'ticket_type_exists_in_authoritative'
   // orphan ticket type 除去は「document 自体は正当」が前提。event が正本に無いなら
   // delete-document で document ごと扱う。
@@ -199,7 +203,9 @@ export async function deleteOrphanTicketType(
   if (!(await existsInAuthoritative(sql, target.eventId))) {
     report.refusals.push('event_missing_in_authoritative');
   }
-  if (await ticketTypeExistsInAuthoritative(sql, ticketTypeId)) {
+  if (
+    await ticketTypeBelongsToEventInAuthoritative(sql, target.eventId, ticketTypeId)
+  ) {
     report.refusals.push('ticket_type_exists_in_authoritative');
   }
   const doc = await getProjectionDoc(opensearch, index, target.eventId);
@@ -212,7 +218,7 @@ export async function deleteOrphanTicketType(
     return report;
   }
 
-  await opensearch.update({
+  const response = await opensearch.update({
     index,
     id: target.eventId,
     body: {
@@ -224,7 +230,9 @@ export async function deleteOrphanTicketType(
     },
     refresh: true,
   });
-  report.applied = true;
+  // script が ctx.op = 'noop' で終わった場合（事前確認後に並行書き込みで対象要素が消えた等）
+  // は実際には何も書き込んでいないため、applied を true と報告しない。
+  report.applied = updateWasApplied(response);
   return report;
 }
 
@@ -353,7 +361,7 @@ export async function repairContractCorruption(
     return report;
   }
 
-  await opensearch.update({
+  const response = await opensearch.update({
     index,
     id: target.eventId,
     body: {
@@ -376,8 +384,19 @@ export async function repairContractCorruption(
     },
     refresh: true,
   });
-  report.applied = true;
+  // script の atomic 再判定が全条件不成立で noop になった場合（読み取り後に version が進んだ等）
+  // は上書きしていないため、applied を true と報告しない。
+  report.applied = updateWasApplied(response);
   return report;
+}
+
+// updateWasApplied は OpenSearch update API の result から「実際に書き込んだか」を判定します。
+// Painless script が ctx.op = 'noop' で終わると result は 'noop' になり、書き込みは発生して
+// いない。想定外の result も「書き込んだ」とは主張しない（fail-closed な報告）。
+export function updateWasApplied(response: {
+  body?: { result?: unknown };
+}): boolean {
+  return response.body?.result === 'updated';
 }
 
 function emptyReport(
@@ -407,20 +426,27 @@ async function existsInAuthoritative(
   return inventory.rows.length > 0;
 }
 
-// ticketTypeExistsInAuthoritative は正本（ticket_types / ticket_type_inventory）に
-// ticket type が存在するかを確認します。event_id を問わず ID 単位で保守的に判定する。
-async function ticketTypeExistsInAuthoritative(
+// ticketTypeBelongsToEventInAuthoritative は「ticket type が対象 event に正当に属しているか」を
+// 正本（ticket_types / ticket_type_inventory）の (event_id, ticket_type_id) 複合で確認します。
+// reconciliation の unexpected_ticket_type 判定（対象 event の authoritative Type 集合に対する
+// per-event membership）と同じ基準に揃える: ticket_type_id 単体のグローバル存在確認にすると、
+// 「別 event に正当に存在する Type が対象 event の document へ誤混入した」ケースを
+// 検出できても除去できず、差分 0 へ収束しなくなる。
+// 対象 event への帰属がどちらかの table に 1 行でもあれば「属している」と保守的に判定する
+//（誤除去を避ける方向へ倒す）。
+async function ticketTypeBelongsToEventInAuthoritative(
   sql: SqlClient,
+  eventId: string,
   ticketTypeId: string,
 ): Promise<boolean> {
   const types = await sql.query<{ one: number }>(
-    'SELECT 1 AS one FROM ticket_types WHERE id = $1::uuid',
-    [ticketTypeId],
+    'SELECT 1 AS one FROM ticket_types WHERE event_id = $1::uuid AND id = $2::uuid',
+    [eventId, ticketTypeId],
   );
   if (types.rows.length > 0) return true;
   const inventory = await sql.query<{ one: number }>(
-    'SELECT 1 AS one FROM ticket_type_inventory WHERE ticket_type_id = $1::uuid',
-    [ticketTypeId],
+    'SELECT 1 AS one FROM ticket_type_inventory WHERE event_id = $1::uuid AND ticket_type_id = $2::uuid',
+    [eventId, ticketTypeId],
   );
   return inventory.rows.length > 0;
 }

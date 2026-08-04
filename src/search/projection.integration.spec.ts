@@ -736,6 +736,150 @@ describeIntegration(
         });
       });
 
+      it('別 event に正当に存在する Type の誤混入は、対象 event からだけ除去され差分 0 へ収束する', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent, getDoc }) => {
+          // Event A の正当 Type: A1、Event B の正当 Type: B1。B1 を Event A の document へ
+          // 誤混入させる。B1 は DB にグローバルには存在するため、ticket_type_id 単体の
+          // 存在確認だと refuse されて検出済み差分が収束しない（per-event 帰属判定の回帰固定）。
+          const { eventId: eventA, typeIds: typeIdsA } = await seedEvent([5]);
+          const { eventId: eventB, typeIds: typeIdsB } = await seedEvent([3]);
+          const contaminantTypeId = typeIdsB[0];
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+            expect(
+              (await reconcileInventoryProjection(client, opensearch, { index })).totalDiffs,
+            ).toBe(0);
+
+            // B1 を Event A の document へ well-formed な形で誤混入させる。
+            await opensearch.update({
+              index,
+              id: eventA,
+              body: {
+                script: {
+                  lang: 'painless',
+                  source:
+                    'def nt = new HashMap();' +
+                    'nt.ticket_type_id = params.tid; nt.name = params.name;' +
+                    'nt.total_quantity = 3; nt.remaining_quantity = 3; nt.inventory_version = 1;' +
+                    'ctx._source.ticket_types.add(nt);',
+                  params: { tid: contaminantTypeId, name: 'Contaminant Type' },
+                },
+              },
+              refresh: true,
+            } as never);
+
+            // reconciliation は Event A 側の unexpected_ticket_type として検出する。
+            const before = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(before.counts.unexpected_ticket_type).toBe(1);
+            expect(
+              before.findings.some(
+                (f) =>
+                  f.category === 'unexpected_ticket_type' &&
+                  f.eventId === eventA &&
+                  f.ticketTypeId === contaminantTypeId,
+              ),
+            ).toBe(true);
+
+            // apply: B1 は Event A に属さないため refuse されず、Event A からだけ除去される。
+            const applied = await deleteOrphanTicketType(client, opensearch, {
+              index,
+              eventId: eventA,
+              ticketTypeId: contaminantTypeId,
+              apply: true,
+            });
+            expect(applied.refusals).toEqual([]);
+            expect(applied.applied).toBe(true);
+            const docA = await getDoc(eventA);
+            expect(findType(docA, contaminantTypeId)).toBeUndefined();
+            expect(findType(docA, typeIdsA[0])).toBeDefined();
+            // Event B の document からは削除されていない（正当な帰属は不変）。
+            expect(findType(await getDoc(eventB), contaminantTypeId)).toBeDefined();
+
+            // 正当な帰属（Event B × B1）への除去要求は引き続き refuse される（誤除去防止）。
+            const refused = await deleteOrphanTicketType(client, opensearch, {
+              index,
+              eventId: eventB,
+              ticketTypeId: contaminantTypeId,
+              apply: true,
+            });
+            expect(refused.applied).toBe(false);
+            expect(refused.refusals).toContain('ticket_type_exists_in_authoritative');
+
+            // Event A / Event B ともに差分 0 へ収束する。
+            const after = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(after.totalDiffs).toBe(0);
+            expect(after.hasDiff).toBe(false);
+          } finally {
+            client.release();
+          }
+        });
+      });
+
+      it('事前確認後に対象要素が並行除去された場合、script は noop になり applied=false を報告する', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent, getDoc }) => {
+          const { eventId } = await seedEvent([5]);
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+            const orphanTypeId = randomUUID();
+            await opensearch.update({
+              index,
+              id: eventId,
+              body: {
+                script: {
+                  lang: 'painless',
+                  source:
+                    'def nt = new HashMap();' +
+                    'nt.ticket_type_id = params.tid; nt.name = params.name;' +
+                    'nt.total_quantity = 9; nt.remaining_quantity = 9; nt.inventory_version = 1;' +
+                    'ctx._source.ticket_types.add(nt);',
+                  params: { tid: orphanTypeId, name: 'Orphan Type' },
+                },
+              },
+              refresh: true,
+            } as never);
+
+            // 「事前確認（doc 読み取り）通過後、update 直前に別経路の書き込みが対象要素を
+            // 除去した」race を決定的に再現する: service の update 呼び出しを intercept し、
+            // 先に実 client で対象要素を除去してから本来の update（script）を通す。
+            const racingClient = {
+              mget: (params: never) => opensearch.mget(params),
+              update: async (params: never) => {
+                await opensearch.update({
+                  index,
+                  id: eventId,
+                  body: {
+                    script: {
+                      lang: 'painless',
+                      source:
+                        'ctx._source.ticket_types.removeIf(t -> t.ticket_type_id == params.tid);',
+                      params: { tid: orphanTypeId },
+                    },
+                  },
+                  refresh: true,
+                } as never);
+                return opensearch.update(params);
+              },
+            } as unknown as OpenSearchClient;
+
+            const report = await deleteOrphanTicketType(client, racingClient, {
+              index,
+              eventId,
+              ticketTypeId: orphanTypeId,
+              apply: true,
+            });
+            // 事前確認は通過している（refusals なし）が、script は noop になったため
+            // applied=true と偽らない（no-op 検出の回帰固定）。
+            expect(report.refusals).toEqual([]);
+            expect(report.applied).toBe(false);
+            expect(findType(await getDoc(eventId), orphanTypeId)).toBeUndefined();
+          } finally {
+            client.release();
+          }
+        });
+      });
+
       it('contract corruption は rebuild では収束せず（毎回失敗）、repair 後に差分 0 へ収束する', async () => {
         await withHarness(async ({ index, pgClient, seedEvent, getDoc }) => {
           const { eventId, typeIds } = await seedEvent([5]);

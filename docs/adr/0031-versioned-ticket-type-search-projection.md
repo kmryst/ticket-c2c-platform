@@ -174,7 +174,11 @@ category は rebuild では収束しない。
 除去・contract corruption の正本値による上書き修復の 3 mode を持ち、次の安全制約を実装で
 強制する: 完全一致 UUID 指定必須（query 駆動の一括操作を持たない）、dry-run 既定
 （`--apply` なしでは書き込まない）、書き込み前の PostgreSQL（正本）現在値の再確認
-（前提が崩れていれば refuse）、corruption 修復の事前 diff 出力。corruption 修復は version
+（前提が崩れていれば refuse）、corruption 修復の事前 diff 出力。orphan ticket type 除去の
+正本再確認は、reconciliation の unexpected_ticket_type と同じ per-event 基準
+（`(event_id, ticket_type_id)` の複合による対象 event への帰属判定）で行う。ticket_type_id
+単体のグローバル存在確認では、別 event に正当に存在する Type が対象 event の document へ
+誤混入したケースを検出できても除去できず、差分 0 へ収束しないためである。corruption 修復は version
 guard を経由しない専用 script で行うが、「stored version == 正本 version かつ値相違」の場合に
 限って上書きすることを script 内で atomic に再判定し、より新しい version を決して巻き戻さない
 （guard script 自体と、通常書き込み経路での同一 version 改ざん拒否の保証は変更しない）。

@@ -67,7 +67,10 @@ category ごとに意味と対応が異なるため区別して扱う。
   （負数、quantity の int4 超過など）・event_id だけで legacy document としても成立しないもの。
   rebuild / activation を止めて調査する。
 - `unexpected_event_document` / `unexpected_ticket_type`: OpenSearch 側にあって正本
-  （ticket_inventory / ticket_types）に無い document / ticket type。rebuild は正本からの
+  （ticket_inventory）に無い event document / その event の正本 Type 集合
+  （ticket_types / ticket_type_inventory の `(event_id, ticket_type_id)`）に属さない
+  ticket type。別 event に正当に存在する Type が誤混入した場合も per-event の帰属で
+  unexpected と判定される。rebuild は正本からの
   upsert のみで削除・隔離経路を持たないため、**rebuild では自動収束しない**。また
   reconciliation の unexpected 検出は REPEATABLE READ READ ONLY スナップショット内で動くため、
   スナップショット確立後に新規作成された event の projection は構造的に必ず unexpected と
@@ -123,8 +126,13 @@ CLI の安全制約（実装で強制される）:
   一括操作（delete_by_query 等）は存在しない。
 - **dry-run 既定**。`--apply` を明示しない限り OpenSearch へ書き込まない。
 - 書き込み前に必ず PostgreSQL（正本）の該当 event_id / ticket_type_id の現在値を再確認し、
-  前提が崩れていれば refuse する（exit 2。何も書かない）。orphan 削除は正本に 1 行でも存在
-  すれば拒否、corruption 修復は「同一 version・値相違」が現存しなければ拒否する。
+  前提が崩れていれば refuse する（exit 2。何も書かない）。orphan document 削除は event が
+  正本に 1 行でも存在すれば拒否する。orphan ticket type 除去は「対象 event への帰属」
+  （ticket_types / ticket_type_inventory の `(event_id, ticket_type_id)` 複合）で判定し、
+  対象 event に属していれば拒否する（reconciliation の unexpected_ticket_type と同じ
+  per-event 基準。別 event に正当に存在するだけでは拒否しない。ticket_type_id 単体の
+  グローバル存在確認にすると、誤混入した Type を検出できても除去できず収束しない）。
+  corruption 修復は「同一 version・値相違」が現存しなければ拒否する。
 - corruption 修復は version guard を経由しない専用 script で行うが、script 内でも
   「stored version == 正本 version かつ値相違」を atomic に再判定し、より新しい version を
   決して巻き戻さない。version guard script 自体（通常書き込み経路の保証）は変更しない。
@@ -146,7 +154,11 @@ CLI の安全制約（実装で強制される）:
    ```sql
    SELECT 1 FROM ticket_inventory WHERE event_id = '<event_id>';
    SELECT 1 FROM events WHERE id = '<event_id>';
-   SELECT 1 FROM ticket_types WHERE id = '<ticket_type_id>';
+   -- ticket type は「対象 event への帰属」で確認する（別 event に正当に存在する Type の
+   -- 誤混入は、ID 単体のグローバル存在確認では orphan と判別できない）。
+   SELECT 1 FROM ticket_types WHERE event_id = '<event_id>' AND id = '<ticket_type_id>';
+   SELECT 1 FROM ticket_type_inventory
+    WHERE event_id = '<event_id>' AND ticket_type_id = '<ticket_type_id>';
    ```
 
 4. dry-run で対象と内容を確認してから、`--apply` で実行する。
@@ -167,7 +179,10 @@ CLI の安全制約（実装で強制される）:
    ```
 
    exit code: 0 = 成功（dry-run レポート / apply 完了）、2 = refuse（安全チェックで拒否。
-   出力 JSON の `refusals` を確認する）、1 = 実行エラー。
+   出力 JSON の `refusals` を確認する）、1 = 実行エラー。apply 時でも、書き込み直前の
+   並行書き込みにより修復 script が no-op になった場合（対象要素が既に無い・version が
+   進んだ等）は出力 JSON の `applied` が false になる。その場合は reconciliation を再実行
+   して現状を確認してから判断する。
 
 5. reconciliation を再実行し、該当差分が解消（差分 0）したことを確認する。contract corruption を
    修復した場合は、根本原因（何が guard を迂回して書いたか）の調査結果を残してから activation を
