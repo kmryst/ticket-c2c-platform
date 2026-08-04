@@ -339,6 +339,12 @@ function compareEvent(
 
 // detectUnexpected は projection を search_after で bounded にスキャンし、
 // 正本 ticket_inventory に存在しない event document（unexpected）を検出します。
+//
+// 注意: この比較は REPEATABLE READ READ ONLY スナップショット内で動くため、スナップショット
+// 確立後に新規作成された event の projection は構造的に必ず unexpected と誤判定されます
+// （ページング中に限った一時的な話ではない）。unexpected 系は rebuild でも自動収束しないため、
+// 時間を空けた再実行と手動確認を含む runbook の手順で対応します
+// （docs/runbooks/search-projection-reconciliation-rebuild.md）。
 async function detectUnexpected(
   sql: SqlClient,
   opensearch: Client,

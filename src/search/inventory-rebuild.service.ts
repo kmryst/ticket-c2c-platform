@@ -13,6 +13,12 @@
 //   （version guard が stale payload を no-op にする）。
 // - DB と OpenSearch 双方へ接続できる既存 API artifact から command override で実行する。
 //   このファイルは AWS 上で自動実行しない（scheduler / 常駐 service を追加しない）。
+//
+// 制約: rebuild は正本からの upsert のみで、OpenSearch 側にあって正本に無い document /
+// ticket type（reconciliation の unexpected_event_document / unexpected_ticket_type）の
+// 削除・隔離は行わない（正当な新規 event を誤って消すリスクがあるため自動削除しない）。
+// unexpected 系は rebuild では収束せず、runbook
+// （docs/runbooks/search-projection-reconciliation-rebuild.md）の手動手順で対応する。
 
 import type { Client } from '@opensearch-project/opensearch';
 import { buildVersionedInventoryChangedDetail } from '../messaging/inventory-event.contract';

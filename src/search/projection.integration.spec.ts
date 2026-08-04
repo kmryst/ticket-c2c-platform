@@ -30,6 +30,7 @@ import {
 } from '../messaging/inventory-version';
 import { reconcileInventoryProjection } from './inventory-reconciliation.service';
 import { rebuildInventoryProjection } from './inventory-rebuild.service';
+import { searchEvents } from './search.service';
 import { Baseline1751594400000 } from '../database/migrations/1751594400000-baseline';
 import { AddUsers1783251707172 } from '../database/migrations/1783251707172-add-users';
 import { AddPurchasesBuyerFk1783252676631 } from '../database/migrations/1783252676631-add-purchases-buyer-fk';
@@ -1081,6 +1082,68 @@ describeIntegration(
         } finally {
           client.release();
         }
+      });
+    });
+
+    // 検索 read の versioned field 優先（mixed Worker 巻き戻しの reconciliation blind spot 対策）:
+    // 旧 Worker が top-level remaining_quantity だけを doc_as_upsert で巻き戻しても、
+    // versioned state 作成済み（event_inventory_version != null）の event では検索結果が
+    // event_remaining_quantity 由来の正しい値になることを実 OpenSearch で検証する。
+    describe('検索 read は versioned field を優先する（top-level drift 耐性）', () => {
+      it('top-level remaining_quantity だけが drift しても event_remaining_quantity を返す', async () => {
+        await withHarness(async ({ index }) => {
+          const eventId = randomUUID();
+          const typeId = randomUUID();
+          await applyEventMetadata(opensearch, index, {
+            eventId,
+            title: 'Drift Event',
+            eventType: 'music',
+            startsAt: '2032-01-01T00:00:00Z',
+            totalQuantity: 100,
+            remainingQuantity: 100,
+          });
+          await applyVersionedInventoryChanged(opensearch, index,
+            versioned(eventId, typeId, { typeTotal: 100, typeRemaining: 40, typeVersion: 3, eventTotal: 100, eventRemaining: 40, eventVersion: 3 }));
+
+          // 旧 Worker（version guard なし）の doc_as_upsert 巻き戻しを模し、
+          // top-level remaining_quantity だけを古い値へ戻す（versioned field は触らない）。
+          await opensearch.update({
+            index,
+            id: eventId,
+            body: { doc: { remaining_quantity: 99 }, doc_as_upsert: true },
+            refresh: true,
+          } as never);
+
+          const results = await searchEvents(opensearch, index, {});
+          const hit = results.find((r) => r.eventId === eventId);
+          expect(hit).toBeDefined();
+          // top-level は 99 に巻き戻っているが、検索結果は versioned field 由来の 40。
+          expect(hit?.remainingQuantity).toBe(40);
+          expect(hit?.title).toBe('Drift Event');
+        });
+      });
+
+      it('legacy 期間（event_inventory_version 未設定）の event は top-level を返す', async () => {
+        await withHarness(async ({ index }) => {
+          const eventId = randomUUID();
+          await applyEventMetadata(opensearch, index, {
+            eventId,
+            title: 'Legacy Event',
+            eventType: 'music',
+            startsAt: '2032-01-01T00:00:00Z',
+            totalQuantity: 100,
+            remainingQuantity: 100,
+          });
+          // 版なし legacy InventoryChanged が top-level 残数を更新する。
+          await applyLegacyInventoryChanged(opensearch, index, { eventId, remainingQuantity: 55 });
+          await opensearch.indices.refresh({ index });
+
+          const results = await searchEvents(opensearch, index, {});
+          const hit = results.find((r) => r.eventId === eventId);
+          expect(hit).toBeDefined();
+          // versioned state 未作成なので top-level remaining_quantity（55）へ fallback する。
+          expect(hit?.remainingQuantity).toBe(55);
+        });
       });
     });
 

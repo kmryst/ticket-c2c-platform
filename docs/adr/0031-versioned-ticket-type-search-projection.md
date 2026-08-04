@@ -154,6 +154,16 @@ field が部分的に壊れている・ticket_types 要素が不正・event_id �
 無い場合は `missing_ticket_type`。unversioned は compatibility 期間中に発生し得るため rebuild で
 収束させる。malformed または同一 version で異なる値は rebuild / activation を止めて調査する。
 
+rebuild で収束する範囲は限定的である。`unversioned_projection` / `metadata_mismatch` /
+`contract_corruption`（原因修正済みなら）/ `malformed_projection` は正本からの upsert である
+rebuild で収束する。一方、rebuild は OpenSearch 側にあって正本に無い document / ticket type の
+削除・隔離経路を持たないため、`unexpected_event_document` / `unexpected_ticket_type` は rebuild
+では自動収束しない。自動削除は実装しない（reconciliation の unexpected 検出は REPEATABLE READ
+READ ONLY スナップショット内で動くため、スナップショット確立後に新規作成された event の
+projection は構造的に必ず unexpected と誤判定され、query 駆動の自動削除は正当な新規 event を
+消し得る）。unexpected 系は runbook の手動手順（時間を空けた再実行・正本の人手確認・event_id
+明示指定の個別削除）で収束させる。
+
 rebuild は Aurora を正本として bounded keyset pagination + bounded bulk size で reindex する。
 restart 可能・idempotent・Worker と同じ atomic version guard を共有する。index 全削除や破壊的
 recreate をしない。bulk API が HTTP 200 でも item error が 1 件でもあれば失敗させる。snapshot
@@ -174,11 +184,19 @@ Worker の単発 write（version guard / legacy / metadata）は従来どおり�
 pre-version-guard Worker だけへ独立 rollback しない。controlled rollout は #378 が所有する。
 
 認識している制約: rolling deployment 中は旧 Worker（version guard なし、`remaining_quantity` を
-無条件上書き）が新 Worker の適用済み残数を一時的に巻き戻し得るため、検索結果の表示残数に
-一時的なブレが生じ得る。PostgreSQL が正本である以上、在庫超過や二重販売には直結せず、次の
-InventoryChanged で自己修復する結果整合の範囲の事象としてコードでは対処しない（rollout 中の
-一時的な結果整合性として受け入れる）。Gate B の reconciliation / rebuild は全 Worker の
-入れ替え完了後に実行する（runbook 参照）。
+無条件上書き）が top-level `remaining_quantity` を一時的に巻き戻し得る。当初はこれを「次の
+InventoryChanged で自己修復する結果整合の範囲の事象」としてコードで対処しない方針だったが、
+reconciliation / rebuild は versioned field（`event_remaining_quantity` 等）だけを比較・修復する
+ため、top-level だけが drift した状態は検知も修復もされず、次の InventoryChanged が来ない
+event では古い表示が永久に残り得ることが分かった（reconciliation blind spot）。したがって
+コードで対処する: 検索 read（`search.service.ts`）は `event_inventory_version != null`
+（versioned state 作成済み）の event では `event_remaining_quantity` を正として読み、
+versioned state 未作成（legacy 期間）の event に対してのみ top-level `remaining_quantity` へ
+fallback する。判定キーは guard script / reconciliation の不変条件（versioned state の有無を
+`event_inventory_version` で判定する）と整合させる。version guard script による top-level
+field の seed・更新自体は、rolling deploy 中に旧 API タスクが top-level を読み続ける可能性が
+あるため維持する。PostgreSQL が正本である以上、この drift は在庫超過や二重販売には直結しない。
+Gate B の reconciliation / rebuild は全 Worker の入れ替え完了後に実行する（runbook 参照）。
 
 ## 根拠
 

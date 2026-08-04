@@ -62,6 +62,12 @@ category ごとに意味と対応が異なるため区別して扱う。
 - `malformed_projection`: versioned field の部分欠損・不正な ticket_types 要素・範囲外の値
   （負数、quantity の int4 超過など）・event_id だけで legacy document としても成立しないもの。
   rebuild / activation を止めて調査する。
+- `unexpected_event_document` / `unexpected_ticket_type`: OpenSearch 側にあって正本
+  （ticket_inventory / ticket_types）に無い document / ticket type。rebuild は正本からの
+  upsert のみで削除・隔離経路を持たないため、**rebuild では自動収束しない**。また
+  reconciliation の unexpected 検出は REPEATABLE READ READ ONLY スナップショット内で動くため、
+  スナップショット確立後に新規作成された event の projection は構造的に必ず unexpected と
+  誤判定される（ページング中に限った一時的な話ではない）。後述の手動手順で対応する。
 
 Worker outcome（`ProjectionOutcome`）では、version guard による no-op（lower stale および
 equal かつ同値 duplicate）は `Outcome=stale`、少なくとも一方を更新した場合は `applied`、
@@ -78,6 +84,11 @@ Aurora は在庫（versioned Ticket Type / Event 集計）だけでなく event 
 Aurora から復元する。rebuild 後の reconciliation では、在庫差分に加えて `metadata_mismatch`
 （metadata の欠損・不一致）が 0 であることも確認する。
 
+rebuild で収束する category は `unversioned_projection` / `metadata_mismatch` /
+`contract_corruption`（原因を修正済みなら）/ `malformed_projection` と、missing / version
+遅延系の差分である。`unexpected_event_document` / `unexpected_ticket_type` は rebuild では
+自動収束しないため、次節の手動手順で対応する。
+
 ```bash
 # rebuild 前後に reconciliation を実行して収束を確認する。
 node dist/src/search/inventory-reconciliation.cli.js   # before
@@ -87,6 +98,41 @@ node dist/src/search/inventory-reconciliation.cli.js   # after（metadata_mismat
 
 bulk API が HTTP 200 でも item error が 1 件でもあれば rebuild は失敗する（exit 1）。失敗時は
 原因を確認し、restart（再実行）する。
+
+## unexpected（orphan）document の手動対応
+
+`unexpected_event_document` / `unexpected_ticket_type` は「OpenSearch 側にあって正本に無い」
+差分であり、正本からの upsert しか行わない rebuild では収束しない。自動削除は実装しない
+（reconciliation のスナップショット確立後に新規作成された event の projection は構造的に必ず
+unexpected と誤判定されるため、query 駆動の自動削除は正当な新規 event を消し得る）。
+operator が次の手順で対応する。
+
+1. reconciliation は read-only のまま維持する（この手順の中で reconciliation 自体に削除を
+   させない）。
+2. queue drain 後（source queue backlog / oldest age が 0 に落ち着いた後）、**時間を空けて
+   2 回以上** reconciliation を実行し、同じ event_id / ticket_type_id が恒常的に unexpected で
+   あることを確認する（snapshot タイミングによる誤検知を除外するため）。
+3. 正本（events / ticket_inventory テーブル、ticket type なら ticket_types）へ直接クエリし、
+   該当 event_id / ticket_type_id が本当に存在しないことを人手で確認する。
+
+   ```sql
+   SELECT 1 FROM ticket_inventory WHERE event_id = '<event_id>';
+   SELECT 1 FROM events WHERE id = '<event_id>';
+   ```
+
+4. operator が **event_id 明示指定**で該当 document を個別削除する。query 駆動の一括削除
+   （delete_by_query 等）は行わない。
+
+   ```bash
+   # 手動の個別削除で十分（対象は手順 2-3 で確定した event_id のみ）。
+   curl -X DELETE "<opensearch-endpoint>/<index>/_doc/<event_id>"
+   ```
+
+   `unexpected_ticket_type`（document は正当で特定 Type だけが余剰）の場合は document 削除では
+   なく、rebuild 済みであることを確認のうえ該当 Type 要素の扱いを個別に判断する（自動化する
+   としても `--event-id` 必須・dry-run 前提の CLI に限定する。現時点では未実装の提案に留める）。
+
+5. reconciliation を再実行し、該当 unexpected が解消したことを確認する。
 
 ## mapping migration（deploy 時 1 回の独立ステップ）
 
