@@ -22,8 +22,8 @@ import {
   EventSummary,
   ParsedCreateEventInput,
 } from './event.types';
-
-const POSTGRES_INT4_MAX = 2_147_483_647;
+// int4 上限は共有 primitive を使う（review 9: validation drift 防止）。
+import { POSTGRES_INT4_MAX } from '../common/validation-primitives';
 
 interface EventInsertRow {
   id: string;

@@ -1,14 +1,14 @@
 // ファイル概要:
-// このファイルは検索プロジェクション Worker の単体テストです（production-readiness L-5 / Issue #200）。
-// pollOnce の「1 件処理 → 直後にその 1 件だけ DeleteMessage」という逐次処理を仕様として固定します。
-// production-readiness の旧記載（「バッチ内で 1 件でも例外を投げると同バッチ内の
-// 正常メッセージの削除もスキップされる」）は初期実装（PR #22）から実装と乖離しており、
-// 実際は「処理済みメッセージのみ削除・失敗以降は未削除（visibility timeout 後に再配信）」が
-// 正しい挙動です。将来のリファクタリング（バッチ一括削除化など）でこの性質が壊れた場合に
-// テストで検知できるようにします。
+// このファイルは検索プロジェクション Worker の単体テストです
+// （production-readiness L-5 / Issue #200、versioned 対応 Issue #377）。
+// pollOnce の「1 件処理 → 直後にその 1 件だけ DeleteMessage」という逐次処理を仕様として固定し、
+// versioned / legacy InventoryChanged と EventListed / EventUpdated の分岐、malformed payload を
+// ack しないこと、index 未存在 / 存在確認失敗で poll を開始しないことを検証します
+// （mapping 適用は search-index-migrate CLI に分離済み。fix 8）。
 //
-// OpenSearch / SQS へは接続しません（createOpenSearchClient を moduleモック、
-// SQSClient.prototype.send を spy に差し替え）。
+// OpenSearch へは接続しません（createOpenSearchClient を module モック、
+// SQSClient.prototype.send を spy に差し替え）。実 mapping / Painless script の挙動は
+// events-projection.store.integration.spec.ts（実 OpenSearch）で検証します。
 
 import {
   DeleteMessageCommand,
@@ -22,6 +22,7 @@ const opensearchMock = {
   indices: {
     exists: jest.fn(),
     create: jest.fn(),
+    putMapping: jest.fn(),
   },
   index: jest.fn(),
   update: jest.fn(),
@@ -31,7 +32,9 @@ jest.mock('../opensearch', () => ({
   createOpenSearchClient: jest.fn(() => opensearchMock),
 }));
 
-// EventBridge → SQS body の外形（EventListed）を作る helper。
+const VALID_UUID = '11111111-1111-1111-1111-111111111111';
+const TYPE_UUID = '22222222-2222-2222-2222-222222222222';
+
 function eventListedMessage(eventId: string, receiptHandle: string) {
   return {
     MessageId: `mid-${eventId}`,
@@ -50,12 +53,52 @@ function eventListedMessage(eventId: string, receiptHandle: string) {
   };
 }
 
+function versionedInventoryMessage(
+  eventId: string,
+  receiptHandle: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    MessageId: `mid-${eventId}`,
+    ReceiptHandle: receiptHandle,
+    Body: JSON.stringify({
+      'detail-type': 'InventoryChanged',
+      detail: {
+        eventId,
+        remainingQuantity: 40,
+        inventoryEventVersion: 1,
+        ticketTypeId: TYPE_UUID,
+        ticketTypeName: 'GA',
+        ticketTypeTotalQuantity: 50,
+        ticketTypeRemainingQuantity: 40,
+        inventoryVersion: 3,
+        eventTotalQuantity: 50,
+        eventRemainingQuantity: 40,
+        eventInventoryVersion: 3,
+        ...overrides,
+      },
+    }),
+  };
+}
+
+function legacyInventoryMessage(eventId: string, receiptHandle: string) {
+  return {
+    MessageId: `mid-${eventId}`,
+    ReceiptHandle: receiptHandle,
+    Body: JSON.stringify({
+      'detail-type': 'InventoryChanged',
+      detail: { eventId, remainingQuantity: 7 },
+    }),
+  };
+}
+
 describe('SearchProjectionWorker.pollOnce', () => {
   let sqsSend: jest.SpyInstance;
   let worker: SearchProjectionWorker;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    opensearchMock.update.mockResolvedValue({ body: { result: 'updated' } });
     sqsSend = jest.spyOn(SQSClient.prototype, 'send');
     worker = new SearchProjectionWorker(
       'https://sqs.example/queue',
@@ -67,7 +110,6 @@ describe('SearchProjectionWorker.pollOnce', () => {
     sqsSend.mockRestore();
   });
 
-  // pollOnce は private のためテストから直接呼ぶ。
   function pollOnce(): Promise<void> {
     return (worker as unknown as { pollOnce(): Promise<void> }).pollOnce();
   }
@@ -84,85 +126,223 @@ describe('SearchProjectionWorker.pollOnce', () => {
       if (command instanceof ReceiveMessageCommand) {
         return Promise.resolve({
           Messages: [
-            eventListedMessage('e1', 'rh1'),
-            eventListedMessage('e2', 'rh2'),
-            eventListedMessage('e3', 'rh3'),
+            eventListedMessage(VALID_UUID, 'rh1'),
+            versionedInventoryMessage(VALID_UUID, 'rh2'),
+            legacyInventoryMessage(VALID_UUID, 'rh3'),
           ],
         });
       }
       return Promise.resolve({});
     });
-    opensearchMock.index.mockResolvedValue({});
 
     await pollOnce();
 
-    expect(opensearchMock.index).toHaveBeenCalledTimes(3);
+    expect(opensearchMock.update).toHaveBeenCalledTimes(3);
     expect(deletedReceiptHandles()).toEqual(['rh1', 'rh2', 'rh3']);
   });
 
-  it('バッチ途中（2件目）の例外では、処理済みの1件目だけ削除され、2件目以降は削除されない', async () => {
+  it('バッチ途中の例外では、処理済みの1件目だけ削除され、2件目以降は削除されない', async () => {
     sqsSend.mockImplementation((command) => {
       if (command instanceof ReceiveMessageCommand) {
         return Promise.resolve({
           Messages: [
-            eventListedMessage('e1', 'rh1'),
-            eventListedMessage('e2', 'rh2'),
-            eventListedMessage('e3', 'rh3'),
+            eventListedMessage(VALID_UUID, 'rh1'),
+            versionedInventoryMessage(VALID_UUID, 'rh2'),
+            legacyInventoryMessage(VALID_UUID, 'rh3'),
           ],
         });
       }
       return Promise.resolve({});
     });
-    // 2 件目（e2）の OpenSearch 書き込みだけ失敗させる。
-    opensearchMock.index.mockImplementation(({ id }: { id: string }) =>
-      id === 'e2'
+    // 2 件目（versioned inventory）の OpenSearch 書き込みだけ失敗させる。
+    opensearchMock.update.mockImplementation((args: { body?: unknown }) => {
+      const body = args.body as { script?: unknown };
+      return body?.script &&
+        JSON.stringify(body).includes('inventory_version') &&
+        JSON.stringify(body).includes(TYPE_UUID)
         ? Promise.reject(new Error('opensearch write failed'))
-        : Promise.resolve({}),
-    );
+        : Promise.resolve({});
+    });
 
     await expect(pollOnce()).rejects.toThrow('opensearch write failed');
 
-    // 1 件目は処理済み・削除済み（巻き戻らない）。
-    // 2 件目（失敗）と 3 件目（未処理）は削除されず、visibility timeout 後に再配信される。
+    // 1 件目は処理済み・削除済み（巻き戻らない）。2 件目（失敗）以降は未削除。
     expect(deletedReceiptHandles()).toEqual(['rh1']);
-    // 3 件目の処理（OpenSearch 書き込み）にも到達していない。
-    const indexedIds = opensearchMock.index.mock.calls.map(
-      ([args]: [{ id: string }]) => args.id,
-    );
-    expect(indexedIds).toEqual(['e1', 'e2']);
   });
 
-  it('処理失敗したメッセージの再配信は同一 doc ID への upsert のため冪等である', async () => {
-    // 1 回目: e1 の書き込みが失敗して削除されない → 2 回目（再配信）: 成功して削除される。
+  it('OpenSearch エラー時はメッセージを削除しない（visibility timeout 後に再配信）', async () => {
     sqsSend.mockImplementation((command) => {
       if (command instanceof ReceiveMessageCommand) {
         return Promise.resolve({
-          Messages: [eventListedMessage('e1', 'rh1-redelivered')],
+          Messages: [versionedInventoryMessage(VALID_UUID, 'rh1')],
         });
       }
       return Promise.resolve({});
     });
-    opensearchMock.index
-      .mockRejectedValueOnce(new Error('transient failure'))
-      .mockResolvedValue({});
+    opensearchMock.update.mockRejectedValueOnce(new Error('transient failure'));
 
     await expect(pollOnce()).rejects.toThrow('transient failure');
     expect(deletedReceiptHandles()).toEqual([]);
 
+    // 再配信（成功）で削除される（冪等な scripted update）。
+    await pollOnce();
+    expect(deletedReceiptHandles()).toEqual(['rh1']);
+  });
+
+  it('eventId 欠損の versioned InventoryChanged は throw し、message を削除しない（fix 3）', async () => {
+    // eventId だけが欠けた versioned payload。warn-and-skip で silent ack せず、
+    // parser の contract 判定（InventoryEventContractError）で throw させる。
+    const missingEventId = {
+      MessageId: 'mid-missing-eventid',
+      ReceiptHandle: 'rh-missing',
+      Body: JSON.stringify({
+        'detail-type': 'InventoryChanged',
+        detail: {
+          remainingQuantity: 40,
+          inventoryEventVersion: 1,
+          ticketTypeId: TYPE_UUID,
+          ticketTypeName: 'GA',
+          ticketTypeTotalQuantity: 50,
+          ticketTypeRemainingQuantity: 40,
+          inventoryVersion: 3,
+          eventTotalQuantity: 50,
+          eventRemainingQuantity: 40,
+          eventInventoryVersion: 3,
+        },
+      }),
+    };
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: [missingEventId] });
+      }
+      return Promise.resolve({});
+    });
+
+    await expect(pollOnce()).rejects.toThrow('eventId');
+    expect(opensearchMock.update).not.toHaveBeenCalled();
+    expect(deletedReceiptHandles()).toEqual([]);
+  });
+
+  it('eventId 欠損の legacy InventoryChanged も throw し、message を削除しない（fix 3）', async () => {
+    const missingEventId = {
+      MessageId: 'mid-missing-legacy',
+      ReceiptHandle: 'rh-missing-legacy',
+      Body: JSON.stringify({
+        'detail-type': 'InventoryChanged',
+        detail: { remainingQuantity: 7 },
+      }),
+    };
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: [missingEventId] });
+      }
+      return Promise.resolve({});
+    });
+
+    await expect(pollOnce()).rejects.toThrow('eventId');
+    expect(opensearchMock.update).not.toHaveBeenCalled();
+    expect(deletedReceiptHandles()).toEqual([]);
+  });
+
+  it('eventId 欠損の EventListed は従来どおり warn して skip（ack）する', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const missingEventId = {
+      MessageId: 'mid-missing-listed',
+      ReceiptHandle: 'rh-missing-listed',
+      Body: JSON.stringify({
+        'detail-type': 'EventListed',
+        detail: { title: 'no id' },
+      }),
+    };
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: [missingEventId] });
+      }
+      return Promise.resolve({});
+    });
+
     await pollOnce();
 
-    // 同一 doc ID（eventId）への index（全体置換）のため、二重処理でも結果は収束する。
-    expect(opensearchMock.index).toHaveBeenCalledTimes(2);
-    expect(opensearchMock.index).toHaveBeenLastCalledWith(
-      expect.objectContaining({ id: 'e1' }),
-    );
-    expect(deletedReceiptHandles()).toEqual(['rh1-redelivered']);
+    expect(opensearchMock.update).not.toHaveBeenCalled();
+    // metadata 系は在庫の正確性へ影響しないため、意図的な warn-and-skip（ack）を維持する。
+    expect(deletedReceiptHandles()).toEqual(['rh-missing-listed']);
+    warnSpy.mockRestore();
+  });
+
+  it('malformed な versioned payload は throw し、message を削除しない', async () => {
+    // ticketTypeId が UUID でない部分 versioned payload。legacy へフォールバックさせない。
+    const broken = {
+      MessageId: 'mid-broken',
+      ReceiptHandle: 'rh-broken',
+      Body: JSON.stringify({
+        'detail-type': 'InventoryChanged',
+        detail: {
+          eventId: VALID_UUID,
+          remainingQuantity: 5,
+          inventoryEventVersion: 1,
+          ticketTypeId: 'not-a-uuid',
+        },
+      }),
+    };
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: [broken] });
+      }
+      return Promise.resolve({});
+    });
+
+    await expect(pollOnce()).rejects.toThrow();
+    // OpenSearch へは書かず、message も削除しない。
+    expect(opensearchMock.update).not.toHaveBeenCalled();
+    expect(deletedReceiptHandles()).toEqual([]);
   });
 });
 
-// 可観測性（ADR-0014 / Issue #203）の追加仕様:
-// - ReceiveMessage は SentTimestamp を要求し、削除完了時に処理遅延を EMF で出す
-// - detail._traceContext が同梱されていても（無くても）処理は変わらない
+// fix 8: mapping 更新（ensureEventsIndex）は Worker 起動処理から分離し、deploy 時 1 回の
+// migration ステップ（search-index-migrate CLI）が担う。Worker 起動は index の存在確認だけを行う。
+describe('SearchProjectionWorker.start (assertIndexExists)', () => {
+  let worker: SearchProjectionWorker;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    worker = new SearchProjectionWorker(
+      'https://sqs.example/queue',
+      'opensearch.example',
+    );
+  });
+
+  function assertIndexExists(): Promise<void> {
+    return (
+      worker as unknown as { assertIndexExists(): Promise<void> }
+    ).assertIndexExists();
+  }
+
+  it('既存 index では存在確認だけを行い、mapping 更新 API（putMapping / create）を呼ばない', async () => {
+    opensearchMock.indices.exists.mockResolvedValue({ body: true });
+
+    await assertIndexExists();
+
+    expect(opensearchMock.indices.exists).toHaveBeenCalledTimes(1);
+    expect(opensearchMock.indices.create).not.toHaveBeenCalled();
+    expect(opensearchMock.indices.putMapping).not.toHaveBeenCalled();
+  });
+
+  it('index 未存在なら throw し、dynamic mapping での自動作成をさせない', async () => {
+    opensearchMock.indices.exists.mockResolvedValue({ body: false });
+
+    await expect(assertIndexExists()).rejects.toThrow('does not exist');
+    expect(opensearchMock.indices.create).not.toHaveBeenCalled();
+    expect(opensearchMock.indices.putMapping).not.toHaveBeenCalled();
+  });
+
+  it('存在確認自体の失敗は throw し、message consumption を開始しない', async () => {
+    opensearchMock.indices.exists.mockRejectedValue(new Error('exists failed'));
+
+    await expect(assertIndexExists()).rejects.toThrow('exists failed');
+  });
+});
+
+// 可観測性（ADR-0014 / Issue #203）の追加仕様。
 describe('SearchProjectionWorker observability (Issue #203)', () => {
   let sqsSend: jest.SpyInstance;
   let logSpy: jest.SpyInstance;
@@ -170,6 +350,7 @@ describe('SearchProjectionWorker observability (Issue #203)', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    opensearchMock.update.mockResolvedValue({ body: { result: 'updated' } });
     sqsSend = jest.spyOn(SQSClient.prototype, 'send');
     logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
     worker = new SearchProjectionWorker(
@@ -211,7 +392,7 @@ describe('SearchProjectionWorker observability (Issue #203)', () => {
   it('削除完了後に WorkerProcessingLagMs を EMF で出力する', async () => {
     process.env.METRICS_NAMESPACE = 'TicketC2C/test';
     const message = {
-      ...eventListedMessage('e1', 'rh1'),
+      ...eventListedMessage(VALID_UUID, 'rh1'),
       Attributes: { SentTimestamp: String(Date.now() - 5000) },
     };
     sqsSend.mockImplementation((command) => {
@@ -220,7 +401,6 @@ describe('SearchProjectionWorker observability (Issue #203)', () => {
       }
       return Promise.resolve({});
     });
-    opensearchMock.index.mockResolvedValue({});
 
     await pollOnce();
 
@@ -236,8 +416,38 @@ describe('SearchProjectionWorker observability (Issue #203)', () => {
     expect(record._aws.CloudWatchMetrics[0].Namespace).toBe('TicketC2C/test');
   });
 
+  it('ProjectionOutcome metric は有限 dimension（Operation / Outcome）だけを使う', async () => {
+    process.env.METRICS_NAMESPACE = 'TicketC2C/test';
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({
+          Messages: [versionedInventoryMessage(VALID_UUID, 'rh1')],
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    await pollOnce();
+
+    const outcomeLine = logSpy.mock.calls
+      .map(([line]) => line)
+      .find(
+        (line): line is string =>
+          typeof line === 'string' && line.includes('ProjectionOutcome'),
+      );
+    expect(outcomeLine).toBeDefined();
+    const record = JSON.parse(outcomeLine as string);
+    const dimensionSets = record._aws.CloudWatchMetrics[0].Dimensions as string[][];
+    const dims = new Set(dimensionSets.flat());
+    // 高カーディナリティ値は dimension に含めない。
+    expect(dims.has('Operation')).toBe(true);
+    expect(dims.has('Outcome')).toBe(true);
+    expect(dims.has('eventId')).toBe(false);
+    expect(dims.has('ticketTypeId')).toBe(false);
+  });
+
   it('detail に _traceContext が同梱されていても通常どおり処理・削除される', async () => {
-    const body = JSON.parse(eventListedMessage('e1', 'rh1').Body);
+    const body = JSON.parse(versionedInventoryMessage(VALID_UUID, 'rh1').Body);
     body.detail._traceContext = {
       'x-amzn-trace-id':
         'Root=1-5f84c7a1-aaaaaaaaaaaaaaaaaaaaaaaa;Parent=bbbbbbbbbbbbbbbb;Sampled=1',
@@ -246,23 +456,120 @@ describe('SearchProjectionWorker observability (Issue #203)', () => {
       if (command instanceof ReceiveMessageCommand) {
         return Promise.resolve({
           Messages: [
-            {
-              MessageId: 'mid-e1',
-              ReceiptHandle: 'rh1',
-              Body: JSON.stringify(body),
-            },
+            { MessageId: 'mid', ReceiptHandle: 'rh1', Body: JSON.stringify(body) },
           ],
         });
       }
       return Promise.resolve({});
     });
-    opensearchMock.index.mockResolvedValue({});
 
     await pollOnce();
 
-    expect(opensearchMock.index).toHaveBeenCalledTimes(1);
-    // _traceContext はプロジェクションのドキュメントへは書き込まれない。
-    const indexedDoc = opensearchMock.index.mock.calls[0][0].body;
-    expect(indexedDoc).not.toHaveProperty('_traceContext');
+    expect(opensearchMock.update).toHaveBeenCalledTimes(1);
+    // _traceContext は script params へ渡さない（業務 contract と分離）。
+    const params = opensearchMock.update.mock.calls[0][0].body.script.params;
+    expect(params).not.toHaveProperty('_traceContext');
+  });
+});
+
+// review 3 / 4: ProjectionOutcome の Operation / Outcome 分類を固定する。
+describe('SearchProjectionWorker ProjectionOutcome 分類（review 3 / 4）', () => {
+  let sqsSend: jest.SpyInstance;
+  let logSpy: jest.SpyInstance;
+  let worker: SearchProjectionWorker;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.METRICS_NAMESPACE = 'TicketC2C/test';
+    opensearchMock.update.mockResolvedValue({ body: { result: 'updated' } });
+    sqsSend = jest.spyOn(SQSClient.prototype, 'send');
+    logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    worker = new SearchProjectionWorker(
+      'https://sqs.example/queue',
+      'opensearch.example',
+    );
+  });
+
+  afterEach(() => {
+    sqsSend.mockRestore();
+    logSpy.mockRestore();
+    jest.restoreAllMocks();
+    delete process.env.METRICS_NAMESPACE;
+  });
+
+  function pollOnce(): Promise<void> {
+    return (worker as unknown as { pollOnce(): Promise<void> }).pollOnce();
+  }
+
+  function receive(messages: unknown[]): void {
+    sqsSend.mockImplementation((command) => {
+      if (command instanceof ReceiveMessageCommand) {
+        return Promise.resolve({ Messages: messages });
+      }
+      return Promise.resolve({});
+    });
+  }
+
+  function outcomeRecord(): { Operation: string; Outcome: string } {
+    const line = logSpy.mock.calls
+      .map(([l]) => l)
+      .find(
+        (l): l is string =>
+          typeof l === 'string' && l.includes('ProjectionOutcome'),
+      );
+    expect(line).toBeDefined();
+    return JSON.parse(line as string);
+  }
+
+  it('versioned で version guard が no-op（result=noop）なら Outcome=stale', async () => {
+    opensearchMock.update.mockResolvedValue({ body: { result: 'noop' } });
+    receive([versionedInventoryMessage(VALID_UUID, 'rh1')]);
+    await pollOnce();
+    const rec = outcomeRecord();
+    expect(rec.Operation).toBe('InventoryChanged');
+    expect(rec.Outcome).toBe('stale');
+  });
+
+  it('versioned で更新した（result=updated）なら Outcome=applied', async () => {
+    opensearchMock.update.mockResolvedValue({ body: { result: 'updated' } });
+    receive([versionedInventoryMessage(VALID_UUID, 'rh1')]);
+    await pollOnce();
+    expect(outcomeRecord().Outcome).toBe('applied');
+  });
+
+  it('legacy で versioned state 前に反映（result=updated）なら Outcome=applied', async () => {
+    opensearchMock.update.mockResolvedValue({ body: { result: 'updated' } });
+    receive([legacyInventoryMessage(VALID_UUID, 'rh1')]);
+    await pollOnce();
+    const rec = outcomeRecord();
+    expect(rec.Operation).toBe('InventoryChanged');
+    expect(rec.Outcome).toBe('applied');
+  });
+
+  it('legacy で versioned state 後に無視（result=noop）なら Outcome=legacy_ignore', async () => {
+    opensearchMock.update.mockResolvedValue({ body: { result: 'noop' } });
+    receive([legacyInventoryMessage(VALID_UUID, 'rh1')]);
+    await pollOnce();
+    expect(outcomeRecord().Outcome).toBe('legacy_ignore');
+  });
+
+  it('InventoryChanged 処理中の OpenSearch write error は Operation=InventoryChanged/error（review 4）', async () => {
+    opensearchMock.update.mockRejectedValueOnce(new Error('opensearch write failed'));
+    receive([versionedInventoryMessage(VALID_UUID, 'rh1')]);
+    await expect(pollOnce()).rejects.toThrow('opensearch write failed');
+    const rec = outcomeRecord();
+    // error class（contract error ではない）から逆算せず、detail-type で InventoryChanged と分類する。
+    expect(rec.Operation).toBe('InventoryChanged');
+    expect(rec.Outcome).toBe('error');
+  });
+
+  it('EventListed 処理中の write error は Operation=EventMetadata/error（review 4）', async () => {
+    opensearchMock.update.mockRejectedValueOnce(new Error('metadata write failed'));
+    receive([eventListedMessage(VALID_UUID, 'rh1')]);
+    await expect(pollOnce()).rejects.toThrow('metadata write failed');
+    const rec = outcomeRecord();
+    expect(rec.Operation).toBe('EventMetadata');
+    expect(rec.Outcome).toBe('error');
   });
 });

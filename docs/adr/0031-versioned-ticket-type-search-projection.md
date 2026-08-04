@@ -1,0 +1,272 @@
+# 0031. version 付き Ticket Type 在庫 event と検索 projection を実装する
+
+## ステータス
+
+Accepted
+
+## 日付
+
+2026-08-03
+
+## 背景
+
+親 Issue #335 の internal inventory cutover に向けて、#376 が採番する transaction 由来
+version を使う additive inventory event を発行し、Search Projection Worker と OpenSearch を
+Ticket Type 対応にする必要がある（Issue #377）。
+
+この判断領域は次の 1 つの failure domain を所有する。
+
+> Aurora PostgreSQL で commit 済みの Ticket Type 在庫 → additive InventoryChanged event →
+> EventBridge → SQS Standard / DLQ → Search Projection Worker → OpenSearch →
+> reconciliation / rebuild による収束。
+
+PostgreSQL を在庫の正本とし、OpenSearch は再構築可能な projection とする。EventBridge / SQS /
+Worker / OpenSearch の障害で、commit 済み Purchase transaction を rollback してはいけない。
+欠損・遅延・差分を検出し、Aurora から rebuild して回復する。OpenSearch から PostgreSQL への
+逆同期は行わない。
+
+前段（在庫の正本 write と version 採番）は #376、Valkey 前段は #389 が所有する。Gate B での
+呼び出し順序・cross-store checker・evidence・activation・controlled rollback は #378 が所有する。
+本判断は projection 固有の contract / telemetry / reconciliation / rebuild primitive を提供する。
+
+現行実装には次の弱点があった。
+
+- InventoryChanged は Event 集計残数だけを発行し、Ticket Type 単位の state や version を持たない。
+- Worker の `ensureIndex()` は index 存在時に早期 return し、追加 mapping を適用しない。
+- EventListed / EventUpdated が document 全置換で Ticket Type 在庫 field を消し得る。
+- InventoryChanged が version 比較なしで残数を上書きする。
+- EventBridge publish が `FailedEntryCount > 0` を見逃し得る。
+- `createOpenSearchClient()` が常に `https://` を付け、local / CI の HTTP endpoint を扱えない。
+- dashboard に source queue の backlog / oldest age が無い。
+
+## 決定
+
+### additive event contract と dual-version
+
+version 付き InventoryChanged payload を additive に拡張する。既存 field（`eventId`,
+`remainingQuantity`）を保持し、旧 Worker が既存 field を処理して追加 field を無視できる形式にする。
+追加する field は少なくとも次のとおり。
+
+- `inventoryEventVersion`（contract version の明示 discriminant）
+- `ticketTypeId` / `ticketTypeName` / `ticketTypeTotalQuantity` / `ticketTypeRemainingQuantity`
+- `inventoryVersion`（対象 Ticket Type 単位の version）
+- `eventTotalQuantity` / `eventRemainingQuantity`
+- `eventInventoryVersion`（Event 互換集計単位の version）
+
+Ticket Type A と B の `inventoryVersion` には順序関係がない。したがって
+**Ticket Type state（`ticketTypeId` + `inventoryVersion`）** と
+**Event 互換集計（`eventInventoryVersion`）** を独立に比較する。Type version だけで Event 集計を
+guard しない（別 Type event の順序逆転で Event 合計が巻き戻るため）。
+
+Ticket Type 名・総数・残数・両 version は、Purchase 更新と同じ PostgreSQL transaction から取得する
+（publish 後の再 query で組み立てない）。内部 version を公開 Purchase response へ漏らさない。
+
+### 型と runtime validation
+
+producer は compile-time 型（`VersionedInventoryChangedPayload`）を、consumer は runtime
+validation（`parseInventoryChangedDetail`）を持つ。contract version・UUID 形式・finite safe
+integer・数量 0 以上・remaining <= total・version 0 以上・必須 field 存在を検証する。
+一部だけ新 field を持つ壊れた payload を legacy として扱わない。壊れた versioned payload は
+処理を失敗させ、SQS message を削除せず retry / DLQ へ進める。trace context は業務 contract と分離する。
+
+### OpenSearch mapping と atomic version guard
+
+Ticket Type UUID を dynamic field 名にせず、明示 mapping された nested 配列
+（`ticket_types`）で保持する（mapping explosion 回避）。`ensureEventsIndex()` は未存在時に完全
+mapping で作成し、存在時も idempotent な additive `putMapping` を適用する。
+
+mapping の作成・更新は Worker の起動処理から分離し、deploy 時に 1 回だけ実行する独立した
+migration ステップ（`search-index-migrate` CLI）として扱う（PostgreSQL の DDL を起動時適用では
+なく versioned migrations で扱う Issue #92 と同じ分離）。Worker 起動時に mapping 更新 API を
+無条件で呼ぶと、OpenSearch の一時不調だけで Worker 起動全体が失敗する新しい障害モードになる
+ため、Worker の起動処理は index の存在確認だけを行い、存在しなければ throw して message
+consumption を開始しない（dynamic mapping での index 自動作成もさせない）。AWS deploy
+pipeline への CLI 自動組み込みは別 Issue で扱う（runbook 参照）。
+
+version 比較は Node.js 側の read→compare→write ではなく、OpenSearch 側の Painless scripted
+update（単一 atomic update）で行う。script へ ID や値を文字列連結せず、すべて params で渡す。
+Ticket Type state と Event 集計を独立に判定する（incoming > stored は apply、== かつ同値は
+idempotent no-op、== かつ差異は contract corruption として error、< は stale no-op）。
+「== かつ差異」の判定は Ticket Type 側では total / remaining に加えて name の相違も含む
+（同一 version・値相違は contract corruption、の保証に name を含める）。
+document 競合時の retry は有限回にし、解消しなければ throw して SQS message を削除しない。
+Worker と rebuild は同じ version guard script を共有する。
+
+script は Ticket Type 側と Event 集計側のどちらかを実際に更新したかを追跡し、両方とも stale
+または同値 duplicate で何も変更していない場合だけ `ctx.op='noop'` にする。Worker はこの
+OpenSearch update result を基に `ProjectionOutcome` を出す。少なくとも一方を更新すれば
+`applied`、両方 no-op なら `stale`（同値 duplicate も version guard による no-op として stale に
+含める）、versioned state 作成後に version なし legacy を無視した場合は `legacy_ignore`。
+同一 version で値が異なる場合は stale 扱いせず contract corruption として error（script が throw）。
+`ProjectionOutcome` の Operation は catch 時の error class から逆算せず、envelope の detail-type
+から決める（InventoryChanged 処理中の OpenSearch write error / contract corruption /
+conflict retry 枯渇はすべて InventoryChanged/error、EventListed・EventUpdated の write error は
+EventMetadata/error）。
+
+EventListed / EventUpdated の location 更新は set / clear / preserve の三値として扱う。緯度経度が
+両方 finite number なら set、両方明示 null なら `ctx._source.remove('location')` で clear、
+両 field とも payload に存在しなければ preserve（既存 location を触らない）。旧 payload 互換のため
+「field 省略」と「明示 null」を混同しない。片側だけ指定 / 片側だけ null / NaN / Infinity は
+metadata contract error として失敗させ、SQS message を ack しない。
+
+### legacy compatibility
+
+新 Worker は versioned InventoryChanged / version なし旧 InventoryChanged / 旧・新
+EventListed・EventUpdated を処理する。version なし旧 InventoryChanged は versioned state が
+未作成のときだけ legacy top-level 残数を更新し、versioned state 作成後は巻き戻さない。
+EventListed / EventUpdated は metadata だけを merge し、Ticket Type 在庫と version を削除・上書き
+しない（InventoryChanged 先着でも upsert、EventListed 後着で metadata 補完）。在庫 projection の
+更新源は InventoryChanged に固定し、TicketPurchased を第二の更新源にしない。
+
+### publish failure
+
+EventBridge publish で SDK call の throw と、HTTP 成功でも `FailedEntryCount > 0` / entry error の
+両方を検出する。ただし Purchase transaction や成功済み API response を rollback / 失敗させない。
+TicketPurchased publish が失敗しても、続く InventoryChanged publish を試行する。低カーディナリティ
+metric（dimension は DetailType / Outcome / Operation の有限集合のみ）と trace 付き構造化 log を出す。
+eventId / ticketTypeId / trace id / error message を metric dimension に含めない。
+
+### reconciliation / rebuild（Aurora を正本とする）
+
+Aurora は在庫（versioned Ticket Type / Event 集計）だけでなく、event metadata
+（events table の title / event_type / starts_at / location）の正本でもある。したがって
+rebuild は在庫と併せて metadata も Aurora から復元し、reconciliation は metadata の欠損・
+不一致も検出する。
+
+read-only reconciliation は Aurora と OpenSearch を変更せず、missing / unexpected document・
+Ticket Type / Event 集計の total / remaining / version 差分・metadata mismatch・
+contract corruption・unversioned projection・malformed projection を検出する。REPEATABLE READ
+READ ONLY、bounded keyset pagination、machine-readable JSON、category 別件数、exit code で
+差分 0 / 差分あり / 実行エラーを区別する。
+
+`contract_corruption` は「projection の version が正本の version と一致しているのに値
+（total / remaining / name）が異なる」状態で、書き込みパスの version guard script が本来防ぐ
+べき真の破損シグナル。単に projection の version が遅れているための値差分（cross-store
+snapshot が非原子的なための許容される一時的なズレ。version mismatch 系 category で記録）とは
+区別して記録し、runbook の停止条件と対応させる。範囲外の値（負数、quantity の int4 超過など。
+quantity は int4、version は OpenSearch mapping 上 long で上限が異なる）は正常な mismatch では
+なく `malformed_projection` として分類する。
+
+`unversioned_projection` は EventListed だけが反映された購入前の正常な legacy/metadata
+document（versioned inventory field が未作成）を指す。これを malformed と混同しない。versioned
+field が部分的に壊れている・ticket_types 要素が不正・event_id だけで legacy document としても
+成立しないものは `malformed_projection`、versioned document の構造は正常だが特定 Type だけ
+無い場合は `missing_ticket_type`。unversioned は compatibility 期間中に発生し得るため rebuild で
+収束させる。malformed または同一 version で異なる値は rebuild / activation を止めて調査する。
+
+rebuild で収束する範囲は限定的である。`unversioned_projection` / `metadata_mismatch` と
+missing / version 遅延系の差分は、正本からの upsert である rebuild で収束する。一方、次の
+category は rebuild では収束しない。
+
+- `contract_corruption`（同一 version・値相違）は rebuild では収束しない。正本の version は
+  rebuild で変わらず、rebuild は Worker と同じ version guard script を共有するため、guard が
+  同一 version・値相違を throw し、rebuild 自体が毎回 bulk item error で失敗する（fail closed。
+  guard の改ざん防止保証を rebuild 経路でも維持するための意図した挙動）。
+- rebuild は OpenSearch 側にあって正本に無い document / ticket type の削除・隔離経路を
+  持たないため、`unexpected_event_document` / `unexpected_ticket_type` は rebuild では
+  自動収束しない。自動削除は実装しない（reconciliation の unexpected 検出は REPEATABLE READ
+  READ ONLY スナップショット内で動くため、スナップショット確立後に新規作成された event の
+  projection は構造的に必ず unexpected と誤判定され、query 駆動の自動削除は正当な新規 event を
+  消し得る）。
+
+これら「rebuild で収束しない差分」の復旧経路として、operator 専用の手動修復 CLI
+（projection-repair）を提供する。orphan document の個別削除・orphan ticket type 要素の個別
+除去・contract corruption の正本値による上書き修復の 3 mode を持ち、次の安全制約を実装で
+強制する: 完全一致 UUID 指定必須（query 駆動の一括操作を持たない）、dry-run 既定
+（`--apply` なしでは書き込まない）、書き込み前の PostgreSQL（正本）現在値の再確認
+（前提が崩れていれば refuse）、corruption 修復の事前 diff 出力。orphan ticket type 除去の
+正本再確認は、reconciliation の unexpected_ticket_type と同じ per-event 基準
+（`(event_id, ticket_type_id)` の複合による対象 event への帰属判定）で行う。ticket_type_id
+単体のグローバル存在確認では、別 event に正当に存在する Type が対象 event の document へ
+誤混入したケースを検出できても除去できず、差分 0 へ収束しないためである。corruption 修復は version
+guard を経由しない専用 script で行うが、「stored version == 正本 version かつ値相違」の場合に
+限って上書きすることを script 内で atomic に再判定し、より新しい version を決して巻き戻さない
+（guard script 自体と、通常書き込み経路での同一 version 改ざん拒否の保証は変更しない）。
+CLI は reconciliation / rebuild と同じく、DB と OpenSearch 双方へ接続できる既存 API artifact の
+command override から実行する（staging 以降の OpenSearch は VPC 内・IAM principal・SigV4 署名
+必須のため、artifact 外からの無署名アクセスは復旧経路として成立しない）。自動実行しない。
+
+rebuild は Aurora を正本として bounded keyset pagination + bounded bulk size で reindex する。
+restart 可能・idempotent・Worker と同じ atomic version guard を共有する。index 全削除や破壊的
+recreate をしない。bulk API が HTTP 200 でも item error が 1 件でもあれば失敗させる。snapshot
+version N の処理前 / 途中 / 後に event N+1 が届いても N+1 を巻き戻さない。DB と OpenSearch 双方へ
+接続できる既存 API artifact から command override で実行する。新しい scheduler / 常駐 service /
+transactional outbox / EventBridge target DLQ / SQS FIFO は追加しない。
+
+rebuild は各 bulk request では refresh せず、全 bulk が成功した後に対象 index を一度だけ明示
+refresh する（recovery primitive の MTTR と OpenSearch への indexing pressure を下げる）。
+final refresh が失敗した場合は rebuild 成功として返さない。処理対象が 0 件なら refresh しない。
+Worker の単発 write（version guard / legacy / metadata）は従来どおり即時 refresh する。
+
+### mixed Worker rollout 制約
+
+新 payload は旧 Worker が既存 field を処理し追加 field を無視できるが、旧 Worker は EventListed の
+全置換で versioned field を消し得る。したがって mixed Worker 期間は新 projection を active 扱い
+しない。old Worker 0 件確認後に rebuild / reconciliation する。versioned state 作成後、
+pre-version-guard Worker だけへ独立 rollback しない。controlled rollout は #378 が所有する。
+
+認識している制約: rolling deployment 中は旧 Worker（version guard なし、`remaining_quantity` を
+無条件上書き）が top-level `remaining_quantity` を一時的に巻き戻し得る。当初はこれを「次の
+InventoryChanged で自己修復する結果整合の範囲の事象」としてコードで対処しない方針だったが、
+reconciliation / rebuild は versioned field（`event_remaining_quantity` 等）だけを比較・修復する
+ため、top-level だけが drift した状態は検知も修復もされず、次の InventoryChanged が来ない
+event では古い表示が永久に残り得ることが分かった（reconciliation blind spot）。したがって
+コードで対処する: 検索 read（`search.service.ts`）は `event_inventory_version != null`
+（versioned state 作成済み）の event では `event_remaining_quantity` を正として読み、
+versioned state 未作成（legacy 期間）の event に対してのみ top-level `remaining_quantity` へ
+fallback する。判定キーは guard script / reconciliation の不変条件（versioned state の有無を
+`event_inventory_version` で判定する）と整合させる。version guard script による top-level
+field の seed・更新自体は、rolling deploy 中に旧 API タスクが top-level を読み続ける可能性が
+あるため維持する。PostgreSQL が正本である以上、この drift は在庫超過や二重販売には直結しない。
+Gate B の reconciliation / rebuild は全 Worker の入れ替え完了後に実行する（runbook 参照）。
+
+## 根拠
+
+- **per-Type version と Event 集計 version の分離**: SQS Standard は順序を保証しない。別 Type の
+  event が順序逆転すると、Type version だけで Event 集計を guard した場合に Event 合計が巻き戻る。
+  2 つの version を独立に比較することで、順序に依存せず正しく収束する。
+- **atomic scripted update**: Node.js 側 read→compare→write は 2 つの往復の間に別 Worker /
+  rebuild の書き込みが割り込み、lost update / rollback を起こす。OpenSearch 側の単一 atomic update
+  なら compare と write が原子的で、有限 retry と併せて収束が保証される。
+- **Aurora を正本とする reconciliation / rebuild**: OpenSearch は再構築可能な projection であり、
+  欠損・遅延・差分は Aurora から復旧できる。逆同期は正本を汚染するため行わない。
+- **transactional outbox 等を今回採用しない**: 定期実行頻度・alarm・EventBridge target delivery
+  用 DLQ・transactional outbox・SQS FIFO の採否は Production Readiness M-12 / L-30 で決める。
+  本判断では新しい定期実行基盤を設計せず、少なくとも手動 / 既存運用経路から検出・復旧 primitive を
+  再実行可能にする。additive event + version guard + rebuild で結果整合の収束は担保できるため、
+  outbox の複雑さを前倒しで持ち込まない。
+
+## 反対材料・トレードオフ
+
+- nested 配列は 1 Type の更新でも document 全体を再 index するため、Type 数が非常に多い Event では
+  書き込みコストが増える。本 PoC の Ticket Type 数（少数）では許容範囲。Type 数が実運用で大きく
+  増える場合は、Type ごとの child document 化などを再検討する。
+- cross-store snapshot は原子的ではない。reconciliation は queue drain 後に実行し、必要なら再実行
+  する運用でカバーする（runbook 参照）。
+- rebuild を自動化せず手動 / command override に留めるため、恒久運用の自動収束は M-12 / L-30 まで
+  持ち越す。一度の Gate B PASS を将来の整合性保証として扱わない。
+
+## rollback / forward-fix 境界
+
+rollback / recovery 方針は次に統一する。
+
+> Aurora PostgreSQL を正本として、互換 artifact へ戻すか修正版 Worker を展開し、version guard 付き
+> rebuild で OpenSearch を再収束させる。OpenSearch から PostgreSQL へ逆同期しない。
+
+- Gate B 前はこの変更を revert し、直前 artifact へ戻せる。
+- mapping は additive なので rollback 時に field や index を削除しない。
+- mixed Worker 期間は Type projection を active 扱いしない。
+- versioned state 作成後、pre-version-guard Worker だけへ独立 rollback しない。
+- 必要なら Worker を止め、互換 artifact / 修正版展開後に Aurora から rebuild する。
+- 在庫 read/write 全体の activation / rollback は #378 が所有する。
+- この変更では deploy / rebuild / activation を実行しない。
+
+## 再検討のトリガー
+
+- Ticket Type 数が 1 Event あたり大きく増え、nested 配列の再 index コストが問題になる。
+- 実運用規模で rebuild 時間・refresh / indexing pressure・cluster health・Gate B の許容時間が
+  問題になる。その場合は rebuild の refresh 戦略（final 一括 refresh の粒度）や index settings
+  （`refresh_interval`、replica 数、bulk サイズ）を再検討する。
+- M-12 / L-30 で定期実行・alarm・transactional outbox・SQS FIFO の採否を確定する。
+- SQS を FIFO へ切り替える（ADR-0004 の再検討と連動）。
+- OpenSearch の major version 更新で Painless / nested の挙動が変わる。

@@ -74,6 +74,11 @@ variable "sqs_dlq_name" {
   type        = string
 }
 
+variable "sqs_source_queue_name" {
+  description = "search-projection source queue の名前（AWS/SQS メトリクスの QueueName dimension）。projection の配信停滞（backlog / oldest age）を DLQ と区別して確認するために使う（Issue #377）"
+  type        = string
+}
+
 # ---------- CloudFront / WAF（L-16 / Issue #252。未構築の場合は null で edge widget を省略） ----------
 
 variable "cloudfront_distribution_id" {

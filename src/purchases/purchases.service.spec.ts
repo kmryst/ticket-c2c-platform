@@ -47,6 +47,8 @@ interface FakeDbBehavior {
   compatibilityRemaining?: number;
   writerMode?: 'legacy' | 'ticket_type';
   ticketTypeIds?: string[];
+  // ticketTypeStateMissing: #377 の Ticket Type 単位 state JOIN が 0 行を返す（schema 不整合）。
+  ticketTypeStateMissing?: boolean;
 }
 
 // createFakeDbClient は購入 transaction の SQL 発行順を substring で見分ける fake PoolClient です。
@@ -132,18 +134,43 @@ function createFakeDbClient(behavior: FakeDbBehavior) {
       };
     }
     if (
-      text.includes('SELECT remaining_quantity') &&
+      text.includes('SELECT total_quantity, remaining_quantity, version') &&
       text.includes('FROM ticket_inventory')
     ) {
+      // #377: Event 互換集計（total / remaining / version）を同じ transaction から読む。
+      // review 6: Type version（7）と別の異なる値（41）を使い、swap bug を検出できるようにする。
       return {
         rowCount: 1,
         rows: [
           {
+            total_quantity: 100,
             remaining_quantity:
               behavior.compatibilityRemaining ??
               behavior.remainingAfterUpdate ??
               behavior.remainingOnReject ??
               0,
+            version: 41,
+          },
+        ],
+      };
+    }
+    if (
+      text.includes('FROM ticket_type_inventory tti') &&
+      text.includes('JOIN ticket_types tt')
+    ) {
+      // #377: versioned InventoryChanged 用の Ticket Type 単位 state。
+      // review 6: Event version（41）と別の異なる値（7）を使う。
+      if (behavior.ticketTypeStateMissing) {
+        return { rowCount: 0, rows: [] };
+      }
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            name: 'General Admission',
+            total_quantity: 100,
+            remaining_quantity: behavior.remainingAfterUpdate ?? 0,
+            version: 7,
           },
         ],
       };
@@ -514,17 +541,68 @@ describe('PurchasesService の compatibility writer（Issue #376）', () => {
     expect(update).toContain('ticket_type_id = $2');
     expect(update).toContain('remaining_quantity >= $3');
     expect(update).toContain('RETURNING remaining_quantity, version');
+    // public result は Event 集計残数を維持し、内部 version を漏らさない（#377）。
     expect(result.remainingQuantity).toBe(9);
     expect(result).not.toHaveProperty('ticketTypeId');
     expect(result).not.toHaveProperty('inventoryVersion');
+    expect(result).not.toHaveProperty('eventInventoryVersion');
     expect(domainEvents.publish).toHaveBeenCalledWith(
       'TicketPurchased',
       expect.objectContaining({ remainingQuantity: 9 }),
     );
+    // #377: versioned InventoryChanged。legacy 互換 field（eventId / remainingQuantity）を
+    // 保ちつつ、transaction 由来の Ticket Type state（remaining=6）と Event 集計（remaining=9）を
+    // 独立 version 付きで発行する。
+    // review 6: Type version（7）と Event 集計 version（41）は独立で、入れ替わらない。
     expect(domainEvents.publish).toHaveBeenCalledWith('InventoryChanged', {
       eventId: EVENT_ID,
       remainingQuantity: 9,
+      inventoryEventVersion: 1,
+      ticketTypeId: TICKET_TYPE_ID,
+      ticketTypeName: 'General Admission',
+      ticketTypeTotalQuantity: 100,
+      ticketTypeRemainingQuantity: 6,
+      inventoryVersion: 7,
+      eventTotalQuantity: 100,
+      eventRemainingQuantity: 9,
+      eventInventoryVersion: 41,
     });
+  });
+
+  it('TicketPurchased publish が失敗しても InventoryChanged publish を試行する（#377）', async () => {
+    const { service, domainEvents } = createService({
+      reserveOutcome: 'unknown',
+      db: {
+        writerMode: 'ticket_type',
+        inventoryUpdated: true,
+        remainingAfterUpdate: 6,
+        compatibilityRemaining: 9,
+      },
+    });
+    (domainEvents.publish as jest.Mock).mockImplementation(
+      async (detailType: string) => {
+        if (detailType === 'TicketPurchased') {
+          throw new Error('TicketPurchased publish failed');
+        }
+      },
+    );
+
+    await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 2 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+
+    // TicketPurchased の失敗にかかわらず InventoryChanged を試行する。
+    expect(domainEvents.publish).toHaveBeenCalledWith(
+      'InventoryChanged',
+      expect.objectContaining({
+        eventId: EVENT_ID,
+        inventoryEventVersion: 1,
+        ticketTypeId: TICKET_TYPE_ID,
+      }),
+    );
   });
 
   it('ticketTypeId省略の既存keyは現在Typeが複数でも保存済み結果をreplayする', async () => {
@@ -1029,5 +1107,133 @@ describe('PurchasesService の writer mode drift 補償（Issue #389 指摘1）'
       2,
     );
     expect(inventoryCache.syncTicketTypeCounter).not.toHaveBeenCalled();
+  });
+});
+
+// review 1: COMMIT 後に throw しない（「throw したら DB 未 commit」という呼び出し元の前提を守る）。
+describe('PurchasesService の COMMIT 前完了保証（review 1）', () => {
+  const joinQuery = (q: string): boolean =>
+    q.includes('FROM ticket_type_inventory tti') &&
+    q.includes('JOIN ticket_types tt');
+
+  it('legacy confirmed で Ticket Type state が欠落したら COMMIT せず ROLLBACK する', async () => {
+    const { service, dbClient, domainEvents, inventoryCache } = createService({
+      reserveOutcome: 'reserved',
+      db: {
+        inventoryUpdated: true,
+        remainingAfterUpdate: 8,
+        compatibilityRemaining: 8,
+        ticketTypeStateMissing: true,
+      },
+    });
+
+    await expect(
+      service.createPurchase(EVENT_ID, BUYER_ID, { quantity: 2 }),
+    ).rejects.toMatchObject({ status: 500 });
+
+    // COMMIT せず ROLLBACK。purchase は永続化されない。
+    expect(dbClient.queries.some((q) => q.includes('COMMIT'))).toBe(false);
+    expect(dbClient.queries.some((q) => q.includes('ROLLBACK'))).toBe(true);
+    // domain event は発行しない。
+    expect(domainEvents.publish).not.toHaveBeenCalled();
+    // Valkey 予約は同じ scope・quantity について一度だけ補償される。
+    expect(inventoryCache.release).toHaveBeenCalledTimes(1);
+    expect(inventoryCache.release).toHaveBeenCalledWith(EVENT_ID, 2);
+  });
+
+  it('confirmed 正常系では JOIN と検証が COMMIT 前に終わり、COMMIT 後に query を発行しない', async () => {
+    const { service, dbClient, domainEvents } = createService({
+      reserveOutcome: 'reserved',
+      db: {
+        inventoryUpdated: true,
+        remainingAfterUpdate: 6,
+        compatibilityRemaining: 9,
+      },
+    });
+
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 2,
+    });
+    expect(result.status).toBe('confirmed');
+
+    const joinIdx = dbClient.queries.findIndex(joinQuery);
+    const commitIdx = dbClient.queries.findIndex((q) => q.includes('COMMIT'));
+    const insertIdx = dbClient.queries.findIndex((q) =>
+      q.includes('INSERT INTO purchases'),
+    );
+    // Ticket Type state JOIN と INSERT は COMMIT より前（post-COMMIT throw の再導入を検出）。
+    expect(joinIdx).toBeGreaterThan(-1);
+    expect(commitIdx).toBeGreaterThan(-1);
+    expect(joinIdx).toBeLessThan(commitIdx);
+    expect(insertIdx).toBeLessThan(commitIdx);
+    // COMMIT は最後の DB query（COMMIT 後に query / validation を置かない）。
+    expect(commitIdx).toBe(dbClient.queries.length - 1);
+    // publish は正常に進む。
+    expect(domainEvents.publish).toHaveBeenCalledWith(
+      'InventoryChanged',
+      expect.objectContaining({ inventoryVersion: 7, eventInventoryVersion: 41 }),
+    );
+  });
+});
+
+// review 7: rejected purchase では Ticket Type state JOIN を発行しない（不要な round trip / lock 除去）。
+describe('PurchasesService の rejected path JOIN 抑止（review 7）', () => {
+  const joinQuery = (q: string): boolean =>
+    q.includes('FROM ticket_type_inventory tti') &&
+    q.includes('JOIN ticket_types tt');
+
+  it('legacy rejected では JOIN を一度も発行しない', async () => {
+    const { service, dbClient } = createService({
+      reserveOutcome: 'reserved',
+      db: { inventoryUpdated: false, remainingOnReject: 0, compatibilityRemaining: 0 },
+    });
+
+    const result = await service.createPurchase(EVENT_ID, BUYER_ID, {
+      quantity: 3,
+    });
+    expect(result.status).toBe('rejected');
+    expect(dbClient.queries.some(joinQuery)).toBe(false);
+  });
+
+  it('ticket_type rejected では JOIN を一度も発行しない', async () => {
+    const { service, dbClient } = createService({
+      reserveOutcome: 'reserved',
+      db: {
+        writerMode: 'ticket_type',
+        inventoryUpdated: false,
+        remainingOnReject: 0,
+        compatibilityRemaining: 0,
+      },
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 3 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+    expect(result.status).toBe('rejected');
+    expect(dbClient.queries.some(joinQuery)).toBe(false);
+  });
+
+  it('confirmed では JOIN を COMMIT 前に一度だけ発行する', async () => {
+    const { service, dbClient } = createService({
+      reserveOutcome: 'reserved',
+      db: {
+        writerMode: 'ticket_type',
+        inventoryUpdated: true,
+        remainingAfterUpdate: 6,
+        compatibilityRemaining: 9,
+      },
+    });
+
+    const result = await service.createPurchase(
+      EVENT_ID,
+      BUYER_ID,
+      { quantity: 2 },
+      { ticketTypeId: TICKET_TYPE_ID },
+    );
+    expect(result.status).toBe('confirmed');
+    expect(dbClient.queries.filter(joinQuery)).toHaveLength(1);
   });
 });

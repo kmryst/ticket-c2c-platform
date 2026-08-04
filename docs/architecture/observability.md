@@ -117,6 +117,8 @@ API / Worker の主要な構造化ログと EMF record には、出力時点で�
 | CompensationFailure | Count | API | Service, Operation | PostgreSQL 失敗時などの補償（Ticket Type counter release）が失敗した回数（Issue #389） |
 | ValkeyFailOpen | Count | API | Service, Operation | 前段フィルタ障害で fail-open した回数。増加は Aurora 素通りの兆候。Operation に Ticket Type 単位操作（reserveTicketType 等）を含む（Issue #389 で追加） |
 | WorkerProcessingLagMs | Milliseconds | Worker | Service | SQS 送信から処理完了（削除）までの経過時間 |
+| ProjectionOutcome | Count | Worker | Service, Operation, Outcome | 検索 projection の処理結果分類（Operation=InventoryChanged/EventMetadata、Outcome=applied/stale/legacy_ignore/error）。Operation は error class から逆算せず envelope の detail-type から決める（InventoryChanged 処理中の OpenSearch write error / Painless contract corruption / conflict retry 枯渇はすべて InventoryChanged/error）。Outcome の意味は次のとおり: applied=Ticket Type か Event 集計の少なくとも一方を更新した / stale=両方とも lower stale または equal かつ同値 duplicate で version guard による no-op（OpenSearch update result=noop）/ legacy_ignore=versioned state 作成後に version なし legacy InventoryChanged を無視した / error=処理失敗（message は ack しない）。同一 version で値が異なる contract corruption は stale ではなく error（Painless が throw する）（Issue #377 / ADR-0031） |
+| DomainEventPublish | Count | API | Service, DetailType, Outcome | EventBridge publish の結果分類（DetailType=InventoryChanged 等、Outcome=success/partial_failure/sdk_error）。partial_failure は HTTP 成功でも FailedEntryCount>0/entry error を検出したことを示す（Issue #377 / ADR-0031） |
 | PurchaseRequestOutcome | Count | API | Service, Outcome | 購入 API の技術的な成否分類（success / technical_failure / rate_limited / invalid_request）。SLI: 成功率の算出元（ADR-0016 / Issue #225） |
 | PurchaseRequestLatencyMs | Milliseconds | API | Service, Outcome | 購入 API の応答時間（Guard 通過後〜応答まで）。SLI: レイテンシ（ADR-0016 / Issue #225） |
 
@@ -299,6 +301,7 @@ staging は `public_endpoint_mode=alb-http-only` の場合 CloudFront / `app_fqd
 | SQS DLQ: ApproximateNumberOfMessagesVisible | DLQ 滞留状況 | `<name>-search-projection-dlq-messages-visible` |
 | 購入 API: 成功率 / technical_failure | `PurchaseRequestOutcome` から算出した成功率（%）と technical_failure 件数。成功率 SLO（99.5%）を水平 annotation で表示 | `<name>-purchase-error-burn-rate-{fast,slow}` / `<name>-purchase-technical-failure-{weak,normal}` |
 | 購入 API: レイテンシ p95 | `PurchaseRequestLatencyMs`（Outcome=success）の p95。レイテンシ SLO（800ms）を水平 annotation で表示 | `<name>-purchase-latency-burn-rate-{fast,slow}` |
+| Search Projection source queue: backlog / oldest age | source queue の `ApproximateNumberOfMessagesVisible` と `ApproximateAgeOfOldestMessage`。配信停滞（backlog / oldest age）を DLQ と区別して確認する（Issue #377 / ADR-0031） | 現状アラームなし（M-12 / L-30 で判断） |
 
 ### 確認方法
 
