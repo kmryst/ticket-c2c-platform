@@ -17,8 +17,14 @@
 // 制約: rebuild は正本からの upsert のみで、OpenSearch 側にあって正本に無い document /
 // ticket type（reconciliation の unexpected_event_document / unexpected_ticket_type）の
 // 削除・隔離は行わない（正当な新規 event を誤って消すリスクがあるため自動削除しない）。
-// unexpected 系は rebuild では収束せず、runbook
-// （docs/runbooks/search-projection-reconciliation-rebuild.md）の手動手順で対応する。
+// unexpected 系は rebuild では収束せず、projection-repair CLI（dry-run 既定・完全一致 ID 指定）と
+// runbook（docs/runbooks/search-projection-reconciliation-rebuild.md）の手動手順で対応する。
+//
+// 制約: contract_corruption（projection の version が正本と一致しているのに値が異なる状態）も
+// rebuild では収束しない。正本の version は rebuild で変わらないため、共有する version guard
+// script が同一 version・値相違を throw し、rebuild は毎回 bulk item error で失敗する
+// （fail closed。これは仕様であり、guard の改ざん防止保証を rebuild でも維持するため）。
+// 原因調査のうえ projection-repair CLI（repair-corruption mode）で修復してから rebuild する。
 
 import type { Client } from '@opensearch-project/opensearch';
 import { buildVersionedInventoryChangedDetail } from '../messaging/inventory-event.contract';

@@ -154,15 +154,33 @@ field が部分的に壊れている・ticket_types 要素が不正・event_id �
 無い場合は `missing_ticket_type`。unversioned は compatibility 期間中に発生し得るため rebuild で
 収束させる。malformed または同一 version で異なる値は rebuild / activation を止めて調査する。
 
-rebuild で収束する範囲は限定的である。`unversioned_projection` / `metadata_mismatch` /
-`contract_corruption`（原因修正済みなら）/ `malformed_projection` は正本からの upsert である
-rebuild で収束する。一方、rebuild は OpenSearch 側にあって正本に無い document / ticket type の
-削除・隔離経路を持たないため、`unexpected_event_document` / `unexpected_ticket_type` は rebuild
-では自動収束しない。自動削除は実装しない（reconciliation の unexpected 検出は REPEATABLE READ
-READ ONLY スナップショット内で動くため、スナップショット確立後に新規作成された event の
-projection は構造的に必ず unexpected と誤判定され、query 駆動の自動削除は正当な新規 event を
-消し得る）。unexpected 系は runbook の手動手順（時間を空けた再実行・正本の人手確認・event_id
-明示指定の個別削除）で収束させる。
+rebuild で収束する範囲は限定的である。`unversioned_projection` / `metadata_mismatch` と
+missing / version 遅延系の差分は、正本からの upsert である rebuild で収束する。一方、次の
+category は rebuild では収束しない。
+
+- `contract_corruption`（同一 version・値相違）は rebuild では収束しない。正本の version は
+  rebuild で変わらず、rebuild は Worker と同じ version guard script を共有するため、guard が
+  同一 version・値相違を throw し、rebuild 自体が毎回 bulk item error で失敗する（fail closed。
+  guard の改ざん防止保証を rebuild 経路でも維持するための意図した挙動）。
+- rebuild は OpenSearch 側にあって正本に無い document / ticket type の削除・隔離経路を
+  持たないため、`unexpected_event_document` / `unexpected_ticket_type` は rebuild では
+  自動収束しない。自動削除は実装しない（reconciliation の unexpected 検出は REPEATABLE READ
+  READ ONLY スナップショット内で動くため、スナップショット確立後に新規作成された event の
+  projection は構造的に必ず unexpected と誤判定され、query 駆動の自動削除は正当な新規 event を
+  消し得る）。
+
+これら「rebuild で収束しない差分」の復旧経路として、operator 専用の手動修復 CLI
+（projection-repair）を提供する。orphan document の個別削除・orphan ticket type 要素の個別
+除去・contract corruption の正本値による上書き修復の 3 mode を持ち、次の安全制約を実装で
+強制する: 完全一致 UUID 指定必須（query 駆動の一括操作を持たない）、dry-run 既定
+（`--apply` なしでは書き込まない）、書き込み前の PostgreSQL（正本）現在値の再確認
+（前提が崩れていれば refuse）、corruption 修復の事前 diff 出力。corruption 修復は version
+guard を経由しない専用 script で行うが、「stored version == 正本 version かつ値相違」の場合に
+限って上書きすることを script 内で atomic に再判定し、より新しい version を決して巻き戻さない
+（guard script 自体と、通常書き込み経路での同一 version 改ざん拒否の保証は変更しない）。
+CLI は reconciliation / rebuild と同じく、DB と OpenSearch 双方へ接続できる既存 API artifact の
+command override から実行する（staging 以降の OpenSearch は VPC 内・IAM principal・SigV4 署名
+必須のため、artifact 外からの無署名アクセスは復旧経路として成立しない）。自動実行しない。
 
 rebuild は Aurora を正本として bounded keyset pagination + bounded bulk size で reindex する。
 restart 可能・idempotent・Worker と同じ atomic version guard を共有する。index 全削除や破壊的

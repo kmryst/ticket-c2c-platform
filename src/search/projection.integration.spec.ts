@@ -29,7 +29,15 @@ import {
   toTicketTypeInventoryVersion,
 } from '../messaging/inventory-version';
 import { reconcileInventoryProjection } from './inventory-reconciliation.service';
-import { rebuildInventoryProjection } from './inventory-rebuild.service';
+import {
+  rebuildInventoryProjection,
+  RebuildBulkItemError,
+} from './inventory-rebuild.service';
+import {
+  deleteOrphanDocument,
+  deleteOrphanTicketType,
+  repairContractCorruption,
+} from './projection-repair.service';
 import { searchEvents } from './search.service';
 import { Baseline1751594400000 } from '../database/migrations/1751594400000-baseline';
 import { AddUsers1783251707172 } from '../database/migrations/1783251707172-add-users';
@@ -593,6 +601,241 @@ describeIntegration(
         } finally {
           client.release();
         }
+      });
+    });
+
+    // projection-repair（手動修復）: rebuild では収束しない unexpected / contract_corruption を
+    // 「検出するだけ」ではなく「修復操作後に reconciliation 差分 0」まで実証する。
+    describe('projection-repair による orphan / contract corruption の収束', () => {
+      it('orphan document は dry-run では消えず、apply 後に reconciliation 差分 0 へ収束する', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent, getDoc }) => {
+          const { eventId: legitEventId } = await seedEvent([5]);
+          const orphan = randomUUID();
+          await opensearch.index({
+            index,
+            id: orphan,
+            body: {
+              event_id: orphan,
+              event_total_quantity: 1,
+              event_remaining_quantity: 1,
+              event_inventory_version: 1,
+              ticket_types: [],
+            },
+            refresh: true,
+          });
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+            const before = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(before.counts.unexpected_event_document).toBe(1);
+
+            // dry-run（既定）: 正本不在の確認だけで document は消えない。
+            const dryRun = await deleteOrphanDocument(client, opensearch, {
+              index,
+              eventId: orphan,
+            });
+            expect(dryRun.applied).toBe(false);
+            expect(dryRun.refusals).toEqual([]);
+            expect(await getDoc(orphan)).not.toBeNull();
+
+            // 正本に存在する event は refuse され、apply でも消えない（誤削除防止）。
+            const refused = await deleteOrphanDocument(client, opensearch, {
+              index,
+              eventId: legitEventId,
+              apply: true,
+            });
+            expect(refused.applied).toBe(false);
+            expect(refused.refusals).toContain('event_exists_in_authoritative');
+            expect(await getDoc(legitEventId)).not.toBeNull();
+
+            // apply: orphan だけが消え、reconciliation 差分 0 へ収束する。
+            const applied = await deleteOrphanDocument(client, opensearch, {
+              index,
+              eventId: orphan,
+              apply: true,
+            });
+            expect(applied.applied).toBe(true);
+            expect(await getDoc(orphan)).toBeNull();
+            const after = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(after.totalDiffs).toBe(0);
+            expect(after.hasDiff).toBe(false);
+          } finally {
+            client.release();
+          }
+        });
+      });
+
+      it('orphan ticket type は該当要素だけが除去され、reconciliation 差分 0 へ収束する', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent, getDoc }) => {
+          const { eventId, typeIds } = await seedEvent([5, 3]);
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+            expect(
+              (await reconcileInventoryProjection(client, opensearch, { index })).totalDiffs,
+            ).toBe(0);
+
+            // 正本に無い Type 要素を well-formed な形で注入する（document 自体は正当のまま）。
+            const orphanTypeId = randomUUID();
+            await opensearch.update({
+              index,
+              id: eventId,
+              body: {
+                script: {
+                  lang: 'painless',
+                  source:
+                    'def nt = new HashMap();' +
+                    'nt.ticket_type_id = params.tid; nt.name = params.name;' +
+                    'nt.total_quantity = 9; nt.remaining_quantity = 9; nt.inventory_version = 1;' +
+                    'ctx._source.ticket_types.add(nt);',
+                  params: { tid: orphanTypeId, name: 'Orphan Type' },
+                },
+              },
+              refresh: true,
+            } as never);
+            const before = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(before.counts.unexpected_ticket_type).toBe(1);
+
+            // 正本に存在する Type は refuse される（誤除去防止）。
+            const refused = await deleteOrphanTicketType(client, opensearch, {
+              index,
+              eventId,
+              ticketTypeId: typeIds[0],
+              apply: true,
+            });
+            expect(refused.applied).toBe(false);
+            expect(refused.refusals).toContain('ticket_type_exists_in_authoritative');
+
+            // dry-run は除去しない。
+            const dryRun = await deleteOrphanTicketType(client, opensearch, {
+              index,
+              eventId,
+              ticketTypeId: orphanTypeId,
+            });
+            expect(dryRun.applied).toBe(false);
+            expect(dryRun.refusals).toEqual([]);
+            expect(findType(await getDoc(eventId), orphanTypeId)).toBeDefined();
+
+            // apply: orphan Type 要素だけが除去され、正当な Type と在庫は不変。
+            const applied = await deleteOrphanTicketType(client, opensearch, {
+              index,
+              eventId,
+              ticketTypeId: orphanTypeId,
+              apply: true,
+            });
+            expect(applied.applied).toBe(true);
+            const doc = await getDoc(eventId);
+            expect(findType(doc, orphanTypeId)).toBeUndefined();
+            expect(findType(doc, typeIds[0])).toBeDefined();
+            expect(findType(doc, typeIds[1])).toBeDefined();
+            const after = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(after.totalDiffs).toBe(0);
+          } finally {
+            client.release();
+          }
+        });
+      });
+
+      it('contract corruption は rebuild では収束せず（毎回失敗）、repair 後に差分 0 へ収束する', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent, getDoc }) => {
+          const { eventId, typeIds } = await seedEvent([5]);
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+            expect(
+              (await reconcileInventoryProjection(client, opensearch, { index })).totalDiffs,
+            ).toBe(0);
+
+            // version を進めずに値だけを書き換える（version guard script が防ぐべき破損状態）。
+            await opensearch.update({
+              index,
+              id: eventId,
+              body: {
+                script: {
+                  lang: 'painless',
+                  source:
+                    'for (t in ctx._source.ticket_types) { t.remaining_quantity = t.remaining_quantity - 1; } ' +
+                    'ctx._source.event_remaining_quantity = ctx._source.event_remaining_quantity - 1;',
+                },
+              },
+              refresh: true,
+            } as never);
+            const corrupted = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(corrupted.counts.contract_corruption).toBeGreaterThanOrEqual(1);
+
+            // rebuild は同一 version・値相違に対して version guard が throw するため収束しない
+            // （runbook の停止条件どおり、失敗として表面化する）。
+            await expect(
+              rebuildInventoryProjection(client, opensearch, { index }),
+            ).rejects.toThrow(RebuildBulkItemError);
+
+            // dry-run: Type 側 remaining + Event 集計 remaining の事前 diff が出て、書き込まれない。
+            const dryRun = await repairContractCorruption(client, opensearch, {
+              index,
+              eventId,
+            });
+            expect(dryRun.applied).toBe(false);
+            expect(dryRun.refusals).toEqual([]);
+            expect(dryRun.diff.length).toBeGreaterThanOrEqual(2);
+            expect(
+              dryRun.diff.some(
+                (d) => d.scope === 'ticket_type' && d.field === 'remaining_quantity',
+              ),
+            ).toBe(true);
+            expect(
+              dryRun.diff.some(
+                (d) => d.scope === 'event_aggregate' && d.field === 'remaining_quantity',
+              ),
+            ).toBe(true);
+            expect(findType(await getDoc(eventId), typeIds[0])?.remaining_quantity).toBe(4);
+
+            // apply: 正本値へ上書き修復され、reconciliation 差分 0 へ収束する。
+            const applied = await repairContractCorruption(client, opensearch, {
+              index,
+              eventId,
+              apply: true,
+            });
+            expect(applied.applied).toBe(true);
+            const doc = await getDoc(eventId);
+            expect(findType(doc, typeIds[0])?.remaining_quantity).toBe(5);
+            expect(doc?.event_remaining_quantity).toBe(5);
+            const after = await reconcileInventoryProjection(client, opensearch, { index });
+            expect(after.totalDiffs).toBe(0);
+            expect(after.hasDiff).toBe(false);
+
+            // 修復後は rebuild も成功に戻る（guard script は変更していない）。
+            await rebuildInventoryProjection(client, opensearch, { index });
+          } finally {
+            client.release();
+          }
+        });
+      });
+
+      it('version 遅延だけの差分は corruption ではなく refuse される（rebuild の領分）', async () => {
+        await withHarness(async ({ index, pgClient, seedEvent, getDoc }) => {
+          const { eventId, typeIds } = await seedEvent([5]);
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+            // OS 側を正本より新しい version へ進める（corruption ではない通常の version 差分）。
+            await applyVersionedInventoryChanged(opensearch, index,
+              versioned(eventId, typeIds[0], { typeTotal: 5, typeRemaining: 1, typeVersion: 99, eventTotal: 5, eventRemaining: 1, eventVersion: 99 }));
+
+            const refused = await repairContractCorruption(client, opensearch, {
+              index,
+              eventId,
+              apply: true,
+            });
+            expect(refused.applied).toBe(false);
+            expect(refused.refusals).toContain('no_contract_corruption_detected');
+            // 新しい version の値は巻き戻っていない。
+            const doc = await getDoc(eventId);
+            expect(findType(doc, typeIds[0])?.inventory_version).toBe(99);
+            expect(findType(doc, typeIds[0])?.remaining_quantity).toBe(1);
+          } finally {
+            client.release();
+          }
+        });
       });
     });
 

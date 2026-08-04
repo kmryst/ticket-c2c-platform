@@ -176,6 +176,73 @@ export async function* iterateAuthoritativeInventory(
   }
 }
 
+// readAuthoritativeEventInventory は単一 event の正本 snapshot を読みます（無ければ null）。
+// projection-repair（手動修復）が「書き込み前に正本の現在値を再確認する」ために使います。
+// iterateAuthoritativeInventory と同じ読み取り規則（同じ JOIN / 同じ boundary 変換）を共有します。
+export async function readAuthoritativeEventInventory(
+  client: SqlClient,
+  eventId: string,
+): Promise<AuthoritativeEventInventory | null> {
+  const aggregates = await client.query<EventAggregateRow>(
+    `
+      SELECT ti.event_id,
+             ti.total_quantity,
+             ti.remaining_quantity,
+             ti.version,
+             e.title,
+             e.event_type,
+             e.starts_at,
+             e.location_latitude,
+             e.location_longitude
+      FROM ticket_inventory ti
+      JOIN events e ON e.id = ti.event_id
+      WHERE ti.event_id = $1::uuid
+    `,
+    [eventId],
+  );
+  if (aggregates.rows.length === 0) {
+    return null;
+  }
+  const aggregate = aggregates.rows[0];
+
+  const types = await client.query<TicketTypeRow>(
+    `
+      SELECT tti.event_id,
+             tti.ticket_type_id,
+             tt.name,
+             tti.total_quantity,
+             tti.remaining_quantity,
+             tti.version
+      FROM ticket_type_inventory tti
+      JOIN ticket_types tt ON tt.id = tti.ticket_type_id
+      WHERE tti.event_id = $1::uuid
+      ORDER BY tti.ticket_type_id ASC
+    `,
+    [eventId],
+  );
+
+  return {
+    eventId: aggregate.event_id,
+    eventTotalQuantity: aggregate.total_quantity,
+    eventRemainingQuantity: aggregate.remaining_quantity,
+    eventInventoryVersion: toEventInventoryVersion(aggregate.version),
+    metadata: {
+      title: aggregate.title,
+      eventType: aggregate.event_type,
+      startsAt: toIsoString(aggregate.starts_at),
+      latitude: toCoordinateOrNull(aggregate.location_latitude),
+      longitude: toCoordinateOrNull(aggregate.location_longitude),
+    },
+    ticketTypes: types.rows.map((row) => ({
+      ticketTypeId: row.ticket_type_id,
+      name: row.name,
+      totalQuantity: row.total_quantity,
+      remainingQuantity: row.remaining_quantity,
+      inventoryVersion: toTicketTypeInventoryVersion(row.version),
+    })),
+  };
+}
+
 // toIsoString は pg driver が返す timestamptz（Date または文字列）を ISO 8601 文字列へ
 // normalize します。正本の値であり、ここで不正なら fail closed に throw します。
 function toIsoString(value: Date | string): string {
