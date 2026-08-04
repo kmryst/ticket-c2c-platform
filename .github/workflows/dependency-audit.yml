@@ -36,8 +36,6 @@ jobs:
     with:
       package-manager: npm
       working-directory: .
-      npm-audit-exceptions: >-
-        [{"id":"GHSA-mh99-v99m-4gvg","expires":"2026-10-26","tracking":"https://github.com/kmryst/ticket-c2c-platform/issues/350"}]
     permissions:
       contents: read
 
@@ -46,7 +44,5 @@ jobs:
     with:
       package-manager: npm
       working-directory: frontend
-      npm-audit-exceptions: >-
-        [{"id":"GHSA-mh99-v99m-4gvg","expires":"2026-10-26","tracking":"https://github.com/kmryst/ticket-c2c-platform/issues/350"}]
     permissions:
       contents: read
