@@ -119,6 +119,17 @@ jobs:
           TEST_DATABASE_URL: postgresql://ticket_poc:ticket_poc_password@127.0.0.1:5432/ticket_poc
           TEST_OPENSEARCH_URL: http://127.0.0.1:9200
 
+      # Issue #378 の Gate B cutover checker 統合テスト。#377 / #389 で整備済みの
+      # PostgreSQL / Valkey / OpenSearch service container を再利用し、TEST_* は
+      # この focused step にだけ渡す（npm test 全体へ渡すと無関係な suite が
+      # 未準備の共有 store 上で有効化されうるため）。
+      - name: Gate B cutover checker integration (実 PostgreSQL + 実 Valkey + 実 OpenSearch)
+        run: npm run test:integration:cutover
+        env:
+          TEST_DATABASE_URL: postgresql://ticket_poc:ticket_poc_password@127.0.0.1:5432/ticket_poc
+          TEST_VALKEY_URL: redis://127.0.0.1:6379
+          TEST_OPENSEARCH_URL: http://127.0.0.1:9200
+
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest

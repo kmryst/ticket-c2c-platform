@@ -14,6 +14,15 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import Redis from 'ioredis';
 import { getOptionalEnv } from '../config';
+// キー生成規則は inventory-cache.keys.ts が正本です（Issue #378 で抽出）。
+// Gate B cutover checker と同じ規則を共有し、キー文字列の重複定義を防ぎます。
+import {
+  eventCounterKey,
+  eventCounterVersionKey,
+  purchaseRequestSeenKey,
+  ticketTypeCounterKey,
+  ticketTypeCounterRevisionKey,
+} from './inventory-cache.keys';
 // emitMetric は Valkey fail-open（障害時に判定を DB へ流した事象）の発生量を記録します（ADR-0014）。
 import { emitMetric } from '../observability/emf';
 
@@ -505,23 +514,23 @@ export class InventoryCacheService implements OnModuleDestroy {
   }
 
   private key(eventId: string): string {
-    return `inventory:${eventId}`;
+    return eventCounterKey(eventId);
   }
 
   // ticketTypeKey / ticketTypeRevisionKey は Ticket Type 単位 namespace のキーです。
   // hash tag `{<eventId>:<ticketTypeId>}` を共有し、counter と revision を
   // Redis Cluster でも同じ hash slot に置きます（同一 Lua script で両方に触れるため）。
   private ticketTypeKey(eventId: string, ticketTypeId: string): string {
-    return `inventory:ticket-type:{${eventId}:${ticketTypeId}}:remaining`;
+    return ticketTypeCounterKey(eventId, ticketTypeId);
   }
 
   private ticketTypeRevisionKey(eventId: string, ticketTypeId: string): string {
-    return `inventory:ticket-type:{${eventId}:${ticketTypeId}}:revision`;
+    return ticketTypeCounterRevisionKey(eventId, ticketTypeId);
   }
 
   // versionKey はカウンタ変更回数を数える version キーです。syncCounter の CAS ガードに使います。
   private versionKey(eventId: string): string {
-    return `inventory:${eventId}:v`;
+    return eventCounterVersionKey(eventId);
   }
 
   // requestKey は確定済み requestId マーカーのキーです。
@@ -532,6 +541,6 @@ export class InventoryCacheService implements OnModuleDestroy {
     eventId: string,
     requestId: string,
   ): string {
-    return `purchase-request:${buyerId}:${eventId}:${requestId}`;
+    return purchaseRequestSeenKey(buyerId, eventId, requestId);
   }
 }
