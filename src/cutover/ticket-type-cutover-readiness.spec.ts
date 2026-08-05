@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   eventCounterKey,
+  eventCounterVersionKey,
   parseTicketTypeCounterKey,
   ticketTypeCounterKey,
   ticketTypeCounterRevisionKey,
@@ -127,11 +128,11 @@ function healthyEvidenceInput() {
 }
 
 describe('TICKET_TYPE_CUTOVER_READINESS_CATEGORIES', () => {
-  it('21 category（DB 10 + control 2 + schema object 1 + Valkey 7 + OpenSearch 1）で重複がない', () => {
-    expect(TICKET_TYPE_CUTOVER_READINESS_CATEGORIES).toHaveLength(21);
-    expect(new Set(TICKET_TYPE_CUTOVER_READINESS_CATEGORIES).size).toBe(21);
+  it('23 category（DB 10 + control 2 + schema object 1 + Valkey 9 + OpenSearch 1）で重複がない', () => {
+    expect(TICKET_TYPE_CUTOVER_READINESS_CATEGORIES).toHaveLength(23);
+    expect(new Set(TICKET_TYPE_CUTOVER_READINESS_CATEGORIES).size).toBe(23);
     expect(DATABASE_CATEGORIES).toHaveLength(13);
-    expect(VALKEY_CATEGORIES).toHaveLength(7);
+    expect(VALKEY_CATEGORIES).toHaveLength(9);
   });
 
   it('Gate A の evidenceType と衝突しない', () => {
@@ -284,7 +285,7 @@ describe('checkCutoverValkey', () => {
       'ticket_type',
       'preflight',
     );
-    expect(results).toHaveLength(7);
+    expect(results).toHaveLength(9);
     expect(results.every((r) => r.violationCount === 0)).toBe(true);
   });
 
@@ -303,19 +304,39 @@ describe('checkCutoverValkey', () => {
     }
   });
 
-  it('legacy Event counter 不在は violation にならない（購入 API は fail-open で DB 判定に流れる）', async () => {
-    const row = inventoryRow();
-    const store = new Map<string, string>([
-      [ticketTypeCounterKey(row.event_id as string, row.ticket_type_id as string), '7'],
-      [ticketTypeCounterRevisionKey(row.event_id as string, row.ticket_type_id as string), '3'],
-    ]);
-    const results = await checkCutoverValkey(
-      sqlForRows([row], [legacyInventoryRow({ event_id: row.event_id })]),
-      fakeValkey(store),
-      'legacy',
-      'preflight',
-    );
-    expect(results.every((r) => r.violationCount === 0)).toBe(true);
+  it('legacy Event counter 不在は rollback preflight（expect-mode ticket_type / preflight）でのみ violation になる', async () => {
+    // ticket_type mode 稼働中に EventsService が作った新規 Event は legacy Event counter が
+    // 未 seed のまま残る。legacy namespace がこれから active になる rollback preflight では
+    // これを fail closed に検出し、それ以外の局面（legacy 稼働中の fail-open、activation
+    // preflight で休止予定、ticket_type postflight の緩和）では許容する。
+    const combos: Array<{
+      mode: 'legacy' | 'ticket_type';
+      phase: 'preflight' | 'postflight';
+      expected: number;
+    }> = [
+      { mode: 'legacy', phase: 'preflight', expected: 0 },
+      { mode: 'legacy', phase: 'postflight', expected: 0 },
+      { mode: 'ticket_type', phase: 'preflight', expected: 1 },
+      { mode: 'ticket_type', phase: 'postflight', expected: 0 },
+    ];
+    for (const { mode, phase, expected } of combos) {
+      const row = inventoryRow();
+      const store = new Map<string, string>([
+        [ticketTypeCounterKey(row.event_id as string, row.ticket_type_id as string), '7'],
+        [ticketTypeCounterRevisionKey(row.event_id as string, row.ticket_type_id as string), '3'],
+      ]);
+      const results = await checkCutoverValkey(
+        sqlForRows([row], [legacyInventoryRow({ event_id: row.event_id })]),
+        fakeValkey(store),
+        mode,
+        phase,
+      );
+      const byCategory = new Map(results.map((r) => [r.category, r.violationCount]));
+      expect(byCategory.get('valkey_legacy_counter_missing')).toBe(expected);
+      // 不在は missing としてのみ数え、他の legacy category へ波及しない。
+      expect(byCategory.get('valkey_legacy_counter_value_invalid')).toBe(0);
+      expect(byCategory.get('valkey_legacy_counter_remaining_mismatch')).toBe(0);
+    }
   });
 
   it('legacy Event counter の stale 値 / 不正値を preflight では expect-mode に依らず violation にする', async () => {
@@ -396,6 +417,77 @@ describe('checkCutoverValkey', () => {
     );
     expect(
       results.find((r) => r.category === 'valkey_counter_value_invalid')
+        ?.violationCount,
+    ).toBe(1);
+  });
+
+  it('safe integer を超える Ticket Type revision（INT64 上限等）は invalid として数える', async () => {
+    // '9223372036854775807'（signed INT64 上限）は非負整数の正規表現を通過するが、
+    // 次の reserve Lua script の INCR が範囲外エラーになり DECRBY だけが反映される
+    // 部分適用を招くため、範囲チェックで fail closed に検出する。
+    const row = inventoryRow();
+    const store = new Map<string, string>([
+      [ticketTypeCounterKey(row.event_id as string, row.ticket_type_id as string), '7'],
+      [
+        ticketTypeCounterRevisionKey(row.event_id as string, row.ticket_type_id as string),
+        '9223372036854775807',
+      ],
+    ]);
+    const results = await checkCutoverValkey(
+      sqlForRows([row]),
+      fakeValkey(store),
+      'ticket_type',
+      'preflight',
+    );
+    const byCategory = new Map(results.map((r) => [r.category, r.violationCount]));
+    expect(byCategory.get('valkey_revision_missing_or_invalid')).toBe(1);
+    expect(byCategory.get('valkey_counter_value_invalid')).toBe(0);
+  });
+
+  it('legacy version キー（inventory:<eventId>:v）は不在を許容し、存在時の非整数・INT64 上限値を violation にする', async () => {
+    const absent = legacyInventoryRow();
+    const valid = legacyInventoryRow();
+    const nonInteger = legacyInventoryRow();
+    const int64Max = legacyInventoryRow();
+    // counter 不在でも version キーだけ壊れて残るケースを素通りさせない。
+    const brokenWithoutCounter = legacyInventoryRow();
+    const store = new Map<string, string>([
+      [eventCounterKey(absent.event_id as string), '7'],
+      [eventCounterKey(valid.event_id as string), '7'],
+      [eventCounterVersionKey(valid.event_id as string), '12'],
+      [eventCounterKey(nonInteger.event_id as string), '7'],
+      [eventCounterVersionKey(nonInteger.event_id as string), 'not-a-number'],
+      [eventCounterKey(int64Max.event_id as string), '7'],
+      [eventCounterVersionKey(int64Max.event_id as string), '9223372036854775807'],
+      [eventCounterVersionKey(brokenWithoutCounter.event_id as string), '-1'],
+    ]);
+    const results = await checkCutoverValkey(
+      sqlForRows(
+        [],
+        [absent, valid, nonInteger, int64Max, brokenWithoutCounter],
+      ),
+      fakeValkey(store),
+      'legacy',
+      'preflight',
+    );
+    const byCategory = new Map(results.map((r) => [r.category, r.violationCount]));
+    expect(byCategory.get('valkey_legacy_version_value_invalid')).toBe(3);
+  });
+
+  it('壊れた legacy version 値は緩和中（ticket_type postflight）でも violation のまま', async () => {
+    const row = legacyInventoryRow();
+    const store = new Map<string, string>([
+      [eventCounterKey(row.event_id as string), '7'],
+      [eventCounterVersionKey(row.event_id as string), '9223372036854775807'],
+    ]);
+    const results = await checkCutoverValkey(
+      sqlForRows([], [row]),
+      fakeValkey(store),
+      'ticket_type',
+      'postflight',
+    );
+    expect(
+      results.find((r) => r.category === 'valkey_legacy_version_value_invalid')
         ?.violationCount,
     ).toBe(1);
   });
@@ -530,7 +622,7 @@ describe('serialize / parse evidence', () => {
     const evidence = parseTicketTypeCutoverEvidence(json);
     expect(evidence.evidenceType).toBe(TICKET_TYPE_CUTOVER_EVIDENCE_TYPE);
     expect(evidence.evidenceVersion).toBe(TICKET_TYPE_CUTOVER_EVIDENCE_VERSION);
-    expect(evidence.categoryCount).toBe(21);
+    expect(evidence.categoryCount).toBe(23);
     expect(evidence.complete).toBe(true);
     expect(evidence.writerMode).toBe('legacy');
     expect(evidence.opensearchReport.totalDiffs).toBe(0);

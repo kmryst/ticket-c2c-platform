@@ -18,14 +18,17 @@ import { Client, Pool } from 'pg';
 import { DataSource } from 'typeorm';
 import {
   eventCounterKey,
+  eventCounterVersionKey,
   ticketTypeCounterKey,
   ticketTypeCounterRevisionKey,
 } from '../cache/inventory-cache.keys';
 import { InventoryCacheService } from '../cache/inventory-cache.service';
 import { DatabaseService } from '../database/database.service';
+import { EventsService } from '../events/events.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
 import { PurchasesService } from '../purchases/purchases.service';
 import { TicketTypeResolverService } from '../purchases/ticket-type-resolver.service';
+import type { SearchService } from '../search/search.service';
 import { createTestOpenSearchClient } from '../opensearch';
 import { ensureEventsIndex } from '../search/events-projection.store';
 import { rebuildInventoryProjection } from '../search/inventory-rebuild.service';
@@ -87,6 +90,9 @@ interface HarnessCtx {
   // purchases / resolver / seedUser は「実際の購入 API で counter を更新してから
   // checker を走らせる」round-trip 検証に使う（#389 統合テストと同じ実 service 構成）。
   purchases: PurchasesService;
+  // events は「実際のイベント登録 API が seed する counter の実挙動」を前提に checker を
+  // 検証するために使う（ticket_type mode では legacy Event counter を seed しない）。
+  events: EventsService;
   resolver: TicketTypeResolverService;
   seedUser: () => Promise<string>;
   runAllChecks: (
@@ -205,10 +211,22 @@ describeIntegration(
           connect: () => pool.connect(),
         } as unknown as DatabaseService;
         const resolver = new TicketTypeResolverService(database);
+        const domainEvents = {
+          publish: jest.fn(async () => undefined),
+        } as unknown as DomainEventsService;
         const purchases = new PurchasesService(
           database,
           cache,
-          { publish: jest.fn(async () => undefined) } as unknown as DomainEventsService,
+          domainEvents,
+          resolver,
+        );
+        // 実 EventsService（本番と同じ createEvent 経路）。createEvent は SearchService を
+        // 使わないため、検索側は未使用 stub で満たす（DomainEvents は purchases と同じ stub）。
+        const events = new EventsService(
+          database,
+          cache,
+          domainEvents,
+          {} as unknown as SearchService,
           resolver,
         );
 
@@ -390,6 +408,7 @@ describeIntegration(
           seedCounters,
           seedLegacyCounter,
           purchases,
+          events,
           resolver,
           seedUser,
           runAllChecks,
@@ -438,7 +457,7 @@ describeIntegration(
       return entry.violationCount;
     }
 
-    it('legacy mode の健全な状態（両 namespace の counter seed 済み）で全 21 category が violation 0 になり、evidence が roundtrip する', async () => {
+    it('legacy mode の健全な状態（両 namespace の counter seed 済み）で全 23 category が violation 0 になり、evidence が roundtrip する', async () => {
       await withHarness(
         async ({
           pgClient,
@@ -466,14 +485,14 @@ describeIntegration(
 
           const { results, evidence, writerMode, schemaRevision } =
             await runAllChecks('legacy');
-          expect(results).toHaveLength(21);
+          expect(results).toHaveLength(23);
           expect(hasTicketTypeCutoverViolations(results)).toBe(false);
           expect(writerMode).toBe('legacy');
           expect(schemaRevision).toBe('AddTicketTypeCompatibilityWriter1785542400000');
 
           const parsed = parseTicketTypeCutoverEvidence(evidence);
           expect(parsed.complete).toBe(true);
-          expect(parsed.categoryCount).toBe(21);
+          expect(parsed.categoryCount).toBe(23);
           expect(parsed.opensearchReport.checkedEvents).toBe(2);
           expect(parsed.opensearchReport.totalDiffs).toBe(0);
         },
@@ -481,7 +500,7 @@ describeIntegration(
     });
 
     it('ticket_type mode で counter を seed すれば violation 0、未 seed なら missing になる', async () => {
-      await withHarness(async ({ dataSource, pgClient, seedEvent, seedCounters, runAllChecks, index }) => {
+      await withHarness(async ({ dataSource, pgClient, seedEvent, seedCounters, seedLegacyCounter, runAllChecks, index }) => {
         const { eventId, typeIds } = await seedEvent([5, 3]);
         const client = await pgClient();
         try {
@@ -490,6 +509,9 @@ describeIntegration(
           client.release();
         }
         await switchWriterMode(dataSource, 'ticket_type');
+        // ticket_type preflight（rollback 直前相当）は legacy Event counter の欠損も
+        // violation にするため、legacy 側は seed 済みの健全な状態にしておく。
+        await seedLegacyCounter(eventId);
 
         // 未 seed: default + 追加 Type の 2 counter が missing。
         const before = await runAllChecks('ticket_type');
@@ -815,6 +837,131 @@ describeIntegration(
           ).toBe(1);
           expect(count(nextActivationPre.results, 'valkey_counter_missing')).toBe(1);
           expect(hasTicketTypeCutoverViolations(nextActivationPre.results)).toBe(true);
+        },
+      );
+    });
+
+    it('ticket_type mode 稼働中に実 EventsService が作った新規 Event の legacy counter 欠損を rollback preflight が fail closed に検出し、seed 後に green へ回復する', async () => {
+      await withHarness(
+        async ({
+          dataSource,
+          valkey,
+          pgClient,
+          events,
+          seedUser,
+          seedEvent,
+          seedCounters,
+          seedLegacyCounter,
+          runAllChecks,
+          index,
+        }) => {
+          // 既存 Event は両 namespace とも健全に seed 済みの状態から始める。
+          const existing = await seedEvent([5]);
+          await seedLegacyCounter(existing.eventId);
+          await seedCounters(existing.eventId, existing.typeIds);
+
+          // ticket_type mode 稼働中に、実 EventsService（本番と同じ createEvent 経路）で
+          // 新規 Event を作成する。
+          await switchWriterMode(dataSource, 'ticket_type');
+          const creator = await seedUser();
+          const created = await events.createEvent(
+            {
+              title: 'cutover rollback fixture',
+              eventType: 'music',
+              startsAt: '2032-06-01T00:00:00Z',
+              totalQuantity: 4,
+            },
+            creator,
+          );
+
+          // 前提を実測で固定: createEvent は Ticket Type counter だけを seed し、
+          // legacy Event counter は未 seed のまま残る（Blocker の破綻経路そのもの）。
+          const defaultRows = await dataSource.query<Array<{ id: string }>>(
+            `SELECT id FROM ticket_types WHERE event_id = $1 AND is_default`,
+            [created.eventId],
+          );
+          const defaultTypeId = defaultRows[0].id;
+          expect(
+            await valkey.get(ticketTypeCounterKey(created.eventId, defaultTypeId)),
+          ).toBe('4');
+          expect(await valkey.get(eventCounterKey(created.eventId))).toBeNull();
+
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+          } finally {
+            client.release();
+          }
+
+          // rollback preflight（expect-mode ticket_type / preflight）は legacy counter の
+          // 欠損を fail closed に拒否する（rollback 後の恒常的 fail-open を防ぐ）。
+          const rollbackPre = await runAllChecks('ticket_type', 'preflight');
+          expect(count(rollbackPre.results, 'valkey_legacy_counter_missing')).toBe(1);
+          expect(hasTicketTypeCutoverViolations(rollbackPre.results)).toBe(true);
+
+          // 同じ状態でも activation 後の平常運用検査（ticket_type postflight）は
+          // 購入 API の実挙動（legacy namespace 休止中）に合わせて許容する。
+          const activationPost = await runAllChecks('ticket_type', 'postflight');
+          expect(count(activationPost.results, 'valkey_legacy_counter_missing')).toBe(0);
+          expect(hasTicketTypeCutoverViolations(activationPost.results)).toBe(false);
+
+          // runbook どおり legacy counter を DB 値で seed すると rollback preflight は green。
+          await seedLegacyCounter(created.eventId);
+          const reseeded = await runAllChecks('ticket_type', 'preflight');
+          expect(count(reseeded.results, 'valkey_legacy_counter_missing')).toBe(0);
+          expect(hasTicketTypeCutoverViolations(reseeded.results)).toBe(false);
+        },
+      );
+    });
+
+    it('Valkey 注入: INT64 上限の Ticket Type revision と壊れた legacy version 値を fail closed に検出する（INCR が実際に失敗する値であることも実測する）', async () => {
+      await withHarness(
+        async ({
+          valkey,
+          pgClient,
+          seedEvent,
+          seedCounters,
+          seedLegacyCounter,
+          runAllChecks,
+          index,
+        }) => {
+          const { eventId, typeIds } = await seedEvent([5]);
+          await seedLegacyCounter(eventId);
+          await seedCounters(eventId, typeIds);
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+          } finally {
+            client.release();
+          }
+
+          // baseline: legacy version キー不在は '0' 扱いの正常状態なので green。
+          const baseline = await runAllChecks('legacy', 'preflight');
+          expect(hasTicketTypeCutoverViolations(baseline.results)).toBe(false);
+
+          // signed INT64 上限は非負整数の形式チェックを通過するが、Valkey の INCR は
+          // signed 64-bit 範囲でしか動かないため次の INCR が実際にエラーになる
+          // （reserve Lua script では DECRBY 後の INCR が落ち、部分適用が残る）。
+          const revisionKey = ticketTypeCounterRevisionKey(eventId, typeIds[0]);
+          await valkey.set(revisionKey, '9223372036854775807');
+          await expect(valkey.incr(revisionKey)).rejects.toThrow(/overflow/);
+
+          // legacy version キーにも非整数値を注入する（INCR / CAS が恒常的に失敗する状態）。
+          const versionKey = eventCounterVersionKey(eventId);
+          await valkey.set(versionKey, 'not-a-number');
+          await expect(valkey.incr(versionKey)).rejects.toThrow(/not an integer/);
+
+          const injected = await runAllChecks('legacy', 'preflight');
+          expect(count(injected.results, 'valkey_revision_missing_or_invalid')).toBe(1);
+          expect(count(injected.results, 'valkey_legacy_version_value_invalid')).toBe(1);
+          expect(hasTicketTypeCutoverViolations(injected.results)).toBe(true);
+
+          // INT64 上限の legacy version 値も同様に fail closed で検出する。
+          await valkey.set(versionKey, '9223372036854775807');
+          const int64Injected = await runAllChecks('legacy', 'preflight');
+          expect(
+            count(int64Injected.results, 'valkey_legacy_version_value_invalid'),
+          ).toBe(1);
         },
       );
     });

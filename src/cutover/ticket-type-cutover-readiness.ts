@@ -15,6 +15,7 @@ import { POSTGRES_INT4_MAX } from '../common/validation-primitives';
 import type { InventoryWriterMode } from '../database/inventory-writer-control';
 import {
   eventCounterKey,
+  eventCounterVersionKey,
   parseTicketTypeCounterKey,
   TICKET_TYPE_COUNTER_SCAN_PATTERN,
   ticketTypeCounterKey,
@@ -30,11 +31,11 @@ import {
 import { DEFAULT_PAGE_SIZE, SqlClient } from '../search/inventory-projection-source';
 import { EVENTS_INDEX } from '../search/events-projection.store';
 
-// category は Gate B が検査する差分の有限集合です（合計 21）。
+// category は Gate B が検査する差分の有限集合です（合計 23）。
 // - DB 未紐付け・在庫差分: 10
 // - control state: 2
 // - compatibility schema object（#376 の trigger 配線・関数本文 hash・index 定義）: 1
-// - Valkey counter / revision 差分（Ticket Type 5 + legacy Event 2）: 7
+// - Valkey counter / revision / version 差分（Ticket Type 5 + legacy Event 4）: 9
 // - OpenSearch projection 差分: 1
 export const TICKET_TYPE_CUTOVER_READINESS_CATEGORIES = [
   // --- DB 未紐付け・在庫差分（10） ---
@@ -53,14 +54,16 @@ export const TICKET_TYPE_CUTOVER_READINESS_CATEGORIES = [
   'writer_control_mode_mismatch',
   // --- compatibility schema object（1） ---
   'compatibility_object_missing_or_invalid',
-  // --- Valkey counter / revision 差分（7） ---
+  // --- Valkey counter / revision / version 差分（9） ---
   'valkey_counter_missing',
   'valkey_counter_without_inventory_row',
   'valkey_counter_value_invalid',
   'valkey_counter_remaining_mismatch',
   'valkey_revision_missing_or_invalid',
+  'valkey_legacy_counter_missing',
   'valkey_legacy_counter_value_invalid',
   'valkey_legacy_counter_remaining_mismatch',
+  'valkey_legacy_version_value_invalid',
   // --- OpenSearch projection 差分（1） ---
   'opensearch_projection_diff',
 ] as const;
@@ -508,8 +511,10 @@ const VALKEY_CATEGORIES: readonly TicketTypeCutoverReadinessCategory[] = [
   'valkey_counter_value_invalid',
   'valkey_counter_remaining_mismatch',
   'valkey_revision_missing_or_invalid',
+  'valkey_legacy_counter_missing',
   'valkey_legacy_counter_value_invalid',
   'valkey_legacy_counter_remaining_mismatch',
+  'valkey_legacy_version_value_invalid',
 ];
 
 export interface CutoverDatabaseCheck {
@@ -600,7 +605,10 @@ const NON_NEGATIVE_INTEGER = /^(0|[1-9]\d*)$/;
 //   進める一方 Ticket Type counter を更新しないので、不在・stale は正常。
 // - legacy Event namespace は「ticket_type mode の postflight（activation 後の平常運用）」で
 //   だけ緩和する。ticket_type 経路の購入は reverse mirror で ticket_inventory の DB 行を
-//   進める一方 Event counter を更新しないので、stale は正常（不在は元々許容）。
+//   進める一方 Event counter を更新しないので、stale は正常。counter 不在は
+//   「legacy namespace がこれから active になる rollback preflight
+//   （expect-mode ticket_type / preflight）」でだけ violation とし、それ以外の局面では
+//   購入 API の fail-open 設計に合わせて許容する（詳細は Pass 3 のコメント参照）。
 // preflight（これから他方 mode へ切り替える直前）は従来どおり両 namespace とも厳密で、
 // 切替先の未 seed / stale counter を fail closed に violation とします。
 // 緩和中も構造的に不正な値（非整数・負数・total 超過）は常に violation とします。
@@ -703,10 +711,19 @@ export async function checkCutoverValkey(
         const revisionRaw = await valkey.get(
           ticketTypeCounterRevisionKey(row.event_id, row.ticket_type_id),
         );
-        if (revisionRaw === null || !NON_NEGATIVE_INTEGER.test(revisionRaw)) {
-          // counter があるのに CAS revision が無い/壊れていると sync が成立しない。
-          // 緩和中（legacy postflight）は namespace 自体が休止中なので検査しない
-          // （次の activation preflight が seed し直しを強制する）。
+        // counter があるのに CAS revision が無い/壊れていると sync が成立しない。
+        // 形式（非負整数）に加えて範囲も検査する: safe integer を超える値
+        // （signed INT64 上限 9223372036854775807 等）は正規表現を通過するが、
+        // reserve Lua script の INCR が signed 64-bit 範囲外エラーで落ち、
+        // DECRBY だけが反映される部分適用を招くため fail closed に violation とする
+        // （Valkey/Redis に MULTI/EXEC 内のコマンド単位 rollback は無い）。
+        // 緩和中（legacy postflight）は namespace 自体が休止中なので検査しない
+        // （次の activation preflight が seed し直しを強制する）。
+        if (
+          revisionRaw === null ||
+          !NON_NEGATIVE_INTEGER.test(revisionRaw) ||
+          !Number.isSafeInteger(Number(revisionRaw))
+        ) {
           bump('valkey_revision_missing_or_invalid');
         }
       }
@@ -773,16 +790,34 @@ export async function checkCutoverValkey(
   } while (cursor !== '0');
 
   // Pass 3: legacy mode で実際に使われる Event 単位 counter（inventory:<eventId>）を
-  // ticket_inventory と突き合わせる。counter 不在は購入 API が fail-open（unknown）で
-  // DB 判定へ流すため violation にしない。値が存在して DB と乖離している場合
-  // （rollback 直前の stale counter 等）は、在庫があるのに前段フィルタが sold_out で
-  // 即時拒否する実害があるため violation とする（preflight before rollback では
-  // 「stale legacy counter を削除/再 seed してから戻す」ことを強制する）。
-  // 例外は ticket_type postflight（activation 後の平常運用）だけで、ticket_type 経路の
-  // 購入は reverse mirror で DB の legacy 集計行だけを進め Event counter を更新しない
-  // ため、stale は正常として許容する（構造的に不正な値は常に violation）。
+  // ticket_inventory と突き合わせる。
+  //
+  // counter 不在の扱いは局面で分ける:
+  // - rollback preflight（expect-mode ticket_type / preflight。legacy namespace が
+  //   これから active になる局面）では不在を violation にする。ticket_type mode 稼働中に
+  //   EventsService が作った新規 Event は Ticket Type counter だけが seed され legacy
+  //   Event counter が未 seed のまま残るため、ここで見逃すと rollback 後に購入 API が
+  //   そのEventについて恒常的に fail-open（unknown）で DB 判定へ流れ続け、売り切れ判定
+  //   トラフィックが Valkey で遮断されず Aurora へ到達し続ける（preflight は
+  //   「legacy counter を seed してから戻す」ことを強制する）。
+  // - それ以外（legacy が現 mode の preflight/postflight、および ticket_type postflight）
+  //   では不在を violation にしない。legacy 稼働中の counter 不在（eviction 等）は
+  //   購入 API が fail-open で DB 判定へ流す設計済みの正常状態であり、activation
+  //   preflight では legacy namespace はこれから休止する側なので不在は無害。
+  //
+  // 値が存在して DB と乖離している場合（rollback 直前の stale counter 等）は、在庫が
+  // あるのに前段フィルタが sold_out で即時拒否する実害があるため violation とする
+  // （preflight before rollback では「stale legacy counter を削除/再 seed してから戻す」
+  // ことを強制する）。例外は ticket_type postflight（activation 後の平常運用）だけで、
+  // ticket_type 経路の購入は reverse mirror で DB の legacy 集計行だけを進め Event
+  // counter を更新しないため、stale は正常として許容する（構造的に不正な値は常に violation）。
+  //
   // version キー（inventory:<eventId>:v）の不在は getCounterVersion が '0' として扱う
-  // 正常状態なので検査しない。
+  // 正常状態なので許容するが、存在する場合の非整数・負数・safe integer 超過
+  // （signed INT64 上限等。reserve Lua script の INCR が範囲外エラーになり DECRBY だけが
+  // 反映される部分適用や、CAS sync の恒常的失敗を招く）は局面に依らず violation とする。
+  const legacyNamespaceBecomingActive =
+    expectedWriterMode === 'ticket_type' && checkPhase === 'preflight';
   let lastLegacyEventId: string | null = null;
   for (;;) {
     const page: {
@@ -813,8 +848,22 @@ export async function checkCutoverValkey(
     }
 
     for (const row of page.rows) {
+      // version キーは counter 不在でも壊れた値で残り得るため、counter 判定より先に
+      // 検査する（counter 不在の continue で素通りさせない）。
+      const versionRaw = await valkey.get(eventCounterVersionKey(row.event_id));
+      if (
+        versionRaw !== null &&
+        (!NON_NEGATIVE_INTEGER.test(versionRaw) ||
+          !Number.isSafeInteger(Number(versionRaw)))
+      ) {
+        bump('valkey_legacy_version_value_invalid');
+      }
+
       const counterRaw = await valkey.get(eventCounterKey(row.event_id));
       if (counterRaw === null) {
+        if (legacyNamespaceBecomingActive) {
+          bump('valkey_legacy_counter_missing');
+        }
         continue;
       }
       if (
