@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  eventCounterKey,
   parseTicketTypeCounterKey,
   ticketTypeCounterKey,
   ticketTypeCounterRevisionKey,
@@ -43,6 +44,7 @@ function createFakeSql(handlers: {
   control?: () => { writer_mode: string }[];
   revision?: () => { name: string }[];
   inventoryPage?: (params: unknown[]) => Record<string, unknown>[];
+  legacyInventoryPage?: (params: unknown[]) => Record<string, unknown>[];
   presentPairs?: (params: unknown[]) => Record<string, unknown>[];
 }): { client: { query: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }> }; calls: FakeSqlCall[] } {
   const calls: FakeSqlCall[] = [];
@@ -58,6 +60,8 @@ function createFakeSql(handlers: {
         rows = handlers.revision?.() ?? [];
       } else if (text.includes('FROM public.ticket_type_inventory\n        WHERE ($1::uuid IS NULL')) {
         rows = handlers.inventoryPage?.(params ?? []) ?? [];
+      } else if (text.includes('FROM public.ticket_inventory\n        WHERE ($1::uuid IS NULL')) {
+        rows = handlers.legacyInventoryPage?.(params ?? []) ?? [];
       } else if (text.includes('unnest($1::uuid[], $2::uuid[])')) {
         rows = handlers.presentPairs?.(params ?? []) ?? [];
       } else {
@@ -122,11 +126,11 @@ function healthyEvidenceInput() {
 }
 
 describe('TICKET_TYPE_CUTOVER_READINESS_CATEGORIES', () => {
-  it('17 category（DB 9 + control 2 + Valkey 5 + OpenSearch 1）で重複がない', () => {
-    expect(TICKET_TYPE_CUTOVER_READINESS_CATEGORIES).toHaveLength(17);
-    expect(new Set(TICKET_TYPE_CUTOVER_READINESS_CATEGORIES).size).toBe(17);
-    expect(DATABASE_CATEGORIES).toHaveLength(11);
-    expect(VALKEY_CATEGORIES).toHaveLength(5);
+  it('21 category（DB 10 + control 2 + schema object 1 + Valkey 7 + OpenSearch 1）で重複がない', () => {
+    expect(TICKET_TYPE_CUTOVER_READINESS_CATEGORIES).toHaveLength(21);
+    expect(new Set(TICKET_TYPE_CUTOVER_READINESS_CATEGORIES).size).toBe(21);
+    expect(DATABASE_CATEGORIES).toHaveLength(13);
+    expect(VALKEY_CATEGORIES).toHaveLength(7);
   });
 
   it('Gate A の evidenceType と衝突しない', () => {
@@ -137,14 +141,14 @@ describe('TICKET_TYPE_CUTOVER_READINESS_CATEGORIES', () => {
 });
 
 describe('checkCutoverDatabase', () => {
-  it('正常系: 11 category・writerMode・schemaRevision を返す', async () => {
+  it('正常系: 13 category・writerMode・schemaRevision を返す', async () => {
     const { client } = createFakeSql({
       violations: healthyViolationRows,
       control: () => [{ writer_mode: 'legacy' }],
       revision: () => [{ name: 'AddTicketTypeCompatibilityWriter1785542400000' }],
     });
     const check = await checkCutoverDatabase(client, 'legacy');
-    expect(check.results).toHaveLength(11);
+    expect(check.results).toHaveLength(13);
     expect(check.results.every((r) => r.violationCount === 0)).toBe(true);
     expect(check.writerMode).toBe('legacy');
     expect(check.schemaRevision).toBe(
@@ -234,9 +238,23 @@ describe('checkCutoverValkey', () => {
     };
   }
 
-  function sqlForRows(rows: Record<string, unknown>[]) {
+  // legacy Event 集計行（ticket_inventory）の fake row。
+  function legacyInventoryRow(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      event_id: randomUUID(),
+      total_quantity: 10,
+      remaining_quantity: 7,
+      ...overrides,
+    };
+  }
+
+  function sqlForRows(
+    rows: Record<string, unknown>[],
+    legacyRows: Record<string, unknown>[] = [],
+  ) {
     return createFakeSql({
       inventoryPage: (params) => (params[0] === null ? rows : []),
+      legacyInventoryPage: (params) => (params[0] === null ? legacyRows : []),
       presentPairs: (params) => {
         const eventIds = params[0] as string[];
         const typeIds = params[1] as string[];
@@ -253,36 +271,82 @@ describe('checkCutoverValkey', () => {
 
   it('counter / revision が DB と一致すれば全 category 0', async () => {
     const row = inventoryRow();
+    const legacyRow = legacyInventoryRow({ event_id: row.event_id });
+    const store = new Map<string, string>([
+      [ticketTypeCounterKey(row.event_id as string, row.ticket_type_id as string), '7'],
+      [ticketTypeCounterRevisionKey(row.event_id as string, row.ticket_type_id as string), '3'],
+      [eventCounterKey(row.event_id as string), '7'],
+    ]);
+    const results = await checkCutoverValkey(
+      sqlForRows([row], [legacyRow]),
+      fakeValkey(store),
+      'ticket_type',
+    );
+    expect(results).toHaveLength(7);
+    expect(results.every((r) => r.violationCount === 0)).toBe(true);
+  });
+
+  it('Ticket Type counter 未 seed は expect-mode に依らず violation になる', async () => {
+    for (const mode of ['legacy', 'ticket_type'] as const) {
+      const results = await checkCutoverValkey(
+        sqlForRows([inventoryRow()]),
+        fakeValkey(new Map()),
+        mode,
+      );
+      expect(
+        results.find((r) => r.category === 'valkey_counter_missing')
+          ?.violationCount,
+      ).toBe(1);
+    }
+  });
+
+  it('legacy Event counter 不在は violation にならない（購入 API は fail-open で DB 判定に流れる）', async () => {
+    const row = inventoryRow();
     const store = new Map<string, string>([
       [ticketTypeCounterKey(row.event_id as string, row.ticket_type_id as string), '7'],
       [ticketTypeCounterRevisionKey(row.event_id as string, row.ticket_type_id as string), '3'],
     ]);
     const results = await checkCutoverValkey(
-      sqlForRows([row]),
+      sqlForRows([row], [legacyInventoryRow({ event_id: row.event_id })]),
       fakeValkey(store),
-      'ticket_type',
-    );
-    expect(results).toHaveLength(5);
-    expect(results.every((r) => r.violationCount === 0)).toBe(true);
-  });
-
-  it('legacy mode では counter 未 seed は violation にならない', async () => {
-    const results = await checkCutoverValkey(
-      sqlForRows([inventoryRow()]),
-      fakeValkey(new Map()),
       'legacy',
     );
     expect(results.every((r) => r.violationCount === 0)).toBe(true);
   });
 
-  it('ticket_type mode では counter 未 seed は violation になる', async () => {
+  it('legacy Event counter の stale 値 / 不正値を expect-mode に依らず violation にする', async () => {
+    const stale = legacyInventoryRow();
+    const invalid = legacyInventoryRow();
+    const store = new Map<string, string>([
+      // DB は remaining 7 なのに counter が 0 のまま（rollback 後の stale counter を模す）。
+      [eventCounterKey(stale.event_id as string), '0'],
+      // total (10) を超える値は構造的に不正。
+      [eventCounterKey(invalid.event_id as string), '11'],
+    ]);
+    for (const mode of ['legacy', 'ticket_type'] as const) {
+      const results = await checkCutoverValkey(
+        sqlForRows([], [stale, invalid]),
+        fakeValkey(store),
+        mode,
+      );
+      const byCategory = new Map(results.map((r) => [r.category, r.violationCount]));
+      expect(byCategory.get('valkey_legacy_counter_remaining_mismatch')).toBe(1);
+      expect(byCategory.get('valkey_legacy_counter_value_invalid')).toBe(1);
+    }
+  });
+
+  it('非整数の legacy Event counter は invalid として数える', async () => {
+    const row = legacyInventoryRow();
+    const store = new Map<string, string>([
+      [eventCounterKey(row.event_id as string), 'not-a-number'],
+    ]);
     const results = await checkCutoverValkey(
-      sqlForRows([inventoryRow()]),
-      fakeValkey(new Map()),
-      'ticket_type',
+      sqlForRows([], [row]),
+      fakeValkey(store),
+      'legacy',
     );
     expect(
-      results.find((r) => r.category === 'valkey_counter_missing_in_ticket_type_mode')
+      results.find((r) => r.category === 'valkey_legacy_counter_value_invalid')
         ?.violationCount,
     ).toBe(1);
   });
@@ -308,7 +372,7 @@ describe('checkCutoverValkey', () => {
     expect(byCategory.get('valkey_counter_remaining_mismatch')).toBe(1);
     expect(byCategory.get('valkey_counter_value_invalid')).toBe(1);
     expect(byCategory.get('valkey_revision_missing_or_invalid')).toBe(1);
-    expect(byCategory.get('valkey_counter_missing_in_ticket_type_mode')).toBe(0);
+    expect(byCategory.get('valkey_counter_missing')).toBe(0);
   });
 
   it('非整数 counter は invalid として数える', async () => {
@@ -392,7 +456,7 @@ describe('serialize / parse evidence', () => {
     const evidence = parseTicketTypeCutoverEvidence(json);
     expect(evidence.evidenceType).toBe(TICKET_TYPE_CUTOVER_EVIDENCE_TYPE);
     expect(evidence.evidenceVersion).toBe(TICKET_TYPE_CUTOVER_EVIDENCE_VERSION);
-    expect(evidence.categoryCount).toBe(17);
+    expect(evidence.categoryCount).toBe(21);
     expect(evidence.complete).toBe(true);
     expect(evidence.writerMode).toBe('legacy');
     expect(evidence.opensearchReport.totalDiffs).toBe(0);
@@ -535,6 +599,80 @@ describe('serialize / parse evidence', () => {
         }),
       ),
     ).toThrow(/totalDiffs/);
+  });
+
+  it('parse は index / totalDiffs しか持たない不完全な opensearchReport を拒否する', () => {
+    const base = JSON.parse(
+      serializeTicketTypeCutoverEvidence(healthyEvidenceInput()),
+    ) as Record<string, unknown>;
+    expect(() =>
+      parseTicketTypeCutoverEvidence(
+        JSON.stringify({
+          ...base,
+          opensearchReport: { index: 'events', totalDiffs: 0 },
+        }),
+      ),
+    ).toThrow(/opensearchReport/);
+  });
+
+  it('parse は opensearchReport の必須フィールド欠落・型不正をすべて拒否する', () => {
+    const base = JSON.parse(
+      serializeTicketTypeCutoverEvidence(healthyEvidenceInput()),
+    ) as Record<string, unknown>;
+    const report = base.opensearchReport as Record<string, unknown>;
+    const tamperedReports: Record<string, unknown>[] = [
+      // 各必須フィールドの欠落。
+      ...(['index', 'checkedEvents', 'checkedDocuments', 'counts', 'findings', 'hasDiff'] as const).map(
+        (field) => {
+          const copy = { ...report };
+          delete copy[field];
+          return copy;
+        },
+      ),
+      // 型不正。
+      { ...report, checkedEvents: -1 },
+      { ...report, checkedDocuments: 1.5 },
+      { ...report, findings: 'none' },
+      { ...report, findings: [{ category: 'missing_event_document' }] },
+      { ...report, findings: [{ eventId: 'e-1', category: 'bogus_category' }] },
+      { ...report, hasDiff: true },
+      // counts の category 欠落・追加・値不正。
+      {
+        ...report,
+        counts: (() => {
+          const counts = { ...(report.counts as Record<string, number>) };
+          delete counts.missing_event_document;
+          return counts;
+        })(),
+      },
+      {
+        ...report,
+        counts: { ...(report.counts as Record<string, number>), extra_category: 0 },
+      },
+      {
+        ...report,
+        counts: { ...(report.counts as Record<string, number>), missing_event_document: '0' },
+      },
+      // totalDiffs が counts の合計と一致しない（両方 5 にして opensearch category 側の
+      // 突き合わせを素通りさせても、counts 合計との不整合で落ちること）。
+      (() => {
+        const inconsistent = { ...report, totalDiffs: 5, hasDiff: true };
+        return inconsistent;
+      })(),
+    ];
+    for (const tampered of tamperedReports) {
+      const results = (base.results as TicketTypeCutoverReadinessResult[]).map(
+        (r) =>
+          r.category === 'opensearch_projection_diff'
+            ? { ...r, violationCount: (tampered.totalDiffs as number) ?? r.violationCount }
+            : r,
+      );
+      expect(() =>
+        parseTicketTypeCutoverEvidence(
+          JSON.stringify({ ...base, results, opensearchReport: tampered }),
+        ),
+      ).toThrow(/opensearchReport/);
+    }
   });
 });
 

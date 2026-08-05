@@ -52,7 +52,9 @@ export type ReconciliationCategory =
   | 'unversioned_projection'
   | 'malformed_projection';
 
-const ALL_CATEGORIES: ReconciliationCategory[] = [
+// RECONCILIATION_CATEGORIES は report.counts が持つべき category の正本です。
+// Gate B evidence parser (#378) が counts の完全性を fail closed に検証するため export します。
+export const RECONCILIATION_CATEGORIES: readonly ReconciliationCategory[] = [
   'missing_event_document',
   'unexpected_event_document',
   'missing_ticket_type',
@@ -175,7 +177,7 @@ export async function reconcileInventoryProjection(
     await endReadOnlySnapshot(sql);
   }
 
-  const totalDiffs = ALL_CATEGORIES.reduce((sum, c) => sum + counts[c], 0);
+  const totalDiffs = RECONCILIATION_CATEGORIES.reduce((sum, c) => sum + counts[c], 0);
   return {
     index,
     checkedEvents,
@@ -428,7 +430,7 @@ async function mgetDocuments(
 
 function emptyCounts(): Record<ReconciliationCategory, number> {
   const counts = {} as Record<ReconciliationCategory, number>;
-  for (const category of ALL_CATEGORIES) {
+  for (const category of RECONCILIATION_CATEGORIES) {
     counts[category] = 0;
   }
   return counts;

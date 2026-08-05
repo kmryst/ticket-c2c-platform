@@ -17,6 +17,7 @@ import Redis from 'ioredis';
 import { Client, Pool } from 'pg';
 import { DataSource } from 'typeorm';
 import {
+  eventCounterKey,
   ticketTypeCounterKey,
   ticketTypeCounterRevisionKey,
 } from '../cache/inventory-cache.keys';
@@ -61,8 +62,9 @@ jest.setTimeout(180_000);
 
 // 一時 index は必ずこの prefix を使う（cleanup 対象を一意に限定する）。
 const TEST_INDEX_PREFIX = 'ticket-c2c-test-';
-// checker が SCAN する ticket-type counter namespace（harness 開始時に払い出す）。
-const TICKET_TYPE_KEY_PATTERN = 'inventory:ticket-type:*';
+// checker が読む在庫 counter namespace（ticket-type counter と legacy Event counter の両方。
+// harness 開始時に払い出す）。
+const INVENTORY_KEY_PATTERN = 'inventory:*';
 
 interface HarnessCtx {
   dataSource: DataSource;
@@ -75,6 +77,7 @@ interface HarnessCtx {
     typeIds: string[];
   }>;
   seedCounters: (eventId: string, typeIds: string[]) => Promise<void>;
+  seedLegacyCounter: (eventId: string) => Promise<void>;
   runAllChecks: (
     expectedMode: 'legacy' | 'ticket_type',
   ) => Promise<{
@@ -134,13 +137,14 @@ describeIntegration(
 
     // checker の SCAN は Valkey 全体の ticket-type counter namespace を見るため、
     // 前の test / suite の残存キーを未紐付け違反と誤検出しないよう harness 開始時に払い出す。
-    async function flushTicketTypeKeys(): Promise<void> {
+    // legacy Event counter（inventory:<eventId>）もこの suite が seed するため一緒に払い出す。
+    async function flushInventoryCounterKeys(): Promise<void> {
       let cursor = '0';
       do {
         const [nextCursor, keys] = await valkey.scan(
           cursor,
           'MATCH',
-          TICKET_TYPE_KEY_PATTERN,
+          INVENTORY_KEY_PATTERN,
           'COUNT',
           500,
         );
@@ -158,7 +162,7 @@ describeIntegration(
       const databaseName = ['tt_cutover', process.pid, suffix].join('_');
       const quotedName = `"${databaseName}"`;
       const index = `${TEST_INDEX_PREFIX}${suffix}`;
-      await flushTicketTypeKeys();
+      await flushInventoryCounterKeys();
       await adminClient.query(`CREATE DATABASE ${quotedName} TEMPLATE template0`);
       const databaseUrl = new URL(databaseUrlTemplate);
       databaseUrl.pathname = `/${databaseName}`;
@@ -249,6 +253,24 @@ describeIntegration(
           }
         };
 
+        // seedLegacyCounter は legacy Event counter を ticket_inventory の remaining と
+        // 一致する値で seed する（version キー不在は '0' 扱いの正常状態なので作らない）。
+        const seedLegacyCounter = async (eventId: string): Promise<void> => {
+          const rows = await dataSource.query<
+            Array<{ remaining_quantity: number }>
+          >(
+            `SELECT remaining_quantity FROM ticket_inventory WHERE event_id = $1`,
+            [eventId],
+          );
+          if (rows.length !== 1) {
+            throw new Error(`no legacy inventory row for ${eventId}`);
+          }
+          await valkey.set(
+            eventCounterKey(eventId),
+            String(rows[0].remaining_quantity),
+          );
+        };
+
         const runAllChecks = async (expectedMode: 'legacy' | 'ticket_type') => {
           const snapshotClient = await pool.connect();
           let databaseCheck: Awaited<ReturnType<typeof checkCutoverDatabase>>;
@@ -319,6 +341,7 @@ describeIntegration(
           index,
           seedEvent,
           seedCounters,
+          seedLegacyCounter,
           runAllChecks,
         });
         outcome = { ok: true, value };
@@ -333,7 +356,7 @@ describeIntegration(
         }
         await opensearch.indices.delete({ index, ignore_unavailable: true } as never);
       });
-      await runCleanupStep(cleanupErrors, () => flushTicketTypeKeys());
+      await runCleanupStep(cleanupErrors, () => flushInventoryCounterKeys());
       await runCleanupStep(cleanupErrors, () => pool.end());
       await runCleanupStep(cleanupErrors, async () => {
         if (dataSource.isInitialized) await dataSource.destroy();
@@ -364,30 +387,46 @@ describeIntegration(
       return entry.violationCount;
     }
 
-    it('legacy mode の健全な状態で全 17 category が violation 0 になり、evidence が roundtrip する', async () => {
-      await withHarness(async ({ pgClient, seedEvent, runAllChecks, index }) => {
-        await seedEvent([5]);
-        await seedEvent([7]);
-        const client = await pgClient();
-        try {
-          await rebuildInventoryProjection(client, opensearch, { index });
-        } finally {
-          client.release();
-        }
+    it('legacy mode の健全な状態（両 namespace の counter seed 済み）で全 21 category が violation 0 になり、evidence が roundtrip する', async () => {
+      await withHarness(
+        async ({
+          pgClient,
+          seedEvent,
+          seedCounters,
+          seedLegacyCounter,
+          runAllChecks,
+          index,
+        }) => {
+          // 健全な activation 直前 preflight の状態を正しく作る:
+          // legacy Event counter は DB と一致する値で seed 済み、切替先の
+          // ticket_type counter も全件事前 seed 済み（未 seed は violation になる）。
+          const first = await seedEvent([5]);
+          const second = await seedEvent([7]);
+          for (const { eventId, typeIds } of [first, second]) {
+            await seedLegacyCounter(eventId);
+            await seedCounters(eventId, typeIds);
+          }
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+          } finally {
+            client.release();
+          }
 
-        const { results, evidence, writerMode, schemaRevision } =
-          await runAllChecks('legacy');
-        expect(results).toHaveLength(17);
-        expect(hasTicketTypeCutoverViolations(results)).toBe(false);
-        expect(writerMode).toBe('legacy');
-        expect(schemaRevision).toBe('AddTicketTypeCompatibilityWriter1785542400000');
+          const { results, evidence, writerMode, schemaRevision } =
+            await runAllChecks('legacy');
+          expect(results).toHaveLength(21);
+          expect(hasTicketTypeCutoverViolations(results)).toBe(false);
+          expect(writerMode).toBe('legacy');
+          expect(schemaRevision).toBe('AddTicketTypeCompatibilityWriter1785542400000');
 
-        const parsed = parseTicketTypeCutoverEvidence(evidence);
-        expect(parsed.complete).toBe(true);
-        expect(parsed.categoryCount).toBe(17);
-        expect(parsed.opensearchReport.checkedEvents).toBe(2);
-        expect(parsed.opensearchReport.totalDiffs).toBe(0);
-      });
+          const parsed = parseTicketTypeCutoverEvidence(evidence);
+          expect(parsed.complete).toBe(true);
+          expect(parsed.categoryCount).toBe(21);
+          expect(parsed.opensearchReport.checkedEvents).toBe(2);
+          expect(parsed.opensearchReport.totalDiffs).toBe(0);
+        },
+      );
     });
 
     it('ticket_type mode で counter を seed すれば violation 0、未 seed なら missing になる', async () => {
@@ -403,7 +442,7 @@ describeIntegration(
 
         // 未 seed: default + 追加 Type の 2 counter が missing。
         const before = await runAllChecks('ticket_type');
-        expect(count(before.results, 'valkey_counter_missing_in_ticket_type_mode')).toBe(2);
+        expect(count(before.results, 'valkey_counter_missing')).toBe(2);
         expect(hasTicketTypeCutoverViolations(before.results)).toBe(true);
 
         // seed 後: 全 category 0。
@@ -483,6 +522,86 @@ describeIntegration(
       });
     });
 
+    it('legacy mode preflight: stale な legacy counter と未 seed の ticket_type counter を violation にする', async () => {
+      await withHarness(
+        async ({ valkey, pgClient, seedEvent, seedLegacyCounter, runAllChecks, index }) => {
+          const { eventId } = await seedEvent([5]);
+          const client = await pgClient();
+          try {
+            await rebuildInventoryProjection(client, opensearch, { index });
+          } finally {
+            client.release();
+          }
+
+          // rollback 後に legacy counter が 0 のまま残った状態を模す
+          // （DB の remaining は 5。counter 0 のままだと購入 API が sold_out で誤拒否する）。
+          await seedLegacyCounter(eventId);
+          await valkey.set(eventCounterKey(eventId), '0');
+
+          const { results } = await runAllChecks('legacy');
+          expect(count(results, 'valkey_legacy_counter_remaining_mismatch')).toBe(1);
+          expect(count(results, 'valkey_legacy_counter_value_invalid')).toBe(0);
+          // 切替先 ticket_type counter の未 seed も legacy mode preflight で violation になる。
+          expect(count(results, 'valkey_counter_missing')).toBe(1);
+          expect(hasTicketTypeCutoverViolations(results)).toBe(true);
+        },
+      );
+    });
+
+    it('DB 差分注入: 在庫行の無い非 default Ticket Type を ticket_type_without_ticket_type_inventory として検出する', async () => {
+      await withHarness(async ({ dataSource, pgClient, seedEvent, runAllChecks, index }) => {
+        const { eventId } = await seedEvent([5]);
+        const client = await pgClient();
+        try {
+          await rebuildInventoryProjection(client, opensearch, { index });
+        } finally {
+          client.release();
+        }
+
+        // ticket_types 定義だけ追加し、対応する ticket_type_inventory 行を作らない
+        // （この Type への購入は在庫行 UPDATE 0 件で API 500 になる）。
+        await dataSource.query(
+          `INSERT INTO ticket_types (id, event_id, name, is_default)
+           VALUES ($1, $2, 'orphan-type', false)`,
+          [randomUUID(), eventId],
+        );
+
+        const { results } = await runAllChecks('legacy');
+        expect(count(results, 'ticket_type_without_ticket_type_inventory')).toBe(1);
+        expect(hasTicketTypeCutoverViolations(results)).toBe(true);
+      });
+    });
+
+    it('schema 差分注入: 無効化された compatibility trigger と改変された requestId index を検出する', async () => {
+      await withHarness(async ({ dataSource, pgClient, seedEvent, runAllChecks, index }) => {
+        await seedEvent([5]);
+        const client = await pgClient();
+        try {
+          await rebuildInventoryProjection(client, opensearch, { index });
+        } finally {
+          client.release();
+        }
+
+        // migration 履歴上は適用済みのまま、writer guard trigger を後から無効化し、
+        // 統合 requestId unique index を #376 以前の status 付き partial index に戻す
+        // （schemaRevision だけでは検出できない drift を模す）。
+        await dataSource.query(
+          `ALTER TABLE ticket_inventory
+           DISABLE TRIGGER inventory_compatibility_guard_legacy_write_trg`,
+        );
+        await dataSource.query('DROP INDEX purchases_request_id_uq');
+        await dataSource.query(
+          `CREATE UNIQUE INDEX purchases_request_id_uq
+           ON purchases (buyer_id, event_id, request_id)
+           WHERE request_id IS NOT NULL AND status = 'confirmed'`,
+        );
+
+        const { results } = await runAllChecks('legacy');
+        expect(count(results, 'compatibility_object_missing_or_invalid')).toBe(2);
+        expect(hasTicketTypeCutoverViolations(results)).toBe(true);
+      });
+    });
+
     it('Valkey 差分注入: 未紐付け counter / 値 mismatch / 不正値 / revision 欠落を検出する', async () => {
       await withHarness(async ({ dataSource, valkey, pgClient, seedEvent, seedCounters, runAllChecks, index }) => {
         const { eventId, typeIds } = await seedEvent([5, 3]);
@@ -508,7 +627,7 @@ describeIntegration(
         expect(count(results, 'valkey_counter_remaining_mismatch')).toBe(1);
         expect(count(results, 'valkey_counter_value_invalid')).toBe(1);
         expect(count(results, 'valkey_revision_missing_or_invalid')).toBe(1);
-        expect(count(results, 'valkey_counter_missing_in_ticket_type_mode')).toBe(0);
+        expect(count(results, 'valkey_counter_missing')).toBe(0);
       });
     });
 

@@ -14,29 +14,35 @@ import type { Client as OpenSearchClient } from '@opensearch-project/opensearch'
 import { POSTGRES_INT4_MAX } from '../common/validation-primitives';
 import type { InventoryWriterMode } from '../database/inventory-writer-control';
 import {
+  eventCounterKey,
   parseTicketTypeCounterKey,
   TICKET_TYPE_COUNTER_SCAN_PATTERN,
   ticketTypeCounterKey,
   ticketTypeCounterRevisionKey,
 } from '../cache/inventory-cache.keys';
 import {
+  RECONCILIATION_CATEGORIES,
+  ReconciliationCategory,
+  ReconciliationFinding,
   reconcileInventoryProjection,
   ReconciliationReport,
 } from '../search/inventory-reconciliation.service';
 import { DEFAULT_PAGE_SIZE, SqlClient } from '../search/inventory-projection-source';
 import { EVENTS_INDEX } from '../search/events-projection.store';
 
-// category は Gate B が検査する差分の有限集合です（合計 17）。
-// - DB 未紐付け・在庫差分: 9
+// category は Gate B が検査する差分の有限集合です（合計 21）。
+// - DB 未紐付け・在庫差分: 10
 // - control state: 2
-// - Valkey counter / revision 差分: 5
+// - compatibility schema object（#376 の trigger / index の実在・有効性）: 1
+// - Valkey counter / revision 差分（Ticket Type 5 + legacy Event 2）: 7
 // - OpenSearch projection 差分: 1
 export const TICKET_TYPE_CUTOVER_READINESS_CATEGORIES = [
-  // --- DB 未紐付け・在庫差分（9） ---
+  // --- DB 未紐付け・在庫差分（10） ---
   'event_without_exactly_one_default',
   'event_without_legacy_inventory',
   'legacy_inventory_without_default_ticket_type_inventory',
   'ticket_type_inventory_without_ticket_type',
+  'ticket_type_without_ticket_type_inventory',
   'purchase_without_ticket_type',
   'purchase_ticket_type_event_mismatch',
   'legacy_aggregate_total_mismatch',
@@ -45,12 +51,16 @@ export const TICKET_TYPE_CUTOVER_READINESS_CATEGORIES = [
   // --- control state（2） ---
   'writer_control_state_missing_or_invalid',
   'writer_control_mode_mismatch',
-  // --- Valkey counter / revision 差分（5） ---
-  'valkey_counter_missing_in_ticket_type_mode',
+  // --- compatibility schema object（1） ---
+  'compatibility_object_missing_or_invalid',
+  // --- Valkey counter / revision 差分（7） ---
+  'valkey_counter_missing',
   'valkey_counter_without_inventory_row',
   'valkey_counter_value_invalid',
   'valkey_counter_remaining_mismatch',
   'valkey_revision_missing_or_invalid',
+  'valkey_legacy_counter_value_invalid',
+  'valkey_legacy_counter_remaining_mismatch',
   // --- OpenSearch projection 差分（1） ---
   'opensearch_projection_diff',
 ] as const;
@@ -164,6 +174,19 @@ violations AS (
 
   UNION ALL
 
+  -- 逆方向: Ticket Type 定義はあるのに在庫行が無い（非 default を含む）。この状態の Type へ
+  -- 購入が来ると在庫行 UPDATE が 0 件になり API が 500 を返すため、mode に関係なく violation。
+  SELECT
+    'ticket_type_without_ticket_type_inventory',
+    count(*)::bigint
+  FROM public.ticket_types tt
+  LEFT JOIN public.ticket_type_inventory shadow
+    ON shadow.event_id = tt.event_id
+   AND shadow.ticket_type_id = tt.id
+  WHERE shadow.ticket_type_id IS NULL
+
+  UNION ALL
+
   SELECT
     'purchase_without_ticket_type',
     count(*)::bigint
@@ -247,6 +270,63 @@ violations AS (
       WHERE singleton
         AND writer_mode IS DISTINCT FROM (SELECT mode FROM expected)
     )
+
+  UNION ALL
+
+  -- #376 の compatibility object が「migration 履歴上は適用済み」でも、後から
+  -- ALTER TABLE ... DISABLE TRIGGER 等で無効化されていれば writer guard / mirror は働かない。
+  -- schemaRevision（migration 名）だけでは検出できないため、pg_catalog から
+  -- trigger の実在と tgenabled = 'O'（origin で有効。既定状態）、および統合 requestId
+  -- unique index の実在・定義（status 条件を含まない #376 の形）を直接検査する。
+  SELECT
+    'compatibility_object_missing_or_invalid',
+    (
+      SELECT count(*)::bigint
+      FROM (VALUES
+        ('events', 'inventory_compatibility_mark_event_delete_before_trg'),
+        ('ticket_inventory', 'inventory_compatibility_fence_legacy_statement_trg'),
+        ('ticket_inventory', 'inventory_compatibility_guard_legacy_write_trg'),
+        ('ticket_inventory', 'inventory_compatibility_guard_legacy_delete_trg'),
+        ('ticket_inventory', 'inventory_compatibility_reject_legacy_truncate_trg'),
+        ('ticket_inventory', 'ticket_inventory_ticket_type_expand_sync_trg'),
+        ('ticket_type_inventory', 'inventory_compatibility_fence_ticket_type_statement_trg'),
+        ('ticket_type_inventory', 'inventory_compatibility_guard_ticket_type_write_trg'),
+        ('ticket_type_inventory', 'inventory_compatibility_guard_ticket_type_delete_trg'),
+        ('ticket_type_inventory', 'inventory_compatibility_reject_ticket_type_truncate_trg'),
+        ('ticket_type_inventory', 'inventory_compatibility_sync_ticket_type_to_legacy_trg'),
+        ('ticket_types', 'inventory_compatibility_guard_ticket_type_definition_delete_trg'),
+        -- #376 の CREATE TRIGGER 名は 66 文字のため、PostgreSQL の NAMEDATALEN 制限で
+        -- catalog 上は 63 文字に切り詰められる。ここでは catalog 上の実名で照合する。
+        ('ticket_types', 'inventory_compatibility_reject_ticket_type_definition_truncate_')
+      ) AS required(table_name, trigger_name)
+      LEFT JOIN (
+        SELECT c.relname AS table_name, t.tgname AS trigger_name
+        FROM pg_catalog.pg_trigger t
+        JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND NOT t.tgisinternal
+          AND t.tgenabled = 'O'
+      ) active USING (table_name, trigger_name)
+      WHERE active.trigger_name IS NULL
+    )
+    + CASE WHEN EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_index i
+        JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
+        JOIN pg_catalog.pg_class tc ON tc.oid = i.indrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = tc.relnamespace
+        WHERE n.nspname = 'public'
+          AND tc.relname = 'purchases'
+          AND ic.relname = 'purchases_request_id_uq'
+          AND i.indisunique
+          AND i.indisvalid
+          AND i.indisready
+          AND i.indislive
+          AND pg_get_indexdef(i.indexrelid) LIKE '%(buyer_id, event_id, request_id)%'
+          AND pg_get_indexdef(i.indexrelid) LIKE '%request_id IS NOT NULL%'
+          AND pg_get_indexdef(i.indexrelid) NOT LIKE '%status%'
+      ) THEN 0::bigint ELSE 1::bigint END
 )
 SELECT category, violation_count::text
 FROM violations
@@ -259,6 +339,7 @@ const DATABASE_CATEGORIES: readonly TicketTypeCutoverReadinessCategory[] = [
   'event_without_legacy_inventory',
   'legacy_inventory_without_default_ticket_type_inventory',
   'ticket_type_inventory_without_ticket_type',
+  'ticket_type_without_ticket_type_inventory',
   'purchase_without_ticket_type',
   'purchase_ticket_type_event_mismatch',
   'legacy_aggregate_total_mismatch',
@@ -266,14 +347,17 @@ const DATABASE_CATEGORIES: readonly TicketTypeCutoverReadinessCategory[] = [
   'non_default_ticket_type_inventory_in_legacy_mode',
   'writer_control_state_missing_or_invalid',
   'writer_control_mode_mismatch',
+  'compatibility_object_missing_or_invalid',
 ];
 
 const VALKEY_CATEGORIES: readonly TicketTypeCutoverReadinessCategory[] = [
-  'valkey_counter_missing_in_ticket_type_mode',
+  'valkey_counter_missing',
   'valkey_counter_without_inventory_row',
   'valkey_counter_value_invalid',
   'valkey_counter_remaining_mismatch',
   'valkey_revision_missing_or_invalid',
+  'valkey_legacy_counter_value_invalid',
+  'valkey_legacy_counter_remaining_mismatch',
 ];
 
 export interface CutoverDatabaseCheck {
@@ -351,7 +435,8 @@ export interface CutoverValkeyOptions {
 
 const NON_NEGATIVE_INTEGER = /^(0|[1-9]\d*)$/;
 
-// checkCutoverValkey は Ticket Type counter / revision と DB 在庫行の差分を検査します。
+// checkCutoverValkey は Ticket Type counter / revision と legacy Event counter を
+// DB 在庫行（ticket_type_inventory / ticket_inventory）と突き合わせて検査します。
 // DB は呼び出し側 transaction の snapshot から読み、Valkey は read-only コマンド
 // （GET / SCAN）だけを使います。Valkey エラーは fail-open にせず throw します
 // （購入 API と異なり、checker は誤って green を返してはいけない）。
@@ -410,11 +495,11 @@ export async function checkCutoverValkey(
         ticketTypeCounterKey(row.event_id, row.ticket_type_id),
       );
       if (counterRaw === null) {
-        // legacy mode では counter 未 seed が正常（前段フィルタは fail-open で DB 判定に流れる）。
-        // ticket_type mode では seed 漏れ＝切替後に誤拒否/素通りの温床なので violation。
-        if (expectedWriterMode === 'ticket_type') {
-          bump('valkey_counter_missing_in_ticket_type_mode');
-        }
+        // Gate B は activation 直前 preflight（expect-mode legacy）と activation 後
+        // postflight（expect-mode ticket_type）の両方で使う。preflight 時点で
+        // ticket_type counter が全件 seed 済みでなければ activation してはいけないため、
+        // 未 seed は mode に関係なく violation とする（切替後の誤拒否/素通りの温床）。
+        bump('valkey_counter_missing');
         continue;
       }
 
@@ -498,6 +583,66 @@ export async function checkCutoverValkey(
       }
     }
   } while (cursor !== '0');
+
+  // Pass 3: legacy mode で実際に使われる Event 単位 counter（inventory:<eventId>）を
+  // ticket_inventory と突き合わせる。counter 不在は購入 API が fail-open（unknown）で
+  // DB 判定へ流すため violation にしない。一方、値が存在して DB と乖離している場合
+  // （rollback 後の stale counter 等）は、在庫があるのに前段フィルタが sold_out で
+  // 即時拒否する実害があるため、expect-mode に依らず violation とする
+  // （preflight before rollback では「stale legacy counter を削除/再 seed してから
+  // 戻す」ことを強制する）。version キー（inventory:<eventId>:v）の不在は
+  // getCounterVersion が '0' として扱う正常状態なので検査しない。
+  let lastLegacyEventId: string | null = null;
+  for (;;) {
+    const page: {
+      rows: {
+        event_id: string;
+        total_quantity: number;
+        remaining_quantity: number;
+      }[];
+      rowCount: number | null;
+    } = await sql.query<{
+      event_id: string;
+      total_quantity: number;
+      remaining_quantity: number;
+    }>(
+      `
+        SELECT event_id::text AS event_id,
+               total_quantity,
+               remaining_quantity
+        FROM public.ticket_inventory
+        WHERE ($1::uuid IS NULL OR event_id > $1::uuid)
+        ORDER BY event_id ASC
+        LIMIT $2
+      `,
+      [lastLegacyEventId, pageSize],
+    );
+    if (page.rows.length === 0) {
+      break;
+    }
+
+    for (const row of page.rows) {
+      const counterRaw = await valkey.get(eventCounterKey(row.event_id));
+      if (counterRaw === null) {
+        continue;
+      }
+      if (
+        !NON_NEGATIVE_INTEGER.test(counterRaw) ||
+        !Number.isSafeInteger(Number(counterRaw)) ||
+        Number(counterRaw) > POSTGRES_INT4_MAX ||
+        Number(counterRaw) > row.total_quantity
+      ) {
+        bump('valkey_legacy_counter_value_invalid');
+      } else if (Number(counterRaw) !== row.remaining_quantity) {
+        bump('valkey_legacy_counter_remaining_mismatch');
+      }
+    }
+
+    lastLegacyEventId = page.rows[page.rows.length - 1].event_id;
+    if (page.rows.length < pageSize) {
+      break;
+    }
+  }
 
   return VALKEY_CATEGORIES.map((category) => ({
     category,
@@ -721,27 +866,18 @@ export function parseTicketTypeCutoverEvidence(
       `cutover evidence categoryCount mismatch: ${String(candidate.categoryCount)}`,
     );
   }
-  const report = candidate.opensearchReport;
-  if (typeof report !== 'object' || report === null || Array.isArray(report)) {
-    throw new Error('cutover evidence opensearchReport must be an object');
-  }
-  const reportRecord = report as Record<string, unknown>;
-  if (
-    typeof reportRecord.totalDiffs !== 'number' ||
-    !Number.isSafeInteger(reportRecord.totalDiffs) ||
-    reportRecord.totalDiffs < 0
-  ) {
-    throw new Error('cutover evidence opensearchReport.totalDiffs is invalid');
-  }
+  // opensearchReport は ReconciliationReport の必須フィールドすべてを存在・型・整合性まで
+  // 検証する（fail closed）。totalDiffs と index だけの不完全な report を受理しない。
+  const report = parseReconciliationReport(candidate.opensearchReport);
   const projectionResult = results.find(
     (result) => result.category === 'opensearch_projection_diff',
   );
-  if (projectionResult?.violationCount !== reportRecord.totalDiffs) {
+  if (projectionResult?.violationCount !== report.totalDiffs) {
     throw new Error(
       'cutover evidence opensearch category does not match opensearchReport.totalDiffs',
     );
   }
-  if (reportRecord.index !== candidate.opensearchIndex) {
+  if (report.index !== candidate.opensearchIndex) {
     throw new Error(
       'cutover evidence opensearchIndex does not match opensearchReport.index',
     );
@@ -759,8 +895,130 @@ export function parseTicketTypeCutoverEvidence(
     opensearchIndex: candidate.opensearchIndex,
     results,
     categoryCount: results.length,
-    opensearchReport: report as unknown as ReconciliationReport,
+    opensearchReport: report,
     complete: true,
+  };
+}
+
+// parseReconciliationReport は #377 の ReconciliationReport を fail closed に検証します。
+// - counts は RECONCILIATION_CATEGORIES と 1:1（欠落・追加を許さない）で、各値は
+//   非負の safe integer。
+// - totalDiffs は counts の合計と一致し、hasDiff は totalDiffs > 0 と一致する。
+// - findings は bounded なサンプル配列で、各 entry は eventId / category（既知の
+//   category のみ）/ 任意の ticketTypeId を持つ。
+function parseReconciliationReport(value: unknown): ReconciliationReport {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('cutover evidence opensearchReport must be an object');
+  }
+  const record = value as Record<string, unknown>;
+
+  if (typeof record.index !== 'string' || record.index.length === 0) {
+    throw new Error('cutover evidence opensearchReport.index is missing or empty');
+  }
+  const requireCount = (field: 'checkedEvents' | 'checkedDocuments' | 'totalDiffs'): number => {
+    const raw = record[field];
+    if (
+      typeof raw !== 'number' ||
+      !Number.isSafeInteger(raw) ||
+      raw < 0
+    ) {
+      throw new Error(`cutover evidence opensearchReport.${field} is invalid`);
+    }
+    return raw;
+  };
+  const checkedEvents = requireCount('checkedEvents');
+  const checkedDocuments = requireCount('checkedDocuments');
+  const totalDiffs = requireCount('totalDiffs');
+
+  const rawCounts = record.counts;
+  if (
+    typeof rawCounts !== 'object' ||
+    rawCounts === null ||
+    Array.isArray(rawCounts)
+  ) {
+    throw new Error('cutover evidence opensearchReport.counts must be an object');
+  }
+  const countsRecord = rawCounts as Record<string, unknown>;
+  const knownCategories = new Set<string>(RECONCILIATION_CATEGORIES);
+  for (const key of Object.keys(countsRecord)) {
+    if (!knownCategories.has(key)) {
+      throw new Error(
+        `cutover evidence opensearchReport.counts has unexpected category: ${key}`,
+      );
+    }
+  }
+  const counts = {} as Record<ReconciliationCategory, number>;
+  let countsSum = 0;
+  for (const category of RECONCILIATION_CATEGORIES) {
+    const raw = countsRecord[category];
+    if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0) {
+      throw new Error(
+        `cutover evidence opensearchReport.counts.${category} is missing or invalid`,
+      );
+    }
+    counts[category] = raw;
+    countsSum += raw;
+  }
+  if (countsSum !== totalDiffs) {
+    throw new Error(
+      'cutover evidence opensearchReport.totalDiffs does not equal the sum of counts',
+    );
+  }
+
+  if (!Array.isArray(record.findings)) {
+    throw new Error('cutover evidence opensearchReport.findings must be an array');
+  }
+  const findings = record.findings.map((entry): ReconciliationFinding => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new Error(
+        'cutover evidence opensearchReport.findings entries must be objects',
+      );
+    }
+    const finding = entry as Record<string, unknown>;
+    if (typeof finding.eventId !== 'string' || finding.eventId.length === 0) {
+      throw new Error(
+        'cutover evidence opensearchReport finding eventId is missing or empty',
+      );
+    }
+    if (
+      typeof finding.category !== 'string' ||
+      !knownCategories.has(finding.category)
+    ) {
+      throw new Error(
+        `cutover evidence opensearchReport finding category is invalid: ${String(finding.category)}`,
+      );
+    }
+    if (
+      finding.ticketTypeId !== undefined &&
+      (typeof finding.ticketTypeId !== 'string' || finding.ticketTypeId.length === 0)
+    ) {
+      throw new Error(
+        'cutover evidence opensearchReport finding ticketTypeId is invalid',
+      );
+    }
+    return {
+      eventId: finding.eventId,
+      category: finding.category as ReconciliationCategory,
+      ...(finding.ticketTypeId !== undefined
+        ? { ticketTypeId: finding.ticketTypeId as string }
+        : {}),
+    };
+  });
+
+  if (typeof record.hasDiff !== 'boolean' || record.hasDiff !== totalDiffs > 0) {
+    throw new Error(
+      'cutover evidence opensearchReport.hasDiff does not match totalDiffs',
+    );
+  }
+
+  return {
+    index: record.index,
+    checkedEvents,
+    checkedDocuments,
+    counts,
+    totalDiffs,
+    findings,
+    hasDiff: record.hasDiff,
   };
 }
 
