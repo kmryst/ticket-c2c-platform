@@ -23,10 +23,14 @@ import {
   checkCutoverDatabase,
   checkCutoverOpenSearch,
   checkCutoverValkey,
+  CutoverCheckPhase,
   hasTicketTypeCutoverViolations,
   serializeTicketTypeCutoverEvidence,
   TicketTypeCutoverReadinessResult,
 } from './ticket-type-cutover-readiness';
+
+const USAGE =
+  'usage: --expect-mode <legacy|ticket_type> --phase <preflight|postflight> [--page-size N] [--max-findings N]';
 
 // parseStringOption は `--name=value` / `--name value` 形式の文字列オプションを読みます。
 function parseStringOption(argv: string[], name: string): string | undefined {
@@ -45,9 +49,18 @@ function parseStringOption(argv: string[], name: string): string | undefined {
 function parseExpectMode(argv: string[]): InventoryWriterMode {
   const raw = parseStringOption(argv, 'expect-mode');
   if (raw !== 'legacy' && raw !== 'ticket_type') {
-    throw new Error(
-      'usage: --expect-mode <legacy|ticket_type> [--page-size N] [--max-findings N]',
-    );
+    throw new Error(USAGE);
+  }
+  return raw;
+}
+
+// --phase は既定値を持たない必須オプションにする。postflight は他方 namespace の
+// counter 不在・stale を許容する緩和規則なので、暗黙に選ばれてはいけない
+// （fail closed: 局面を明示しない実行は使用エラーで停止する）。
+function parsePhase(argv: string[]): CutoverCheckPhase {
+  const raw = parseStringOption(argv, 'phase');
+  if (raw !== 'preflight' && raw !== 'postflight') {
+    throw new Error(USAGE);
   }
   return raw;
 }
@@ -55,6 +68,7 @@ function parseExpectMode(argv: string[]): InventoryWriterMode {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const expectedWriterMode = parseExpectMode(argv);
+  const checkPhase = parsePhase(argv);
   const pageSize = parseIntOption(argv, 'page-size');
   const maxFindings = parseIntOption(argv, 'max-findings');
 
@@ -69,6 +83,11 @@ async function main(): Promise<void> {
   const valkey = new Redis(valkeyUrl, {
     maxRetriesPerRequest: 2,
     connectTimeout: 5000,
+    // 接続確立後に Valkey が応答不能になった場合の保険。DB 側の statement_timeout は
+    // Valkey への GET 待ちには効かないため、command timeout が無いと REPEATABLE READ
+    // snapshot を掴んだ transaction が無期限に保持され、vacuum horizon の停滞と
+    // DB bloat を招く（timeout 到達時は fail closed に実行エラーで停止する）。
+    commandTimeout: 5000,
     lazyConnect: true,
   });
 
@@ -88,6 +107,12 @@ async function main(): Promise<void> {
       transactionStarted = true;
       await snapshotClient.query("SET LOCAL statement_timeout = '60s'");
       await snapshotClient.query("SET LOCAL lock_timeout = '5s'");
+      // statement_timeout は「クエリ実行中」にしか効かない。Valkey 待ちなどで
+      // transaction が statement 間に留まった場合も DB 側から打ち切れるよう、
+      // idle_in_transaction_session_timeout を同じ桁で設定する（多層防御）。
+      await snapshotClient.query(
+        "SET LOCAL idle_in_transaction_session_timeout = '60s'",
+      );
 
       databaseCheck = await checkCutoverDatabase(
         snapshotClient,
@@ -97,6 +122,7 @@ async function main(): Promise<void> {
         snapshotClient,
         valkey,
         expectedWriterMode,
+        checkPhase,
         { pageSize },
       );
 
@@ -150,6 +176,7 @@ async function main(): Promise<void> {
     ];
     const evidence = serializeTicketTypeCutoverEvidence({
       expectedWriterMode,
+      checkPhase,
       writerMode: databaseCheck.writerMode,
       schemaRevision: databaseCheck.schemaRevision,
       opensearchIndex: EVENTS_INDEX,

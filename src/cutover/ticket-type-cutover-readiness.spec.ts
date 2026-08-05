@@ -117,6 +117,7 @@ function emptyReport(index = 'events'): ReconciliationReport {
 function healthyEvidenceInput() {
   return {
     expectedWriterMode: 'legacy' as const,
+    checkPhase: 'preflight' as const,
     writerMode: 'legacy' as const,
     schemaRevision: 'AddTicketTypeCompatibilityWriter1785542400000',
     opensearchIndex: 'events',
@@ -281,17 +282,19 @@ describe('checkCutoverValkey', () => {
       sqlForRows([row], [legacyRow]),
       fakeValkey(store),
       'ticket_type',
+      'preflight',
     );
     expect(results).toHaveLength(7);
     expect(results.every((r) => r.violationCount === 0)).toBe(true);
   });
 
-  it('Ticket Type counter 未 seed は expect-mode に依らず violation になる', async () => {
+  it('Ticket Type counter 未 seed は preflight では expect-mode に依らず violation になる', async () => {
     for (const mode of ['legacy', 'ticket_type'] as const) {
       const results = await checkCutoverValkey(
         sqlForRows([inventoryRow()]),
         fakeValkey(new Map()),
         mode,
+        'preflight',
       );
       expect(
         results.find((r) => r.category === 'valkey_counter_missing')
@@ -310,11 +313,12 @@ describe('checkCutoverValkey', () => {
       sqlForRows([row], [legacyInventoryRow({ event_id: row.event_id })]),
       fakeValkey(store),
       'legacy',
+      'preflight',
     );
     expect(results.every((r) => r.violationCount === 0)).toBe(true);
   });
 
-  it('legacy Event counter の stale 値 / 不正値を expect-mode に依らず violation にする', async () => {
+  it('legacy Event counter の stale 値 / 不正値を preflight では expect-mode に依らず violation にする', async () => {
     const stale = legacyInventoryRow();
     const invalid = legacyInventoryRow();
     const store = new Map<string, string>([
@@ -328,6 +332,7 @@ describe('checkCutoverValkey', () => {
         sqlForRows([], [stale, invalid]),
         fakeValkey(store),
         mode,
+        'preflight',
       );
       const byCategory = new Map(results.map((r) => [r.category, r.violationCount]));
       expect(byCategory.get('valkey_legacy_counter_remaining_mismatch')).toBe(1);
@@ -344,6 +349,7 @@ describe('checkCutoverValkey', () => {
       sqlForRows([], [row]),
       fakeValkey(store),
       'legacy',
+      'preflight',
     );
     expect(
       results.find((r) => r.category === 'valkey_legacy_counter_value_invalid')
@@ -367,6 +373,7 @@ describe('checkCutoverValkey', () => {
       sqlForRows([mismatch, invalid, noRevision]),
       fakeValkey(store),
       'ticket_type',
+      'preflight',
     );
     const byCategory = new Map(results.map((r) => [r.category, r.violationCount]));
     expect(byCategory.get('valkey_counter_remaining_mismatch')).toBe(1);
@@ -385,6 +392,7 @@ describe('checkCutoverValkey', () => {
       sqlForRows([row]),
       fakeValkey(store),
       'ticket_type',
+      'preflight',
     );
     expect(
       results.find((r) => r.category === 'valkey_counter_value_invalid')
@@ -401,11 +409,77 @@ describe('checkCutoverValkey', () => {
       sqlForRows([]),
       fakeValkey(store),
       'legacy',
+      'preflight',
     );
     expect(
       results.find((r) => r.category === 'valkey_counter_without_inventory_row')
         ?.violationCount,
     ).toBe(2);
+  });
+
+  it('legacy postflight は Ticket Type counter の不在・stale・revision 欠落を許容し、構造的な不正値だけを violation にする', async () => {
+    // rollback 後の平常運用: legacy 経路の購入は forward bridge で DB 行だけを進め、
+    // Ticket Type counter を更新しない。不在（削除済み）と stale は正常。
+    const missing = inventoryRow();
+    const stale = inventoryRow();
+    const noRevision = inventoryRow();
+    const invalid = inventoryRow();
+    const store = new Map<string, string>([
+      // remaining 7 に対して 4 のまま（legacy 購入で DB だけ進んだ stale）。
+      [ticketTypeCounterKey(stale.event_id as string, stale.ticket_type_id as string), '4'],
+      [ticketTypeCounterRevisionKey(stale.event_id as string, stale.ticket_type_id as string), '1'],
+      [ticketTypeCounterKey(noRevision.event_id as string, noRevision.ticket_type_id as string), '7'],
+      // total (10) を超える値は休止中 namespace でも構造的に不正。
+      [ticketTypeCounterKey(invalid.event_id as string, invalid.ticket_type_id as string), '11'],
+      [ticketTypeCounterRevisionKey(invalid.event_id as string, invalid.ticket_type_id as string), '1'],
+    ]);
+    const results = await checkCutoverValkey(
+      sqlForRows([missing, stale, noRevision, invalid]),
+      fakeValkey(store),
+      'legacy',
+      'postflight',
+    );
+    const byCategory = new Map(results.map((r) => [r.category, r.violationCount]));
+    expect(byCategory.get('valkey_counter_missing')).toBe(0);
+    expect(byCategory.get('valkey_counter_remaining_mismatch')).toBe(0);
+    expect(byCategory.get('valkey_revision_missing_or_invalid')).toBe(0);
+    expect(byCategory.get('valkey_counter_value_invalid')).toBe(1);
+  });
+
+  it('ticket_type postflight は stale な legacy Event counter を許容し、Ticket Type namespace は厳密なまま', async () => {
+    // activation 後の平常運用: ticket_type 経路の購入は reverse mirror で DB の
+    // legacy 集計行だけを進め、Event counter を更新しない。stale は正常。
+    const row = inventoryRow();
+    const legacyStale = legacyInventoryRow();
+    const legacyInvalid = legacyInventoryRow();
+    const store = new Map<string, string>([
+      // remaining 7 に対して 5 のまま（activation 後の購入 smoke で stale になった counter）。
+      [eventCounterKey(legacyStale.event_id as string), '5'],
+      // total (10) を超える値は緩和中でも構造的に不正。
+      [eventCounterKey(legacyInvalid.event_id as string), '11'],
+    ]);
+    const results = await checkCutoverValkey(
+      sqlForRows([row], [legacyStale, legacyInvalid]),
+      fakeValkey(store),
+      'ticket_type',
+      'postflight',
+    );
+    const byCategory = new Map(results.map((r) => [r.category, r.violationCount]));
+    expect(byCategory.get('valkey_legacy_counter_remaining_mismatch')).toBe(0);
+    expect(byCategory.get('valkey_legacy_counter_value_invalid')).toBe(1);
+    // 現 mode（ticket_type）側の namespace は postflight でも厳密（未 seed は violation）。
+    expect(byCategory.get('valkey_counter_missing')).toBe(1);
+  });
+
+  it('不正な phase は throw する', async () => {
+    await expect(
+      checkCutoverValkey(
+        sqlForRows([]),
+        fakeValkey(new Map()),
+        'legacy',
+        'smoke' as never,
+      ),
+    ).rejects.toThrow('check phase');
   });
 });
 
@@ -508,6 +582,38 @@ describe('serialize / parse evidence', () => {
         JSON.stringify({ ...base, evidenceVersion: 2 }),
       ),
     ).toThrow(/version mismatch/);
+  });
+
+  it('serialize / parse は checkPhase の欠落・不正を拒否する', () => {
+    expect(() =>
+      serializeTicketTypeCutoverEvidence({
+        ...healthyEvidenceInput(),
+        checkPhase: 'smoke' as never,
+      }),
+    ).toThrow(/checkPhase/);
+
+    const base = JSON.parse(
+      serializeTicketTypeCutoverEvidence(healthyEvidenceInput()),
+    ) as Record<string, unknown>;
+    expect(base.checkPhase).toBe('preflight');
+    const missing = { ...base };
+    delete missing.checkPhase;
+    expect(() =>
+      parseTicketTypeCutoverEvidence(JSON.stringify(missing)),
+    ).toThrow(/checkPhase/);
+    expect(() =>
+      parseTicketTypeCutoverEvidence(
+        JSON.stringify({ ...base, checkPhase: 'smoke' }),
+      ),
+    ).toThrow(/checkPhase/);
+    // postflight も有効値として roundtrip する。
+    const postflight = parseTicketTypeCutoverEvidence(
+      serializeTicketTypeCutoverEvidence({
+        ...healthyEvidenceInput(),
+        checkPhase: 'postflight',
+      }),
+    );
+    expect(postflight.checkPhase).toBe('postflight');
   });
 
   it('parse は category 欠落・追加・重複と count 不正を拒否する', () => {

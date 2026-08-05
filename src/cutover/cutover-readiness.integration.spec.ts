@@ -21,6 +21,11 @@ import {
   ticketTypeCounterKey,
   ticketTypeCounterRevisionKey,
 } from '../cache/inventory-cache.keys';
+import { InventoryCacheService } from '../cache/inventory-cache.service';
+import { DatabaseService } from '../database/database.service';
+import { DomainEventsService } from '../messaging/domain-events.service';
+import { PurchasesService } from '../purchases/purchases.service';
+import { TicketTypeResolverService } from '../purchases/ticket-type-resolver.service';
 import { createTestOpenSearchClient } from '../opensearch';
 import { ensureEventsIndex } from '../search/events-projection.store';
 import { rebuildInventoryProjection } from '../search/inventory-rebuild.service';
@@ -28,6 +33,7 @@ import {
   checkCutoverDatabase,
   checkCutoverOpenSearch,
   checkCutoverValkey,
+  CutoverCheckPhase,
   hasTicketTypeCutoverViolations,
   parseTicketTypeCutoverEvidence,
   serializeTicketTypeCutoverEvidence,
@@ -78,8 +84,14 @@ interface HarnessCtx {
   }>;
   seedCounters: (eventId: string, typeIds: string[]) => Promise<void>;
   seedLegacyCounter: (eventId: string) => Promise<void>;
+  // purchases / resolver / seedUser は「実際の購入 API で counter を更新してから
+  // checker を走らせる」round-trip 検証に使う（#389 統合テストと同じ実 service 構成）。
+  purchases: PurchasesService;
+  resolver: TicketTypeResolverService;
+  seedUser: () => Promise<string>;
   runAllChecks: (
     expectedMode: 'legacy' | 'ticket_type',
+    phase?: CutoverCheckPhase,
   ) => Promise<{
     results: TicketTypeCutoverReadinessResult[];
     evidence: string;
@@ -127,6 +139,10 @@ describeIntegration(
         connectTimeout: 5000,
       });
       await valkey.ping();
+
+      // round-trip 検証で使う実 PurchasesService（InventoryCacheService）は
+      // VALKEY_URL を環境変数から読むため、test 用 endpoint を指しておく。
+      process.env.VALKEY_URL = TEST_VALKEY_URL;
     });
 
     afterAll(async () => {
@@ -175,12 +191,35 @@ describeIntegration(
         migrationsTableName: 'typeorm_migrations',
       });
       const pool = new Pool({ connectionString: databaseUrl.toString(), max: 10 });
+      // 実 PurchasesService 構成（#389 統合テストと同じ配線）。checker 検証の前提となる
+      // counter 更新を、seed ヘルパーではなく実際の購入経路で発生させるために使う。
+      const cache = new InventoryCacheService();
 
       let outcome: { ok: true; value: T } | { ok: false; error: unknown };
       try {
         await dataSource.initialize();
         await dataSource.runMigrations({ transaction: 'each' });
         await ensureEventsIndex(opensearch, index);
+
+        const database = {
+          connect: () => pool.connect(),
+        } as unknown as DatabaseService;
+        const resolver = new TicketTypeResolverService(database);
+        const purchases = new PurchasesService(
+          database,
+          cache,
+          { publish: jest.fn(async () => undefined) } as unknown as DomainEventsService,
+          resolver,
+        );
+
+        const seedUser = async (): Promise<string> => {
+          const userId = randomUUID();
+          await dataSource.query(
+            `INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'hash')`,
+            [userId, `cutover-${randomUUID()}@example.com`],
+          );
+          return userId;
+        };
 
         const seedEvent = async (
           perType: number[],
@@ -271,7 +310,10 @@ describeIntegration(
           );
         };
 
-        const runAllChecks = async (expectedMode: 'legacy' | 'ticket_type') => {
+        const runAllChecks = async (
+          expectedMode: 'legacy' | 'ticket_type',
+          phase: CutoverCheckPhase = 'preflight',
+        ) => {
           const snapshotClient = await pool.connect();
           let databaseCheck: Awaited<ReturnType<typeof checkCutoverDatabase>>;
           let valkeyResults: TicketTypeCutoverReadinessResult[];
@@ -282,11 +324,15 @@ describeIntegration(
             );
             await snapshotClient.query("SET LOCAL statement_timeout = '60s'");
             await snapshotClient.query("SET LOCAL lock_timeout = '5s'");
+            await snapshotClient.query(
+              "SET LOCAL idle_in_transaction_session_timeout = '60s'",
+            );
             databaseCheck = await checkCutoverDatabase(snapshotClient, expectedMode);
             valkeyResults = await checkCutoverValkey(
               snapshotClient,
               valkey,
               expectedMode,
+              phase,
               { pageSize: 2 },
             );
             await snapshotClient.query('COMMIT');
@@ -319,6 +365,7 @@ describeIntegration(
               ? ''
               : serializeTicketTypeCutoverEvidence({
                   expectedWriterMode: expectedMode,
+                  checkPhase: phase,
                   writerMode: databaseCheck.writerMode,
                   schemaRevision: databaseCheck.schemaRevision,
                   opensearchIndex: index,
@@ -342,6 +389,9 @@ describeIntegration(
           seedEvent,
           seedCounters,
           seedLegacyCounter,
+          purchases,
+          resolver,
+          seedUser,
           runAllChecks,
         });
         outcome = { ok: true, value };
@@ -357,6 +407,7 @@ describeIntegration(
         await opensearch.indices.delete({ index, ignore_unavailable: true } as never);
       });
       await runCleanupStep(cleanupErrors, () => flushInventoryCounterKeys());
+      await runCleanupStep(cleanupErrors, () => cache.onModuleDestroy());
       await runCleanupStep(cleanupErrors, () => pool.end());
       await runCleanupStep(cleanupErrors, async () => {
         if (dataSource.isInitialized) await dataSource.destroy();
@@ -600,6 +651,172 @@ describeIntegration(
         expect(count(results, 'compatibility_object_missing_or_invalid')).toBe(2);
         expect(hasTicketTypeCutoverViolations(results)).toBe(true);
       });
+    });
+
+    it('schema 差分注入: 同名 trigger の関数本体 no-op 差し替えと狭められた requestId index predicate を検出する', async () => {
+      await withHarness(async ({ dataSource, pgClient, seedEvent, runAllChecks, index }) => {
+        await seedEvent([5]);
+        const client = await pgClient();
+        try {
+          await rebuildInventoryProjection(client, opensearch, { index });
+        } finally {
+          client.release();
+        }
+
+        // 1) trigger の名前・対象 table・tgenabled はそのままに、関数本体だけを no-op に
+        //    差し替える（配線検査だけでは PASS してしまう false-green の温床。
+        //    ADR-0029 の「function 本文を exact hash で識別する」契約の検証）。
+        await dataSource.query(`
+          CREATE OR REPLACE FUNCTION inventory_compatibility_guard_legacy_write()
+          RETURNS trigger
+          LANGUAGE plpgsql
+          SET search_path = pg_catalog, public, pg_temp
+          AS $$
+          BEGIN
+            RETURN NEW;
+          END
+          $$
+        `);
+        // 2) requestId unique index を「#376 の predicate を部分文字列として含む」狭い
+        //    predicate に差し替える（LIKE 比較では素通りする形。実質 index が効かない）。
+        await dataSource.query('DROP INDEX purchases_request_id_uq');
+        await dataSource.query(`
+          CREATE UNIQUE INDEX purchases_request_id_uq
+          ON purchases (buyer_id, event_id, request_id)
+          WHERE request_id IS NOT NULL AND false
+        `);
+
+        const { results } = await runAllChecks('legacy');
+        expect(count(results, 'compatibility_object_missing_or_invalid')).toBe(2);
+        expect(hasTicketTypeCutoverViolations(results)).toBe(true);
+      });
+    });
+
+    it('activation → rollback の往復: 実購入 API で counter を更新した後、postflight は緩和規則で green になり preflight は stale を fail closed に検出する', async () => {
+      await withHarness(
+        async ({
+          dataSource,
+          valkey,
+          pgClient,
+          purchases,
+          resolver,
+          seedUser,
+          seedEvent,
+          seedCounters,
+          seedLegacyCounter,
+          runAllChecks,
+          index,
+        }) => {
+          const buyer = await seedUser();
+          const first = await seedEvent([5]);
+          const second = await seedEvent([3]);
+          for (const { eventId, typeIds } of [first, second]) {
+            await seedLegacyCounter(eventId);
+            await seedCounters(eventId, typeIds);
+          }
+          const rebuild = async (): Promise<void> => {
+            const client = await pgClient();
+            try {
+              await rebuildInventoryProjection(client, opensearch, { index });
+            } finally {
+              client.release();
+            }
+          };
+          const legacyDbRemaining = async (): Promise<number> => {
+            const rows = await dataSource.query<
+              Array<{ remaining_quantity: number }>
+            >(
+              `SELECT remaining_quantity FROM ticket_inventory WHERE event_id = $1`,
+              [first.eventId],
+            );
+            return rows[0].remaining_quantity;
+          };
+          await rebuild();
+
+          // activation preflight（legacy 稼働中・両 namespace seed 済み）: green。
+          const activationPre = await runAllChecks('legacy', 'preflight');
+          expect(hasTicketTypeCutoverViolations(activationPre.results)).toBe(false);
+
+          // activation → 実購入 smoke: ticket_type 経路は Ticket Type counter と DB を
+          // 進めるが、legacy Event counter は更新しない。
+          await switchWriterMode(dataSource, 'ticket_type');
+          resolver.invalidate(first.eventId);
+          const activationSmoke = await purchases.createPurchase(
+            first.eventId,
+            buyer,
+            { quantity: 2 },
+          );
+          expect(activationSmoke.status).toBe('confirmed');
+          await rebuild();
+
+          // 前提を実測で固定: DB は 3 まで進み、legacy counter は 5 のまま stale。
+          expect(await legacyDbRemaining()).toBe(3);
+          expect(await valkey.get(eventCounterKey(first.eventId))).toBe('5');
+
+          // activation postflight: stale legacy counter を許容して green。
+          const activationPost = await runAllChecks('ticket_type', 'postflight');
+          expect(hasTicketTypeCutoverViolations(activationPost.results)).toBe(false);
+          const parsedPost = parseTicketTypeCutoverEvidence(activationPost.evidence);
+          expect(parsedPost.checkPhase).toBe('postflight');
+          expect(parsedPost.writerMode).toBe('ticket_type');
+
+          // rollback preflight は同じ状態を fail closed に検出する
+          // （stale legacy counter の削除/再 seed を強制する）。
+          const rollbackPre = await runAllChecks('ticket_type', 'preflight');
+          expect(
+            count(rollbackPre.results, 'valkey_legacy_counter_remaining_mismatch'),
+          ).toBe(1);
+          expect(hasTicketTypeCutoverViolations(rollbackPre.results)).toBe(true);
+
+          // runbook どおり legacy counter を DB 値で再 seed すると rollback preflight は green。
+          await seedLegacyCounter(first.eventId);
+          const rollbackPreReseeded = await runAllChecks('ticket_type', 'preflight');
+          expect(hasTicketTypeCutoverViolations(rollbackPreReseeded.results)).toBe(false);
+
+          // rollback → 実購入 smoke: legacy 経路は Event counter と DB を進めるが、
+          // Ticket Type counter は更新しない。second Event の Ticket Type counter は
+          // rollback 時の削除を模して消しておく（不在許容の検証）。
+          await switchWriterMode(dataSource, 'legacy');
+          resolver.invalidate(first.eventId);
+          await valkey.del(
+            ticketTypeCounterKey(second.eventId, second.typeIds[0]),
+            ticketTypeCounterRevisionKey(second.eventId, second.typeIds[0]),
+          );
+          const rollbackSmoke = await purchases.createPurchase(
+            first.eventId,
+            buyer,
+            { quantity: 1 },
+          );
+          expect(rollbackSmoke.status).toBe('confirmed');
+          await rebuild();
+
+          // 前提を実測で固定: DB は 2 まで進み、first の Ticket Type counter は
+          // 3 のまま stale で残る（forward bridge は DB 行だけを進める）。
+          expect(await legacyDbRemaining()).toBe(2);
+          expect(
+            await valkey.get(
+              ticketTypeCounterKey(first.eventId, first.typeIds[0]),
+            ),
+          ).toBe('3');
+
+          // rollback postflight: Ticket Type counter の不在（second）と stale（first）を
+          // 許容して green（legacy counter は sync 済みで DB と一致している）。
+          const rollbackPost = await runAllChecks('legacy', 'postflight');
+          expect(hasTicketTypeCutoverViolations(rollbackPost.results)).toBe(false);
+          expect(
+            parseTicketTypeCutoverEvidence(rollbackPost.evidence).checkPhase,
+          ).toBe('postflight');
+
+          // 次の activation preflight は stale（first）と未 seed（second）の
+          // Ticket Type counter を fail closed に検出する（再 seed を強制する）。
+          const nextActivationPre = await runAllChecks('legacy', 'preflight');
+          expect(
+            count(nextActivationPre.results, 'valkey_counter_remaining_mismatch'),
+          ).toBe(1);
+          expect(count(nextActivationPre.results, 'valkey_counter_missing')).toBe(1);
+          expect(hasTicketTypeCutoverViolations(nextActivationPre.results)).toBe(true);
+        },
+      );
     });
 
     it('Valkey 差分注入: 未紐付け counter / 値 mismatch / 不正値 / revision 欠落を検出する', async () => {

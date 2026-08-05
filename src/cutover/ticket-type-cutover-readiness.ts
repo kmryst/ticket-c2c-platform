@@ -33,7 +33,7 @@ import { EVENTS_INDEX } from '../search/events-projection.store';
 // category は Gate B が検査する差分の有限集合です（合計 21）。
 // - DB 未紐付け・在庫差分: 10
 // - control state: 2
-// - compatibility schema object（#376 の trigger / index の実在・有効性）: 1
+// - compatibility schema object（#376 の trigger 配線・関数本文 hash・index 定義）: 1
 // - Valkey counter / revision 差分（Ticket Type 5 + legacy Event 2）: 7
 // - OpenSearch projection 差分: 1
 export const TICKET_TYPE_CUTOVER_READINESS_CATEGORIES = [
@@ -84,6 +84,10 @@ export interface TicketTypeCutoverEvidence {
   evidenceVersion: typeof TICKET_TYPE_CUTOVER_EVIDENCE_VERSION;
   // expectedWriterMode は CLI --expect-mode（この検査が前提とする control state）。
   expectedWriterMode: InventoryWriterMode;
+  // checkPhase は CLI --phase（この検査の局面）。postflight では expect-mode の writer が
+  // 更新しない他方 namespace の counter 不在・stale を許容するため、evidence 単体で
+  // 「どの規則で緑になったか」を判別できるよう必須で記録する。
+  checkPhase: CutoverCheckPhase;
   // writerMode は snapshot 時点の実際の control state。
   writerMode: InventoryWriterMode;
   // schemaRevision は snapshot 時点で最後に適用済みの migration 名（対象 revision の特定）。
@@ -101,6 +105,28 @@ const WRITER_MODES: readonly InventoryWriterMode[] = ['legacy', 'ticket_type'];
 function assertWriterMode(value: unknown, label: string): InventoryWriterMode {
   if (value !== 'legacy' && value !== 'ticket_type') {
     throw new Error(`${label} must be one of ${WRITER_MODES.join(', ')}: ${String(value)}`);
+  }
+  return value;
+}
+
+// CutoverCheckPhase は「expect-mode（現在有効であるべき writer mode）に対して、
+// この検査がどの局面で走っているか」を表します。実購入は現 mode 側の counter しか
+// 更新しない（legacy 経路は Event counter、ticket_type 経路は Ticket Type counter）ため、
+// mode だけでは「切替前の厳密検査」と「切替後の平常運用検査」を区別できません。
+// - 'preflight': これから他方の mode へ切り替える直前の検査。切替先 namespace も
+//   厳密に照合する（未 seed / stale を violation にする）。
+// - 'postflight': expect-mode へ切り替えた後（またはその mode での平常運用中）の検査。
+//   現 mode の writer が更新しない他方 namespace は、不在・stale を許容し、
+//   構造的に不正な値（非整数・total 超過）だけを violation にする。
+export type CutoverCheckPhase = 'preflight' | 'postflight';
+
+const CHECK_PHASES: readonly CutoverCheckPhase[] = ['preflight', 'postflight'];
+
+function assertCheckPhase(value: unknown, label: string): CutoverCheckPhase {
+  if (value !== 'preflight' && value !== 'postflight') {
+    throw new Error(
+      `${label} must be one of ${CHECK_PHASES.join(', ')}: ${String(value)}`,
+    );
   }
   return value;
 }
@@ -274,41 +300,157 @@ violations AS (
   UNION ALL
 
   -- #376 の compatibility object が「migration 履歴上は適用済み」でも、後から
-  -- ALTER TABLE ... DISABLE TRIGGER 等で無効化されていれば writer guard / mirror は働かない。
-  -- schemaRevision（migration 名）だけでは検出できないため、pg_catalog から
-  -- trigger の実在と tgenabled = 'O'（origin で有効。既定状態）、および統合 requestId
-  -- unique index の実在・定義（status 条件を含まない #376 の形）を直接検査する。
+  -- ALTER TABLE ... DISABLE TRIGGER や CREATE OR REPLACE FUNCTION による関数本体の
+  -- no-op 差し替えがあれば writer guard / mirror は働かない。schemaRevision（migration 名）
+  -- だけでは検出できないため、ADR-0029 の「置換前後の function 本文を exact hash で識別する」
+  -- 契約に従い、Gate A（required_bridge_trigger_missing_or_disabled）と同水準で
+  -- trigger の配線（tgfoid / tgtype / 引数・制約属性）、関数属性（plpgsql / volatile /
+  -- search_path 固定等）、関数本文の md5(prosrc)、および統合 requestId unique index の
+  -- key 列と predicate の完全一致を pg_catalog から検査する。
+  -- function_body_md5 は canonical PL/pgSQL prosrc の許可 hash。
+  -- ticket_type_expand_sync_inventory は Gate A と異なり #376 の successor 版
+  -- （nested bounce を止める版）だけを許可する（#336 単体版へ戻っていたら violation）。
   SELECT
     'compatibility_object_missing_or_invalid',
     (
       SELECT count(*)::bigint
       FROM (VALUES
-        ('events', 'inventory_compatibility_mark_event_delete_before_trg'),
-        ('ticket_inventory', 'inventory_compatibility_fence_legacy_statement_trg'),
-        ('ticket_inventory', 'inventory_compatibility_guard_legacy_write_trg'),
-        ('ticket_inventory', 'inventory_compatibility_guard_legacy_delete_trg'),
-        ('ticket_inventory', 'inventory_compatibility_reject_legacy_truncate_trg'),
-        ('ticket_inventory', 'ticket_inventory_ticket_type_expand_sync_trg'),
-        ('ticket_type_inventory', 'inventory_compatibility_fence_ticket_type_statement_trg'),
-        ('ticket_type_inventory', 'inventory_compatibility_guard_ticket_type_write_trg'),
-        ('ticket_type_inventory', 'inventory_compatibility_guard_ticket_type_delete_trg'),
-        ('ticket_type_inventory', 'inventory_compatibility_reject_ticket_type_truncate_trg'),
-        ('ticket_type_inventory', 'inventory_compatibility_sync_ticket_type_to_legacy_trg'),
-        ('ticket_types', 'inventory_compatibility_guard_ticket_type_definition_delete_trg'),
+        (
+          'events'::text,
+          'inventory_compatibility_mark_event_delete_before_trg'::text,
+          'inventory_compatibility_mark_event_delete_cascade'::text,
+          '824fc3b87181f8feae6a582a5ec59591'::text,
+          10::smallint
+        ),
+        (
+          'ticket_inventory',
+          'inventory_compatibility_fence_legacy_statement_trg',
+          'inventory_compatibility_fence_inventory_statement',
+          '64716d53339a3c529079f61c2377b8d0',
+          22
+        ),
+        (
+          'ticket_inventory',
+          'inventory_compatibility_guard_legacy_write_trg',
+          'inventory_compatibility_guard_legacy_write',
+          '3a3971b24bb14e3f5c23138d7688d065',
+          23
+        ),
+        (
+          'ticket_inventory',
+          'inventory_compatibility_guard_legacy_delete_trg',
+          'inventory_compatibility_guard_delete_cascade',
+          '0127f775847e6d28fa6c83d73fa6a1f6',
+          10
+        ),
+        (
+          'ticket_inventory',
+          'inventory_compatibility_reject_legacy_truncate_trg',
+          'inventory_compatibility_reject_truncate',
+          '41793cc2f9cd2451c70505a22df5e225',
+          34
+        ),
+        (
+          'ticket_inventory',
+          'ticket_inventory_ticket_type_expand_sync_trg',
+          'ticket_type_expand_sync_inventory',
+          '56894124575b9c7825a172fa67cf5d86',
+          21
+        ),
+        (
+          'ticket_type_inventory',
+          'inventory_compatibility_fence_ticket_type_statement_trg',
+          'inventory_compatibility_fence_inventory_statement',
+          '64716d53339a3c529079f61c2377b8d0',
+          22
+        ),
+        (
+          'ticket_type_inventory',
+          'inventory_compatibility_guard_ticket_type_write_trg',
+          'inventory_compatibility_guard_ticket_type_write',
+          'c70407a9864736bbf6322356ea55f51f',
+          23
+        ),
+        (
+          'ticket_type_inventory',
+          'inventory_compatibility_guard_ticket_type_delete_trg',
+          'inventory_compatibility_guard_delete_cascade',
+          '0127f775847e6d28fa6c83d73fa6a1f6',
+          10
+        ),
+        (
+          'ticket_type_inventory',
+          'inventory_compatibility_reject_ticket_type_truncate_trg',
+          'inventory_compatibility_reject_truncate',
+          '41793cc2f9cd2451c70505a22df5e225',
+          34
+        ),
+        (
+          'ticket_type_inventory',
+          'inventory_compatibility_sync_ticket_type_to_legacy_trg',
+          'inventory_compatibility_sync_ticket_type_to_legacy',
+          'c347780b856f90d05d68e1800e1d36f1',
+          21
+        ),
+        (
+          'ticket_types',
+          'inventory_compatibility_guard_ticket_type_definition_delete_trg',
+          'inventory_compatibility_guard_delete_cascade',
+          '0127f775847e6d28fa6c83d73fa6a1f6',
+          10
+        ),
         -- #376 の CREATE TRIGGER 名は 66 文字のため、PostgreSQL の NAMEDATALEN 制限で
         -- catalog 上は 63 文字に切り詰められる。ここでは catalog 上の実名で照合する。
-        ('ticket_types', 'inventory_compatibility_reject_ticket_type_definition_truncate_')
-      ) AS required(table_name, trigger_name)
-      LEFT JOIN (
-        SELECT c.relname AS table_name, t.tgname AS trigger_name
-        FROM pg_catalog.pg_trigger t
-        JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
-        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public'
-          AND NOT t.tgisinternal
-          AND t.tgenabled = 'O'
-      ) active USING (table_name, trigger_name)
-      WHERE active.trigger_name IS NULL
+        (
+          'ticket_types',
+          'inventory_compatibility_reject_ticket_type_definition_truncate_',
+          'inventory_compatibility_reject_truncate',
+          '41793cc2f9cd2451c70505a22df5e225',
+          34
+        )
+      ) AS required(
+        table_name,
+        trigger_name,
+        function_name,
+        function_body_md5,
+        trigger_type
+      )
+      LEFT JOIN pg_catalog.pg_trigger database_trigger
+        ON database_trigger.tgrelid =
+          to_regclass('public.' || required.table_name)
+       AND database_trigger.tgname = required.trigger_name
+       AND NOT database_trigger.tgisinternal
+      LEFT JOIN pg_catalog.pg_proc database_function
+        ON database_function.oid = database_trigger.tgfoid
+      WHERE database_trigger.oid IS NULL
+         OR database_trigger.tgenabled <> 'O'
+         OR database_trigger.tgfoid IS DISTINCT FROM
+           to_regprocedure('public.' || required.function_name || '()')
+         OR database_trigger.tgtype IS DISTINCT FROM required.trigger_type
+         OR database_trigger.tgnargs <> 0
+         OR database_trigger.tgqual IS NOT NULL
+         OR database_trigger.tgconstraint <> 0
+         OR database_trigger.tgdeferrable
+         OR database_trigger.tginitdeferred
+         OR database_trigger.tgattr::text <> ''
+         OR database_trigger.tgoldtable IS NOT NULL
+         OR database_trigger.tgnewtable IS NOT NULL
+         OR database_function.oid IS NULL
+         OR database_function.prorettype IS DISTINCT FROM 'trigger'::pg_catalog.regtype
+         OR database_function.pronargs <> 0
+         OR database_function.prokind <> 'f'
+         OR database_function.provolatile <> 'v'
+         OR database_function.proparallel <> 'u'
+         OR database_function.prolang IS DISTINCT FROM (
+           SELECT oid
+           FROM pg_catalog.pg_language
+           WHERE lanname = 'plpgsql'
+         )
+         OR database_function.prosecdef
+         OR database_function.proleakproof
+         OR database_function.proconfig IS DISTINCT FROM
+           ARRAY['search_path=pg_catalog, public, pg_temp']::text[]
+         OR md5(database_function.prosrc) IS DISTINCT FROM required.function_body_md5
     )
     + CASE WHEN EXISTS (
         SELECT 1
@@ -316,6 +458,7 @@ violations AS (
         JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
         JOIN pg_catalog.pg_class tc ON tc.oid = i.indrelid
         JOIN pg_catalog.pg_namespace n ON n.oid = tc.relnamespace
+        JOIN pg_catalog.pg_am am ON am.oid = ic.relam
         WHERE n.nspname = 'public'
           AND tc.relname = 'purchases'
           AND ic.relname = 'purchases_request_id_uq'
@@ -323,9 +466,18 @@ violations AS (
           AND i.indisvalid
           AND i.indisready
           AND i.indislive
-          AND pg_get_indexdef(i.indexrelid) LIKE '%(buyer_id, event_id, request_id)%'
-          AND pg_get_indexdef(i.indexrelid) LIKE '%request_id IS NOT NULL%'
-          AND pg_get_indexdef(i.indexrelid) NOT LIKE '%status%'
+          AND NOT i.indisprimary
+          AND NOT i.indisexclusion
+          AND i.indnatts = i.indnkeyatts
+          AND am.amname = 'btree'
+          -- key 列と predicate は部分文字列比較ではなく、pg_get_indexdef の列単位出力と
+          -- pg_get_expr の完全一致で照合する（狭い predicate への差し替えを検出する）。
+          AND ARRAY(
+            SELECT pg_get_indexdef(i.indexrelid, key_position, true)
+            FROM generate_series(1, i.indnkeyatts) AS key_position
+            ORDER BY key_position
+          ) = ARRAY['buyer_id', 'event_id', 'request_id']::text[]
+          AND pg_get_expr(i.indpred, i.indrelid, true) = 'request_id IS NOT NULL'
       ) THEN 0::bigint ELSE 1::bigint END
 )
 SELECT category, violation_count::text
@@ -440,14 +592,36 @@ const NON_NEGATIVE_INTEGER = /^(0|[1-9]\d*)$/;
 // DB は呼び出し側 transaction の snapshot から読み、Valkey は read-only コマンド
 // （GET / SCAN）だけを使います。Valkey エラーは fail-open にせず throw します
 // （購入 API と異なり、checker は誤って green を返してはいけない）。
+//
+// namespace ごとの厳密さは expect-mode と phase の組で決めます。実購入
+// （purchases.service）は現 mode 側の counter しか更新しないため:
+// - Ticket Type namespace は「legacy mode の postflight（rollback 後の平常運用）」で
+//   だけ緩和する。legacy 経路の購入は forward bridge で ticket_type_inventory の DB 行を
+//   進める一方 Ticket Type counter を更新しないので、不在・stale は正常。
+// - legacy Event namespace は「ticket_type mode の postflight（activation 後の平常運用）」で
+//   だけ緩和する。ticket_type 経路の購入は reverse mirror で ticket_inventory の DB 行を
+//   進める一方 Event counter を更新しないので、stale は正常（不在は元々許容）。
+// preflight（これから他方 mode へ切り替える直前）は従来どおり両 namespace とも厳密で、
+// 切替先の未 seed / stale counter を fail closed に violation とします。
+// 緩和中も構造的に不正な値（非整数・負数・total 超過）は常に violation とします。
 export async function checkCutoverValkey(
   sql: SqlClient,
   valkey: ValkeyReadClient,
   expectedWriterMode: InventoryWriterMode,
+  checkPhase: CutoverCheckPhase,
   options: CutoverValkeyOptions = {},
 ): Promise<TicketTypeCutoverReadinessResult[]> {
   assertWriterMode(expectedWriterMode, 'expected writer mode');
+  assertCheckPhase(checkPhase, 'check phase');
   const pageSize = boundedPageSize(options.pageSize);
+
+  // 現 mode の writer が更新しない側の namespace だけ、postflight で緩和する。
+  const strictTicketTypeNamespace = !(
+    expectedWriterMode === 'legacy' && checkPhase === 'postflight'
+  );
+  const strictLegacyNamespace = !(
+    expectedWriterMode === 'ticket_type' && checkPhase === 'postflight'
+  );
 
   const counts = new Map<TicketTypeCutoverReadinessCategory, number>(
     VALKEY_CATEGORIES.map((category) => [category, 0]),
@@ -495,11 +669,15 @@ export async function checkCutoverValkey(
         ticketTypeCounterKey(row.event_id, row.ticket_type_id),
       );
       if (counterRaw === null) {
-        // Gate B は activation 直前 preflight（expect-mode legacy）と activation 後
-        // postflight（expect-mode ticket_type）の両方で使う。preflight 時点で
-        // ticket_type counter が全件 seed 済みでなければ activation してはいけないため、
-        // 未 seed は mode に関係なく violation とする（切替後の誤拒否/素通りの温床）。
-        bump('valkey_counter_missing');
+        // activation 直前 preflight（expect-mode legacy / preflight）の時点で
+        // ticket_type counter が全件 seed 済みでなければ activation してはいけない
+        // （切替後の誤拒否/素通りの温床）。ticket_type mode の検査（preflight /
+        // postflight とも）でも active namespace の不在は violation とする。
+        // 例外は legacy postflight（rollback 後の平常運用）だけで、legacy 経路の購入は
+        // Ticket Type counter を更新しないため、不在は正常として許容する。
+        if (strictTicketTypeNamespace) {
+          bump('valkey_counter_missing');
+        }
         continue;
       }
 
@@ -509,18 +687,28 @@ export async function checkCutoverValkey(
         Number(counterRaw) > POSTGRES_INT4_MAX ||
         Number(counterRaw) > row.total_quantity
       ) {
-        // 構造的にあり得ない counter 値（非整数・負数・total 超過）は mismatch と区別して数える。
+        // 構造的にあり得ない counter 値（非整数・負数・total 超過）は mismatch と区別して
+        // 数える（緩和中の namespace でも常に violation）。
         bump('valkey_counter_value_invalid');
-      } else if (Number(counterRaw) !== row.remaining_quantity) {
+      } else if (
+        strictTicketTypeNamespace &&
+        Number(counterRaw) !== row.remaining_quantity
+      ) {
+        // legacy postflight では forward bridge が DB 行だけを進めるため、
+        // 値のある counter の stale も正常として数えない。
         bump('valkey_counter_remaining_mismatch');
       }
 
-      const revisionRaw = await valkey.get(
-        ticketTypeCounterRevisionKey(row.event_id, row.ticket_type_id),
-      );
-      if (revisionRaw === null || !NON_NEGATIVE_INTEGER.test(revisionRaw)) {
-        // counter があるのに CAS revision が無い/壊れていると sync が成立しない。
-        bump('valkey_revision_missing_or_invalid');
+      if (strictTicketTypeNamespace) {
+        const revisionRaw = await valkey.get(
+          ticketTypeCounterRevisionKey(row.event_id, row.ticket_type_id),
+        );
+        if (revisionRaw === null || !NON_NEGATIVE_INTEGER.test(revisionRaw)) {
+          // counter があるのに CAS revision が無い/壊れていると sync が成立しない。
+          // 緩和中（legacy postflight）は namespace 自体が休止中なので検査しない
+          // （次の activation preflight が seed し直しを強制する）。
+          bump('valkey_revision_missing_or_invalid');
+        }
       }
     }
 
@@ -586,12 +774,15 @@ export async function checkCutoverValkey(
 
   // Pass 3: legacy mode で実際に使われる Event 単位 counter（inventory:<eventId>）を
   // ticket_inventory と突き合わせる。counter 不在は購入 API が fail-open（unknown）で
-  // DB 判定へ流すため violation にしない。一方、値が存在して DB と乖離している場合
-  // （rollback 後の stale counter 等）は、在庫があるのに前段フィルタが sold_out で
-  // 即時拒否する実害があるため、expect-mode に依らず violation とする
-  // （preflight before rollback では「stale legacy counter を削除/再 seed してから
-  // 戻す」ことを強制する）。version キー（inventory:<eventId>:v）の不在は
-  // getCounterVersion が '0' として扱う正常状態なので検査しない。
+  // DB 判定へ流すため violation にしない。値が存在して DB と乖離している場合
+  // （rollback 直前の stale counter 等）は、在庫があるのに前段フィルタが sold_out で
+  // 即時拒否する実害があるため violation とする（preflight before rollback では
+  // 「stale legacy counter を削除/再 seed してから戻す」ことを強制する）。
+  // 例外は ticket_type postflight（activation 後の平常運用）だけで、ticket_type 経路の
+  // 購入は reverse mirror で DB の legacy 集計行だけを進め Event counter を更新しない
+  // ため、stale は正常として許容する（構造的に不正な値は常に violation）。
+  // version キー（inventory:<eventId>:v）の不在は getCounterVersion が '0' として扱う
+  // 正常状態なので検査しない。
   let lastLegacyEventId: string | null = null;
   for (;;) {
     const page: {
@@ -633,7 +824,10 @@ export async function checkCutoverValkey(
         Number(counterRaw) > row.total_quantity
       ) {
         bump('valkey_legacy_counter_value_invalid');
-      } else if (Number(counterRaw) !== row.remaining_quantity) {
+      } else if (
+        strictLegacyNamespace &&
+        Number(counterRaw) !== row.remaining_quantity
+      ) {
         bump('valkey_legacy_counter_remaining_mismatch');
       }
     }
@@ -742,6 +936,7 @@ export function hasTicketTypeCutoverViolations(
 
 export interface SerializeCutoverEvidenceInput {
   expectedWriterMode: InventoryWriterMode;
+  checkPhase: CutoverCheckPhase;
   writerMode: InventoryWriterMode;
   schemaRevision: string;
   opensearchIndex: string;
@@ -756,6 +951,7 @@ export function serializeTicketTypeCutoverEvidence(
 ): string {
   assertTicketTypeCutoverReadinessComplete(input.results);
   assertWriterMode(input.expectedWriterMode, 'expectedWriterMode');
+  assertCheckPhase(input.checkPhase, 'checkPhase');
   assertWriterMode(input.writerMode, 'writerMode');
   if (
     typeof input.schemaRevision !== 'string' ||
@@ -790,6 +986,7 @@ export function serializeTicketTypeCutoverEvidence(
     evidenceType: TICKET_TYPE_CUTOVER_EVIDENCE_TYPE,
     evidenceVersion: TICKET_TYPE_CUTOVER_EVIDENCE_VERSION,
     expectedWriterMode: input.expectedWriterMode,
+    checkPhase: input.checkPhase,
     writerMode: input.writerMode,
     schemaRevision: input.schemaRevision,
     opensearchIndex: input.opensearchIndex,
@@ -833,6 +1030,7 @@ export function parseTicketTypeCutoverEvidence(
     candidate.expectedWriterMode,
     'expectedWriterMode',
   );
+  const checkPhase = assertCheckPhase(candidate.checkPhase, 'checkPhase');
   const writerMode = assertWriterMode(candidate.writerMode, 'writerMode');
   if (
     typeof candidate.schemaRevision !== 'string' ||
@@ -890,6 +1088,7 @@ export function parseTicketTypeCutoverEvidence(
     evidenceType: TICKET_TYPE_CUTOVER_EVIDENCE_TYPE,
     evidenceVersion: TICKET_TYPE_CUTOVER_EVIDENCE_VERSION,
     expectedWriterMode,
+    checkPhase,
     writerMode,
     schemaRevision: candidate.schemaRevision,
     opensearchIndex: candidate.opensearchIndex,
