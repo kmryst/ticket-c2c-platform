@@ -9,13 +9,21 @@
 // 3. Phase 2: 排他 barrier + migration と同一の table lock 順 + mode UPDATE +
 //    切替前後の DB parity 検査を 1 transaction で実行する。
 //
-// exit code（check-ticket-type-cutover-readiness と同じ規約）:
+// exit code（0 / 2 / 1 は check-ticket-type-cutover-readiness と同じ規約。
+// COMMIT 応答喪失の分岐だけ 3 / 4 を追加する）:
 // - 0: 切替成功（preflight evidence と切替結果を stdout へ 1 行 JSON で出力）
 // - 2: preflight violation あり（切替せず evidence を出力する）
+// - 3: COMMIT の結果が不明だったが、別 connection の再確認で target mode を確認
+//      （切替は有効。postflight `cutover:check --expect-mode <target> --phase postflight`
+//      へ進む）
+// - 4: COMMIT の結果が不明だったが、別 connection の再確認で source mode のまま
+//      と確認（切替は未適用。新しい preflight から再実行できる）
 // - 1: 実行エラー（接続失敗・lock timeout・切替 transaction 内の違反検出・
-//      既に target mode・control state 不明等。切替は永続化されない。
-//      preflight green 後の切替 transaction 失敗時は、構築済み preflight evidence を
-//      stdout へ出力してから停止する）
+//      既に target mode・control state 不明等。COMMIT 前の失敗は ROLLBACK され
+//      切替は永続化されない。COMMIT 結果不明かつ mode 再確認も失敗した場合は、
+//      inventory_writer_control を手動確認するまで次の操作へ進まないこと。
+//      preflight green 後の失敗時は、構築済み preflight evidence を stdout へ
+//      出力してから停止する）
 //
 // この CLI は inventory_writer_control の 1 行 UPDATE 以外に何も書き込みません。
 // Valkey / OpenSearch の seed / reconcile / rebuild は #389 / #377 の primitive と
@@ -99,6 +107,39 @@ async function main(): Promise<void> {
 
     if (outcome.status === 'preflight_violations') {
       process.exitCode = 2;
+      return;
+    }
+
+    if (outcome.status === 'commit_ambiguous') {
+      const switched = outcome.verifiedMode === targetMode;
+      console.log(
+        JSON.stringify({
+          action: 'ticket-type-writer-mode-switch',
+          commitOutcome: 'ambiguous',
+          verifiedMode: outcome.verifiedMode,
+          switched,
+          ...(outcome.result
+            ? {
+                sourceMode: outcome.result.sourceMode,
+                targetMode: outcome.result.targetMode,
+                schemaRevision: outcome.result.schemaRevision,
+                postSwitchDatabaseResults:
+                  outcome.result.postSwitchDatabaseResults,
+              }
+            : {}),
+        }),
+      );
+      if (switched) {
+        console.error(
+          `COMMIT outcome was ambiguous but re-verification confirmed ${targetMode}; the switch IS effective. Proceed to postflight: cutover:check --expect-mode ${targetMode} --phase postflight`,
+        );
+        process.exitCode = 3;
+      } else {
+        console.error(
+          `COMMIT outcome was ambiguous and re-verification shows ${outcome.verifiedMode}; the switch was NOT applied. Re-run after a fresh preflight.`,
+        );
+        process.exitCode = 4;
+      }
       return;
     }
 

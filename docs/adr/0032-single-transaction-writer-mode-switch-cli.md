@@ -60,7 +60,8 @@ COMMIT
 
 - **drain**: `pg_advisory_xact_lock(335, 376)` のexclusive取得は、shared保持中のin-flight writer transaction（`createEvent` / `executePurchaseTransaction`）のcommit / abortを待つことで自然にdrainし、新規writerはbarrier取得段階でblockする。advisory lockの取得待ちにも`lock_timeout`が効くため、drainは10秒で上限される。
 - **table lock順**: #336 / #376 migrationと同一の順序・lock modeを使う。`events`を先頭のgateとして既存transactionを待ち、後段はすべて`NOWAIT`とし、後段lockを先取した想定外writerがいれば`events`を保持したまま待たずに即rollbackする。migrationと同順にすることで、切替とmigrationが同じlock獲得面を持ち、新しいdeadlockパターンを持ち込まない。table lockは、shared barrierを取得しない直接SQL writer・旧binaryに対するdefense-in-depthである（旧binaryのinactive-side writeは#376のstatement fenceも拒否する）。
-- **1 transaction原子性**: mode UPDATEと前後2回のDB parity検査（`checkCutoverDatabase`を切替前=現mode・切替後=target modeの両方で実行）を同一transactionに閉じる。timeout・lock競合・violation検出・接続断のいずれでも例外→ROLLBACKとなり、mode変更は永続化されない。advisory xact lockとtable lockはtransaction終了で自動解放されるため、crash時にlockが残留しない。
+- **1 transaction原子性**: mode UPDATEと前後2回のDB parity検査（`checkCutoverDatabase`を切替前=現mode・切替後=target modeの両方で実行）を同一transactionに閉じる。COMMIT前の失敗（timeout・lock競合・violation検出・COMMIT送信前の接続断）はどれも例外→ROLLBACKとなり、mode変更は永続化されない。advisory xact lockとtable lockはtransaction終了で自動解放されるため、crash時にlockが残留しない。
+- **COMMIT応答喪失（結果不明）の扱い**: 唯一の例外はCOMMIT自体の失敗である。サーバ側でcommitが確定した直後、応答受信前にconnectionが切れた場合、clientは例外を受け取るが切替は既に有効であり、ROLLBACKでは取り消せない。CLIはCOMMITの失敗を他の失敗と区別した機械可読なエラー種別（`commit_outcome_unknown`）として扱い、別connectionで`inventory_writer_control`を再読して3分岐に分離する: (a) target modeを確認できたら「切替有効・postflightへ進む」（exit 3）、(b) source modeのままなら「未適用・新しいpreflightから再実行可能」（exit 4）、(c) 再確認自体が失敗したら実行エラーで停止し、手動確認を要求する（exit 1）。再実行時は「既にtarget mode」の明示エラーになるため、DB自体が中間状態になることはないが、この分岐がないと運用者/workflowが「失敗=source modeのまま」と誤認しpostflightを飛ばすriskがある。
 - **timeout値の根拠**: `lock_timeout = 10s`は#336 / #376 migrationの既存実績値と同一。`statement_timeout = 60s`はPR-1 checkerのDB検査budgetと同一で、同じparity SQLがこのbudget内で完了することをcheckerの運用実績に依拠する（populated環境で超過した場合は再検討トリガー）。
 
 ### Valkey / OpenSearchの扱い
@@ -95,6 +96,7 @@ ValkeyとOpenSearchは切替transactionに参加できない。次の3層で扱�
 - 双方向を1つのCLIにするため、`--target-mode`の指定ミスが逆方向の切替になり得る。現mode一致エラーとworkflow（PR-3）での環境別固定引数で緩和する。
 - resolverのprefilter planはbarrierを取らないTTL 5秒cacheのため、切替直後の最大5秒間は旧modeのrouting hintでValkey前段を判定し得る。在庫の正本判定は購入transactionがbarrier下でmodeを再読するため整合性は破れないが、前段フィルタの精度が一時的に落ちる。
 - 単一PostgreSQL cluster前提であり、複数cluster / shard構成ではこのbarrierは切替境界にならない（ADR-0029と同じ制約）。
+- COMMIT応答喪失の3分岐はexit codeを0/2/1の3値から0/2/3/4/1の5値へ増やし、workflow / runbook側の判定表を複雑にする。ただし分岐を潰すと「失敗=未切替」の誤認によるpostflight欠落riskが残るため、複雑さを受け入れる。
 
 ## 再検討のトリガー
 

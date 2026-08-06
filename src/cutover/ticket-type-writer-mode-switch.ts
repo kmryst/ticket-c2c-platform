@@ -3,8 +3,10 @@
 // 排他 barrier（pg_advisory_xact_lock(335, 376)）で in-flight writer を drain し、
 // #336 / #376 migration と同一の table lock 順で barrier を通らない writer も閉じ、
 // mode 切替と DB parity 検査（PR-1 checkCutoverDatabase の再利用）を 1 transaction に
-// 閉じます。timeout・lock 競合・違反検出のいずれでも ROLLBACK し、中間 state を
-// 永続化しません。
+// 閉じます。COMMIT 前の失敗（timeout・lock 競合・違反検出）はどれも ROLLBACK し、
+// 中間 state を永続化しません。COMMIT 自体の失敗だけは「サーバ側で確定済みだが応答を
+// 受信できなかった」可能性があり結果を断定できないため、commit_outcome_unknown として
+// 区別し、別 connection での mode 再確認で切替済み / 未適用 / 不明を分離します。
 //
 // activation（legacy -> ticket_type）と rollback（ticket_type -> legacy）は同じ経路の
 // 逆方向実行です。この module は inventory_writer_control の 1 行 UPDATE 以外に
@@ -17,6 +19,7 @@ import {
   acquireExclusiveInventoryWriterBarrier,
   INVENTORY_WRITER_TABLE_LOCK_SQL,
   InventoryWriterMode,
+  readInventoryWriterMode,
   updateInventoryWriterMode,
 } from '../database/inventory-writer-control';
 import {
@@ -112,9 +115,33 @@ export interface ExecuteWriterModeSwitchResult {
   postSwitchDatabaseResults: TicketTypeCutoverReadinessResult[];
 }
 
+// WriterModeSwitchCommitOutcomeUnknownError は「COMMIT を送信したが結果を確認
+// できなかった」ことを表します（例: サーバ側で commit 確定後、応答受信前の接続断）。
+// この場合 DB は target mode へ切替済みの可能性があり、ROLLBACK では取り消せません。
+// 他の失敗（violation・timeout・lock 競合。これらは ROLLBACK が確実に効く）と
+// 機械可読に区別し、呼び出し側は別 connection で現在の mode を再確認します。
+export class WriterModeSwitchCommitOutcomeUnknownError extends Error {
+  readonly kind = 'commit_outcome_unknown';
+  // COMMIT 送信時点で確定していた切替内容（切替後 parity 検査は COMMIT 前に
+  // 全 category 0 件で通過済み）。commit が実際に確定していた場合の証跡に使う。
+  readonly pendingResult: ExecuteWriterModeSwitchResult;
+
+  constructor(pendingResult: ExecuteWriterModeSwitchResult, cause: unknown) {
+    const causeError = toError(cause);
+    super(
+      `writer mode switch COMMIT outcome is unknown (the switch may or may not have been applied): ${causeError.message}`,
+      { cause: causeError },
+    );
+    this.name = 'WriterModeSwitchCommitOutcomeUnknownError';
+    this.pendingResult = pendingResult;
+  }
+}
+
 // executeWriterModeSwitch は ADR-0032 の切替 transaction を実行します。
 // drain・table lock・切替前 parity 検査（source mode）・mode UPDATE・切替後 parity
-// 検査（target mode）を 1 transaction に閉じ、どの失敗でも ROLLBACK して例外を投げます。
+// 検査（target mode）を 1 transaction に閉じ、COMMIT 前の失敗はどれも ROLLBACK して
+// 例外を投げます。COMMIT 自体の失敗だけは結果を断定できないため、
+// WriterModeSwitchCommitOutcomeUnknownError として区別して投げます。
 export async function executeWriterModeSwitch(
   client: QueryClient,
   targetMode: InventoryWriterMode,
@@ -194,14 +221,29 @@ export async function executeWriterModeSwitch(
     }
     assertNoCutoverViolations(after.results, `post-switch (${targetMode})`);
 
-    await client.query('COMMIT');
-    return {
+    const pendingResult: ExecuteWriterModeSwitchResult = {
       sourceMode,
       targetMode,
       schemaRevision: before.schemaRevision,
       postSwitchDatabaseResults: after.results,
     };
+    try {
+      await client.query('COMMIT');
+    } catch (commitError) {
+      // COMMIT 自体の失敗は「サーバ側で確定したが応答を受信できなかった」可能性を
+      // 排除できない（例: commit 確定後の接続断）。この場合 transaction はサーバ側で
+      // 終了済みか connection が死んでいるかのどちらかで、ROLLBACK で取り消せる状態に
+      // はないため、結果不明として区別したエラーを投げる（呼び出し側が mode を再確認）。
+      throw new WriterModeSwitchCommitOutcomeUnknownError(
+        pendingResult,
+        commitError,
+      );
+    }
+    return pendingResult;
   } catch (error) {
+    if (error instanceof WriterModeSwitchCommitOutcomeUnknownError) {
+      throw error;
+    }
     try {
       await client.query('ROLLBACK');
     } catch (rollbackError) {
@@ -256,7 +298,41 @@ export type WriterModeSwitchOutcome =
       status: 'switched';
       evidence: string;
       result: ExecuteWriterModeSwitchResult;
+    }
+  | {
+      // COMMIT の結果が不明だったが、別 connection での再確認で現在の mode を
+      // 確定できた場合。verifiedMode === target なら切替は有効（postflight へ進む）、
+      // verifiedMode === source なら切替は未適用（新しい preflight から再実行可能）。
+      // 再確認自体が失敗した場合はこの outcome にならず、実行エラーとして throw する。
+      status: 'commit_ambiguous';
+      evidence: string;
+      verifiedMode: InventoryWriterMode;
+      // verifiedMode === target のときだけ、COMMIT 前に確定していた切替内容
+      // （切替後 parity 検査 0 件を含む）を証跡として返す。
+      result: ExecuteWriterModeSwitchResult | null;
     };
+
+// verifyWriterModeAfterAmbiguousCommit は COMMIT 結果不明時に、別 connection で
+// 現在の control state を読み直します。確認できない場合は null を返します（fail closed
+// に呼び出し側が実行エラーへ変換する）。
+async function verifyWriterModeAfterAmbiguousCommit(
+  pool: Pool,
+): Promise<InventoryWriterMode | null> {
+  try {
+    const client = await pool.connect();
+    try {
+      return await readInventoryWriterMode(client);
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('writer mode verification after ambiguous COMMIT failed');
+    console.error(
+      error instanceof Error ? (error.stack ?? error.message) : error,
+    );
+    return null;
+  }
+}
 
 // runWriterModeSwitch は ADR-0032 の Phase 1（in-process preflight）と Phase 2
 // （切替 transaction）を実行します。preflight は PR-1 checker 関数を expected mode =
@@ -385,6 +461,40 @@ export async function runWriterModeSwitch(
     return { status: 'switched', evidence, result };
   } catch (error) {
     switchError = toError(error);
+    if (error instanceof WriterModeSwitchCommitOutcomeUnknownError) {
+      // COMMIT の結果が不明な場合は、別 connection で現在の mode を再確認して
+      // 「切替済み / 未適用 / 不明」を機械可読に分離する（ADR-0032）。
+      // 注意: この時点では switchClient が未 release のため、connection が生きて
+      // transaction が開いたままなら、この再読は commit 前の（source mode の）値を
+      // 読む。その connection は finally の release(error) で必ず破棄され、
+      // 未 commit の transaction は abort されるため、再確認結果と最終状態は一致する。
+      const verifiedMode = await verifyWriterModeAfterAmbiguousCommit(pool);
+      if (verifiedMode === targetMode) {
+        return {
+          status: 'commit_ambiguous',
+          evidence,
+          verifiedMode,
+          result: error.pendingResult,
+        };
+      }
+      if (verifiedMode === sourceMode) {
+        return {
+          status: 'commit_ambiguous',
+          evidence,
+          verifiedMode,
+          result: null,
+        };
+      }
+      // 再確認自体が失敗した（mode を断定できない）場合は fail closed に停止する。
+      // 運用者は inventory_writer_control を手動確認してから次の操作を決める。
+      throw new WriterModeSwitchPhaseTwoError(
+        evidence,
+        new Error(
+          `COMMIT outcome is unknown and writer mode verification failed; inspect inventory_writer_control manually before retrying (original: ${error.message})`,
+          { cause: error },
+        ),
+      );
+    }
     // preflight green の evidence を添えて失敗を報告する（証跡の握りつぶし防止）。
     throw new WriterModeSwitchPhaseTwoError(evidence, error);
   } finally {

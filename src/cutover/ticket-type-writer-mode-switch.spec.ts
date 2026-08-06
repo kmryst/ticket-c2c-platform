@@ -9,6 +9,7 @@ import {
   DEFAULT_WRITER_MODE_SWITCH_TIMEOUTS,
   executeWriterModeSwitch,
   oppositeWriterMode,
+  WriterModeSwitchCommitOutcomeUnknownError,
 } from './ticket-type-writer-mode-switch';
 import {
   INVENTORY_WRITER_TABLE_LOCK_SQL,
@@ -42,6 +43,9 @@ interface FakeClientOptions {
   // readiness 検査の回数（1-origin）ごとに schemaRevision を差し替える
   // （切替 transaction 中の migration commit を模す）。
   schemaRevisionByReadinessCall?: Record<number, string>;
+  // COMMIT の応答喪失を模す: サーバ側では commit 済み（currentMode は UPDATE 済みの
+  // まま）だが、COMMIT の query が connection エラーで reject される。
+  failCommit?: boolean;
 }
 
 interface FakeClient {
@@ -68,6 +72,11 @@ function createFakeClient(options: FakeClientOptions): FakeClient {
       const sql = text.trim();
       fake.executed.push(sql);
       if (sql === 'COMMIT') {
+        if (options.failCommit) {
+          // サーバ側 commit は確定済み（currentMode は変更されたまま）という前提で
+          // 応答だけが失われたことを模す。
+          throw new Error('Connection terminated unexpectedly');
+        }
         fake.committed = true;
         return { rows: [], rowCount: 0 };
       }
@@ -279,6 +288,28 @@ describe('executeWriterModeSwitch', () => {
     ).rejects.toThrow(/schema revision changed since preflight/);
     expect(fake.rolledBack).toBe(true);
     expect(indexOfExecuted(fake, 'UPDATE inventory_writer_control')).toBe(-1);
+  });
+
+  it('COMMIT の失敗は commit_outcome_unknown として区別し、ROLLBACK を試みない', async () => {
+    const fake = createFakeClient({ initialMode: 'legacy', failCommit: true });
+    let caught: unknown;
+    try {
+      await executeWriterModeSwitch(fake, 'ticket_type');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(WriterModeSwitchCommitOutcomeUnknownError);
+    const unknownError = caught as WriterModeSwitchCommitOutcomeUnknownError;
+    expect(unknownError.kind).toBe('commit_outcome_unknown');
+    // COMMIT 送信時点で確定していた切替内容（parity 0 件）を証跡として保持する。
+    expect(unknownError.pendingResult.targetMode).toBe('ticket_type');
+    expect(unknownError.pendingResult.postSwitchDatabaseResults).toHaveLength(
+      DATABASE_CATEGORIES.length,
+    );
+    // transaction はサーバ側で終了済みか connection が死んでいるかのどちらかなので、
+    // ROLLBACK は発行しない（他の失敗と異なり「取り消せた」と誤認させない）。
+    expect(fake.rolledBack).toBe(false);
+    expect(indexOfExecuted(fake, 'ROLLBACK')).toBe(-1);
   });
 
   it('切替 transaction 中に schema revision が動いたら COMMIT せず停止する', async () => {

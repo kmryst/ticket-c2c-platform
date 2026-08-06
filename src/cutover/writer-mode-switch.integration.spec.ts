@@ -32,6 +32,7 @@ import { parseTicketTypeCutoverEvidence } from './ticket-type-cutover-readiness'
 import {
   executeWriterModeSwitch,
   runWriterModeSwitch,
+  WriterModeSwitchCommitOutcomeUnknownError,
   WriterModeSwitchPhaseTwoError,
 } from './ticket-type-writer-mode-switch';
 import { Baseline1751594400000 } from '../database/migrations/1751594400000-baseline';
@@ -460,6 +461,135 @@ describeIntegration(
           const outcome = await runSwitch('ticket_type');
           expect(outcome.status).toBe('switched');
           expect(await currentMode()).toBe('ticket_type');
+        },
+      );
+    });
+
+    // commitLossPool は「切替 transaction の COMMIT 応答が失われる」状況を実 PostgreSQL 上で
+    // 再現する。applyCommit=true の場合、サーバ側では COMMIT を実際に実行してから
+    // （= DB 状態は本当に切替済み）、応答喪失を driver 境界で注入して例外にする。
+    // applyCommit=false の場合、COMMIT を送信しないまま接続断を模す（= 未 commit の
+    // transaction が残り、release(error) による破棄で abort される）。
+    // 切替 transaction の client だけを対象にするため、table lock SQL を実行した
+    // connection の COMMIT にのみ注入する（preflight snapshot の COMMIT は素通し）。
+    function commitLossPool(pool: Pool, applyCommit: boolean): Pool {
+      return {
+        connect: async () => {
+          const client = await pool.connect();
+          let sawTableLock = false;
+          const wrapped = Object.create(client) as typeof client;
+          wrapped.query = (async (text: unknown, params?: unknown[]) => {
+            const sql = typeof text === 'string' ? text : '';
+            if (sql.includes('LOCK TABLE events IN EXCLUSIVE MODE')) {
+              sawTableLock = true;
+            }
+            if (sawTableLock && sql.trim() === 'COMMIT') {
+              if (applyCommit) {
+                await client.query('COMMIT');
+              }
+              throw new Error(
+                'connection lost before COMMIT response (injected)',
+              );
+            }
+            return client.query(text as never, params as never);
+          }) as typeof client.query;
+          wrapped.release = ((err?: Error | boolean) =>
+            client.release(err as never)) as typeof client.release;
+          return wrapped;
+        },
+        end: () => pool.end(),
+      } as unknown as Pool;
+    }
+
+    it('COMMIT 応答喪失（サーバ側 commit 確定済み）: commit_outcome_unknown として区別し、DB は実際に target mode になっている', async () => {
+      await withHarness(
+        async ({ pool, seedEvent, seedAllCounters, currentMode }) => {
+          const { eventId, typeId } = await seedEvent(5);
+          await seedAllCounters(eventId, typeId);
+
+          const lossPool = commitLossPool(pool, true);
+          const client = await lossPool.connect();
+          let caught: unknown;
+          try {
+            await executeWriterModeSwitch(client, 'ticket_type', {
+              timeouts: TEST_TIMEOUTS,
+            });
+          } catch (error) {
+            caught = error;
+          } finally {
+            client.release(caught instanceof Error ? caught : undefined);
+          }
+
+          expect(caught).toBeInstanceOf(WriterModeSwitchCommitOutcomeUnknownError);
+          const unknownError = caught as WriterModeSwitchCommitOutcomeUnknownError;
+          expect(unknownError.kind).toBe('commit_outcome_unknown');
+          expect(
+            unknownError.pendingResult.postSwitchDatabaseResults.every(
+              (r) => r.violationCount === 0,
+            ),
+          ).toBe(true);
+          // 「例外 = 未切替」ではないことの実測: サーバ側では commit 済み。
+          expect(await currentMode()).toBe('ticket_type');
+        },
+      );
+    });
+
+    it('COMMIT 応答喪失: runWriterModeSwitch は別 connection で再確認し、target mode 到達を commit_ambiguous として返す', async () => {
+      await withHarness(
+        async ({ pool, valkey, opensearch, index, seedEvent, seedAllCounters, rebuild, currentMode }) => {
+          const { eventId, typeId } = await seedEvent(5);
+          await seedAllCounters(eventId, typeId);
+          await rebuild();
+
+          const outcome = await runWriterModeSwitch(
+            { pool: commitLossPool(pool, true), valkey, opensearch },
+            {
+              targetMode: 'ticket_type',
+              opensearchIndex: index,
+              timeouts: TEST_TIMEOUTS,
+            },
+          );
+          expect(outcome.status).toBe('commit_ambiguous');
+          if (outcome.status !== 'commit_ambiguous') {
+            throw new Error('unreachable');
+          }
+          expect(outcome.verifiedMode).toBe('ticket_type');
+          expect(outcome.result).not.toBeNull();
+          expect(
+            outcome.result?.postSwitchDatabaseResults.every(
+              (r) => r.violationCount === 0,
+            ),
+          ).toBe(true);
+          const parsed = parseTicketTypeCutoverEvidence(outcome.evidence);
+          expect(parsed.checkPhase).toBe('preflight');
+          expect(await currentMode()).toBe('ticket_type');
+        },
+      );
+    });
+
+    it('COMMIT 送信前の接続断: 再確認は source mode を返し、未 commit transaction は破棄されて mode は変わらない', async () => {
+      await withHarness(
+        async ({ pool, valkey, opensearch, index, seedEvent, seedAllCounters, rebuild, currentMode }) => {
+          const { eventId, typeId } = await seedEvent(5);
+          await seedAllCounters(eventId, typeId);
+          await rebuild();
+
+          const outcome = await runWriterModeSwitch(
+            { pool: commitLossPool(pool, false), valkey, opensearch },
+            {
+              targetMode: 'ticket_type',
+              opensearchIndex: index,
+              timeouts: TEST_TIMEOUTS,
+            },
+          );
+          expect(outcome.status).toBe('commit_ambiguous');
+          if (outcome.status !== 'commit_ambiguous') {
+            throw new Error('unreachable');
+          }
+          expect(outcome.verifiedMode).toBe('legacy');
+          expect(outcome.result).toBeNull();
+          // release(error) による破棄で未 commit transaction は abort 済み。
+          expect(await currentMode()).toBe('legacy');
         },
       );
     });
