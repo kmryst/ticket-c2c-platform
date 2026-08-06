@@ -5,7 +5,8 @@ import type { PoolClient } from 'pg';
 
 export type InventoryWriterMode = 'legacy' | 'ticket_type';
 
-// #378 の activation transaction は同じ 2-key advisory lock を exclusive で取得します。
+// #378 の activation transaction は同じ 2-key advisory lock を exclusive で取得します
+// （acquireExclusiveInventoryWriterBarrier / ADR-0032）。
 // requestId lock は bigint key-space を使うため、この 2-key barrier と衝突しません。
 export const INVENTORY_WRITER_BARRIER_KEYS = [335, 376] as const;
 
@@ -42,6 +43,46 @@ export async function acquirePurchaseRequestLock(
     `,
     [scope, 376],
   );
+}
+
+// acquireExclusiveInventoryWriterBarrier は shared barrier と同じ固定 key を
+// exclusive で取得します（Issue #378 / ADR-0032 の writer mode 切替 transaction 専用）。
+// shared 保持中の in-flight writer transaction の commit / abort を待つことで自然に
+// drain し、新規 writer は barrier 取得段階で block されます。transaction-scoped の
+// ため、失敗・crash 時は transaction 終了とともに自動解放されます。
+export async function acquireExclusiveInventoryWriterBarrier(
+  client: QueryClient,
+): Promise<void> {
+  await client.query(
+    `
+      SELECT pg_advisory_xact_lock(
+        $1::integer,
+        $2::integer
+      )
+    `,
+    [...INVENTORY_WRITER_BARRIER_KEYS],
+  );
+}
+
+// updateInventoryWriterMode は control singleton row の writer_mode を更新します。
+// exclusive barrier とtable lockを取得した切替 transaction 内からだけ呼び出します
+// （ADR-0032）。row が無い場合は fail closed で停止します。
+export async function updateInventoryWriterMode(
+  client: QueryClient,
+  mode: InventoryWriterMode,
+): Promise<void> {
+  const result = await client.query(
+    `
+      UPDATE inventory_writer_control
+      SET writer_mode = $1,
+          updated_at = now()
+      WHERE singleton
+    `,
+    [mode],
+  );
+  if (result.rowCount !== 1) {
+    throw new Error('inventory writer control state is missing or invalid');
+  }
 }
 
 export async function readInventoryWriterMode(

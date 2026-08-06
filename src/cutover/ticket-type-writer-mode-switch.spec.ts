@@ -1,0 +1,279 @@
+// ファイル概要:
+// executeWriterModeSwitch（ADR-0032 の切替 transaction）の単体テストです。
+// scripted fake client で SQL の実行順序（BEGIN → SET LOCAL → 排他 barrier →
+// table lock → 切替前 parity → UPDATE → 切替後 parity → COMMIT）と、
+// 失敗時の ROLLBACK / UPDATE 未実行（fail closed）を検証します。
+
+import {
+  assertNoCutoverViolations,
+  DEFAULT_WRITER_MODE_SWITCH_TIMEOUTS,
+  executeWriterModeSwitch,
+  oppositeWriterMode,
+  WRITER_MODE_SWITCH_TABLE_LOCK_SQL,
+} from './ticket-type-writer-mode-switch';
+import type { InventoryWriterMode } from '../database/inventory-writer-control';
+
+// checkCutoverDatabase が要求する DB / control / schema category（13 件）。
+const DATABASE_CATEGORIES = [
+  'event_without_exactly_one_default',
+  'event_without_legacy_inventory',
+  'legacy_inventory_without_default_ticket_type_inventory',
+  'ticket_type_inventory_without_ticket_type',
+  'ticket_type_without_ticket_type_inventory',
+  'purchase_without_ticket_type',
+  'purchase_ticket_type_event_mismatch',
+  'legacy_aggregate_total_mismatch',
+  'legacy_aggregate_remaining_mismatch',
+  'non_default_ticket_type_inventory_in_legacy_mode',
+  'writer_control_state_missing_or_invalid',
+  'writer_control_mode_mismatch',
+  'compatibility_object_missing_or_invalid',
+] as const;
+
+interface FakeClientOptions {
+  initialMode: InventoryWriterMode | null;
+  schemaRevision?: string;
+  // 何回目の readiness 検査で violation を返すか（1-origin。undefined なら常に 0 件）。
+  violationOnReadinessCall?: number;
+  violationCategory?: (typeof DATABASE_CATEGORIES)[number];
+}
+
+interface FakeClient {
+  query: (text: string, params?: unknown[]) => Promise<{
+    rows: Array<Record<string, unknown>>;
+    rowCount: number;
+  }>;
+  executed: string[];
+  currentMode: InventoryWriterMode | null;
+  committed: boolean;
+  rolledBack: boolean;
+}
+
+function createFakeClient(options: FakeClientOptions): FakeClient {
+  const schemaRevision =
+    options.schemaRevision ?? 'AddTicketTypeCompatibilityWriter1785542400000';
+  let readinessCalls = 0;
+  const fake: FakeClient = {
+    executed: [],
+    currentMode: options.initialMode,
+    committed: false,
+    rolledBack: false,
+    query: async (text: string, params?: unknown[]) => {
+      const sql = text.trim();
+      fake.executed.push(sql);
+      if (sql === 'COMMIT') {
+        fake.committed = true;
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql === 'ROLLBACK') {
+        fake.rolledBack = true;
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes('WITH expected AS')) {
+        readinessCalls += 1;
+        const violate =
+          options.violationOnReadinessCall === readinessCalls
+            ? (options.violationCategory ?? 'legacy_aggregate_remaining_mismatch')
+            : null;
+        return {
+          rows: DATABASE_CATEGORIES.map((category) => ({
+            category,
+            violation_count: category === violate ? '2' : '0',
+          })),
+          rowCount: DATABASE_CATEGORIES.length,
+        };
+      }
+      if (sql.startsWith('UPDATE inventory_writer_control')) {
+        if (fake.currentMode === null) {
+          return { rows: [], rowCount: 0 };
+        }
+        fake.currentMode = params?.[0] as InventoryWriterMode;
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes('FROM public.inventory_writer_control')) {
+        return fake.currentMode === null
+          ? { rows: [], rowCount: 0 }
+          : { rows: [{ writer_mode: fake.currentMode }], rowCount: 1 };
+      }
+      if (sql.includes('FROM public.typeorm_migrations')) {
+        return { rows: [{ name: schemaRevision }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  return fake;
+}
+
+function indexOfExecuted(fake: FakeClient, needle: string): number {
+  return fake.executed.findIndex((sql) => sql.includes(needle));
+}
+
+describe('oppositeWriterMode', () => {
+  it('legacy と ticket_type を相互に返す', () => {
+    expect(oppositeWriterMode('legacy')).toBe('ticket_type');
+    expect(oppositeWriterMode('ticket_type')).toBe('legacy');
+  });
+});
+
+describe('assertNoCutoverViolations', () => {
+  it('violation 0 件なら通過する', () => {
+    expect(() =>
+      assertNoCutoverViolations(
+        [{ category: 'valkey_counter_missing', violationCount: 0 }],
+        'test',
+      ),
+    ).not.toThrow();
+  });
+
+  it('violation ありは category と件数を列挙して停止する', () => {
+    expect(() =>
+      assertNoCutoverViolations(
+        [
+          { category: 'valkey_counter_missing', violationCount: 0 },
+          { category: 'legacy_aggregate_total_mismatch', violationCount: 3 },
+        ],
+        'pre-switch (legacy)',
+      ),
+    ).toThrow(/pre-switch \(legacy\).*legacy_aggregate_total_mismatch=3/);
+  });
+});
+
+describe('executeWriterModeSwitch', () => {
+  it('BEGIN → SET LOCAL → 排他 barrier → table lock → parity → UPDATE → parity → COMMIT の順で実行する', async () => {
+    const fake = createFakeClient({ initialMode: 'legacy' });
+    const result = await executeWriterModeSwitch(fake, 'ticket_type');
+
+    expect(result).toEqual({
+      sourceMode: 'legacy',
+      targetMode: 'ticket_type',
+      schemaRevision: 'AddTicketTypeCompatibilityWriter1785542400000',
+    });
+    expect(fake.committed).toBe(true);
+    expect(fake.rolledBack).toBe(false);
+    expect(fake.currentMode).toBe('ticket_type');
+
+    const begin = indexOfExecuted(fake, 'BEGIN');
+    const lockTimeout = indexOfExecuted(
+      fake,
+      `SET LOCAL lock_timeout = '${DEFAULT_WRITER_MODE_SWITCH_TIMEOUTS.lockTimeout}'`,
+    );
+    const barrier = indexOfExecuted(fake, 'pg_advisory_xact_lock');
+    const tableLock = indexOfExecuted(fake, 'LOCK TABLE events IN EXCLUSIVE MODE');
+    const firstParity = fake.executed.findIndex((sql) =>
+      sql.includes('WITH expected AS'),
+    );
+    const update = indexOfExecuted(fake, 'UPDATE inventory_writer_control');
+    let secondParity = -1;
+    for (let i = fake.executed.length - 1; i >= 0; i -= 1) {
+      if (fake.executed[i].includes('WITH expected AS')) {
+        secondParity = i;
+        break;
+      }
+    }
+    const commit = indexOfExecuted(fake, 'COMMIT');
+
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(lockTimeout).toBeGreaterThan(begin);
+    expect(barrier).toBeGreaterThan(lockTimeout);
+    expect(tableLock).toBeGreaterThan(barrier);
+    expect(firstParity).toBeGreaterThan(tableLock);
+    expect(update).toBeGreaterThan(firstParity);
+    expect(secondParity).toBeGreaterThan(update);
+    expect(commit).toBeGreaterThan(secondParity);
+  });
+
+  it('table lock 順は #336 / #376 migration と同一（events → purchases → ticket_types → ticket_inventory → ticket_type_inventory）', () => {
+    const order = [
+      'LOCK TABLE events IN EXCLUSIVE MODE;',
+      'LOCK TABLE purchases IN ACCESS EXCLUSIVE MODE NOWAIT;',
+      'LOCK TABLE ticket_types IN SHARE ROW EXCLUSIVE MODE NOWAIT;',
+      'LOCK TABLE ticket_inventory IN SHARE ROW EXCLUSIVE MODE NOWAIT;',
+      'LOCK TABLE ticket_type_inventory IN SHARE ROW EXCLUSIVE MODE NOWAIT;',
+    ];
+    let cursor = -1;
+    for (const statement of order) {
+      const next = WRITER_MODE_SWITCH_TABLE_LOCK_SQL.indexOf(statement);
+      expect(next).toBeGreaterThan(cursor);
+      cursor = next;
+    }
+  });
+
+  it('切替前 parity の violation で ROLLBACK し、UPDATE を実行しない', async () => {
+    const fake = createFakeClient({
+      initialMode: 'legacy',
+      violationOnReadinessCall: 1,
+    });
+    await expect(
+      executeWriterModeSwitch(fake, 'ticket_type'),
+    ).rejects.toThrow(/legacy_aggregate_remaining_mismatch=2/);
+    expect(fake.rolledBack).toBe(true);
+    expect(fake.committed).toBe(false);
+    expect(indexOfExecuted(fake, 'UPDATE inventory_writer_control')).toBe(-1);
+    expect(fake.currentMode).toBe('legacy');
+  });
+
+  it('切替後 parity の violation で ROLLBACK し、COMMIT しない（UPDATE は実行済みでも永続化されない）', async () => {
+    const fake = createFakeClient({
+      initialMode: 'legacy',
+      violationOnReadinessCall: 2,
+    });
+    await expect(
+      executeWriterModeSwitch(fake, 'ticket_type'),
+    ).rejects.toThrow(/post-switch \(ticket_type\)/);
+    expect(fake.rolledBack).toBe(true);
+    expect(fake.committed).toBe(false);
+    expect(
+      indexOfExecuted(fake, 'UPDATE inventory_writer_control'),
+    ).toBeGreaterThanOrEqual(0);
+  });
+
+  it('現 mode が source と一致しない場合は UPDATE 前に停止する（target と同一 mode を含む）', async () => {
+    const fake = createFakeClient({ initialMode: 'ticket_type' });
+    await expect(
+      executeWriterModeSwitch(fake, 'ticket_type'),
+    ).rejects.toThrow(/expected current mode legacy but found ticket_type/);
+    expect(fake.rolledBack).toBe(true);
+    expect(indexOfExecuted(fake, 'UPDATE inventory_writer_control')).toBe(-1);
+  });
+
+  it('control row 欠損は fail closed で停止する', async () => {
+    const fake = createFakeClient({ initialMode: null });
+    await expect(
+      executeWriterModeSwitch(fake, 'ticket_type'),
+    ).rejects.toThrow(/missing or invalid/);
+    expect(fake.rolledBack).toBe(true);
+    expect(fake.committed).toBe(false);
+  });
+
+  it('preflight 後に schema revision が変わっていたら停止する', async () => {
+    const fake = createFakeClient({
+      initialMode: 'legacy',
+      schemaRevision: 'SomeNewerMigration1790000000000',
+    });
+    await expect(
+      executeWriterModeSwitch(fake, 'ticket_type', {
+        expectedSchemaRevision: 'AddTicketTypeCompatibilityWriter1785542400000',
+      }),
+    ).rejects.toThrow(/schema revision changed since preflight/);
+    expect(fake.rolledBack).toBe(true);
+    expect(indexOfExecuted(fake, 'UPDATE inventory_writer_control')).toBe(-1);
+  });
+
+  it('不正な timeout literal は transaction 開始前に拒否する', async () => {
+    const fake = createFakeClient({ initialMode: 'legacy' });
+    await expect(
+      executeWriterModeSwitch(fake, 'ticket_type', {
+        timeouts: { lockTimeout: "10s'; DROP TABLE events; --" },
+      }),
+    ).rejects.toThrow(/lock_timeout must match/);
+    expect(fake.executed).toHaveLength(0);
+  });
+
+  it('不正な target mode を拒否する', async () => {
+    const fake = createFakeClient({ initialMode: 'legacy' });
+    await expect(
+      executeWriterModeSwitch(fake, 'both' as InventoryWriterMode),
+    ).rejects.toThrow(/invalid target writer mode/);
+    expect(fake.executed).toHaveLength(0);
+  });
+});

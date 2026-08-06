@@ -130,6 +130,16 @@ jobs:
           TEST_VALKEY_URL: redis://127.0.0.1:6379
           TEST_OPENSEARCH_URL: http://127.0.0.1:9200
 
+      # Issue #378 / ADR-0032 の writer mode 切替（activation / rollback）統合テスト。
+      # 往復切替・差分注入 abort・lock 競合・旧 writer 復活の fence 拒否・
+      # checker 不完全・control row 欠損の fail closed を required check で証明する。
+      - name: Writer mode switch integration (実 PostgreSQL + 実 Valkey + 実 OpenSearch)
+        run: npm run test:integration:writer-mode-switch
+        env:
+          TEST_DATABASE_URL: postgresql://ticket_poc:ticket_poc_password@127.0.0.1:5432/ticket_poc
+          TEST_VALKEY_URL: redis://127.0.0.1:6379
+          TEST_OPENSEARCH_URL: http://127.0.0.1:9200
+
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
