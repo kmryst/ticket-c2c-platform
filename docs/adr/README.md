@@ -102,3 +102,4 @@ YYYY-MM-DD
 | [0029](./0029-use-control-aware-postgresql-compatibility-writer.md) | Ticket Type在庫切替にcontrol-aware PostgreSQL compatibility writerを採用する | Accepted |
 | [0030](./0030-ticket-type-valkey-inventory-compatibility.md) | Ticket Type 単位の Valkey 在庫前段フィルタを compatibility artifact として実装する | Accepted |
 | [0031](./0031-versioned-ticket-type-search-projection.md) | version 付き Ticket Type 在庫 event と検索 projection を実装する | Accepted |
+| [0032](./0032-single-transaction-writer-mode-switch-cli.md) | writer mode切替を排他barrier下の単一transaction CLIで行う | Accepted |

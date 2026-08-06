@@ -26,6 +26,24 @@ export function createProjectionClients(): { pool: Pool; opensearch: Client } {
   return { pool, opensearch };
 }
 
+// parseStringOption は `--name=value` / `--name value` 形式の文字列オプションを読みます
+// （cutover 系 CLI が共有。Issue #378）。
+export function parseStringOption(
+  argv: string[],
+  name: string,
+): string | undefined {
+  const prefix = `--${name}=`;
+  const eq = argv.find((a) => a.startsWith(prefix));
+  if (eq) {
+    return eq.slice(prefix.length);
+  }
+  const idx = argv.indexOf(`--${name}`);
+  if (idx >= 0 && idx + 1 < argv.length) {
+    return argv[idx + 1];
+  }
+  return undefined;
+}
+
 // parseIntOption は `--name=value` / `--name value` 形式の整数オプションを読みます。
 export function parseIntOption(
   argv: string[],

@@ -16,7 +16,10 @@ const ACQUIRE_EXCLUSIVE_WRITER_BARRIER_SQL = `
 SELECT pg_advisory_xact_lock(335, 376);
 `;
 
-const LOCK_WRITER_TABLES_SQL = `
+// export は lock 順の共有定数（inventory-writer-control.ts の
+// INVENTORY_WRITER_TABLE_LOCK_SQL）との一致を単体テストで強制するためだけのもの。
+// 適用済み migration の実行内容は変更していない。
+export const LOCK_WRITER_TABLES_SQL = `
 -- 旧 writer の入口である events を先に gate とし、既存 transaction を drain する。
 -- 後段 table に想定外の直接 writer がいれば、events を保持したまま待たず rollback する。
 LOCK TABLE events IN EXCLUSIVE MODE;

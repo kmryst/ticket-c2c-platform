@@ -17,6 +17,7 @@ import { EVENTS_INDEX } from '../search/events-projection.store';
 import {
   createProjectionClients,
   parseIntOption,
+  parseStringOption,
 } from '../search/projection-cli.shared';
 import type { InventoryWriterMode } from '../database/inventory-writer-control';
 import {
@@ -31,20 +32,6 @@ import {
 
 const USAGE =
   'usage: --expect-mode <legacy|ticket_type> --phase <preflight|postflight> [--page-size N] [--max-findings N]';
-
-// parseStringOption は `--name=value` / `--name value` 形式の文字列オプションを読みます。
-function parseStringOption(argv: string[], name: string): string | undefined {
-  const prefix = `--${name}=`;
-  const eq = argv.find((a) => a.startsWith(prefix));
-  if (eq) {
-    return eq.slice(prefix.length);
-  }
-  const idx = argv.indexOf(`--${name}`);
-  if (idx >= 0 && idx + 1 < argv.length) {
-    return argv[idx + 1];
-  }
-  return undefined;
-}
 
 function parseExpectMode(argv: string[]): InventoryWriterMode {
   const raw = parseStringOption(argv, 'expect-mode');
