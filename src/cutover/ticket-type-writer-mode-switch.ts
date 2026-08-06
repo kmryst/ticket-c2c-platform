@@ -312,18 +312,54 @@ export type WriterModeSwitchOutcome =
       result: ExecuteWriterModeSwitchResult | null;
     };
 
-// verifyWriterModeAfterAmbiguousCommit は COMMIT 結果不明時に、別 connection で
-// 現在の control state を読み直します。確認できない場合は null を返します（fail closed
-// に呼び出し側が実行エラーへ変換する）。
+// verifyWriterModeAfterAmbiguousCommit は COMMIT 結果不明時に、別 connection・別
+// transaction で現在の control state を確定的に読み直します。
+//
+// 単純な SELECT では不十分である点に注意: 元 transaction の COMMIT がサーバ側で
+// まだ処理中（WAL flush 中など）のタイミングで読むと、旧 source mode を読んだ直後に
+// commit が確定する race があり、「未適用」と誤報告し得る。そこで同じ固定 key の
+// 排他 advisory barrier（pg_advisory_xact_lock(335, 376)）を取得してから読む。
+// advisory xact lock は元 transaction の終了（commit 確定 / abort）まで解放されない
+// ため、取得できた時点で元 transaction の結末は確定しており、読んだ mode が最終
+// 状態になる。呼び出し側は検証を始める前に元 connection を release(error) で破棄し、
+// socket 終了をサーバへ通知して idle-open な transaction を早期に abort させる。
+//
+// barrier 取得の timeout（元 transaction が極端に長く終了しない等）を含め、確認
+// できない場合は null を返す（呼び出し側が実行エラーへ変換する。source / target の
+// どちらにも断定しない）。
 async function verifyWriterModeAfterAmbiguousCommit(
   pool: Pool,
+  timeouts: WriterModeSwitchTimeouts,
 ): Promise<InventoryWriterMode | null> {
+  const lockTimeout = assertTimeoutLiteral(timeouts.lockTimeout, 'lock_timeout');
+  const statementTimeout = assertTimeoutLiteral(
+    timeouts.statementTimeout,
+    'statement_timeout',
+  );
   try {
     const client = await pool.connect();
+    let verifyError: Error | undefined;
     try {
-      return await readInventoryWriterMode(client);
+      await client.query('BEGIN');
+      await client.query(`SET LOCAL lock_timeout = '${lockTimeout}'`);
+      await client.query(
+        `SET LOCAL statement_timeout = '${statementTimeout}'`,
+      );
+      // 元 transaction の終了を待つ（終了まで exclusive barrier は取得できない）。
+      await acquireExclusiveInventoryWriterBarrier(client);
+      const mode = await readInventoryWriterMode(client);
+      await client.query('COMMIT');
+      return mode;
+    } catch (error) {
+      verifyError = toError(error);
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // connection が壊れている場合は release(error) の破棄に任せる。
+      }
+      throw error;
     } finally {
-      client.release();
+      client.release(verifyError);
     }
   } catch (error) {
     console.error('writer mode verification after ambiguous COMMIT failed');
@@ -453,6 +489,7 @@ export async function runWriterModeSwitch(
   // Phase 2: 切替 transaction（drain・table lock・parity・UPDATE・parity を 1 transaction）。
   const switchClient = await pool.connect();
   let switchError: Error | undefined;
+  let switchClientReleased = false;
   try {
     const result = await executeWriterModeSwitch(switchClient, targetMode, {
       expectedSchemaRevision: databaseCheck.schemaRevision,
@@ -462,13 +499,25 @@ export async function runWriterModeSwitch(
   } catch (error) {
     switchError = toError(error);
     if (error instanceof WriterModeSwitchCommitOutcomeUnknownError) {
-      // COMMIT の結果が不明な場合は、別 connection で現在の mode を再確認して
-      // 「切替済み / 未適用 / 不明」を機械可読に分離する（ADR-0032）。
-      // 注意: この時点では switchClient が未 release のため、connection が生きて
-      // transaction が開いたままなら、この再読は commit 前の（source mode の）値を
-      // 読む。その connection は finally の release(error) で必ず破棄され、
-      // 未 commit の transaction は abort されるため、再確認結果と最終状態は一致する。
-      const verifiedMode = await verifyWriterModeAfterAmbiguousCommit(pool);
+      // COMMIT の結果が不明な場合は、現在の mode を再確認して「切替済み / 未適用 /
+      // 不明」を機械可読に分離する（ADR-0032）。
+      //
+      // 順序が重要: 「client 側が接続断を検知したこと」と「サーバ側で COMMIT 処理が
+      // 完了したこと」は独立事象で順序保証がない（COMMIT が WAL flush 中の可能性が
+      // ある）。そのため、
+      // 1. まず元 connection を release(error) で破棄し、socket 終了をサーバへ
+      //    通知して idle-open な transaction を早期に abort させる。
+      // 2. 検証は別 transaction で同じ排他 advisory barrier を取得してから読む
+      //    （元 transaction の終了 = barrier 解放まで待つため、処理中の COMMIT を
+      //    追い越して旧値を読む race がない）。
+      // barrier 取得の timeout 時は null が返り、source / target のどちらにも
+      // 断定せず実行エラー（手動確認要求）へ倒す。
+      switchClient.release(switchError);
+      switchClientReleased = true;
+      const verifiedMode = await verifyWriterModeAfterAmbiguousCommit(pool, {
+        ...DEFAULT_WRITER_MODE_SWITCH_TIMEOUTS,
+        ...options.timeouts,
+      });
       if (verifiedMode === targetMode) {
         return {
           status: 'commit_ambiguous',
@@ -498,6 +547,8 @@ export async function runWriterModeSwitch(
     // preflight green の evidence を添えて失敗を報告する（証跡の握りつぶし防止）。
     throw new WriterModeSwitchPhaseTwoError(evidence, error);
   } finally {
-    switchClient.release(switchError);
+    if (!switchClientReleased) {
+      switchClient.release(switchError);
+    }
   }
 }

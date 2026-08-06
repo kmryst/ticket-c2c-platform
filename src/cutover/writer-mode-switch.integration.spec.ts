@@ -594,6 +594,144 @@ describeIntegration(
       );
     });
 
+    it('COMMIT 送信済み・サーバ側処理中の race: 検証は排他 barrier で元 transaction の終了を待ち、旧 source mode を読んで「未適用」と誤報告しない', async () => {
+      await withHarness(
+        async ({ pool, valkey, opensearch, index, seedEvent, seedAllCounters, rebuild, currentMode }) => {
+          const { eventId, typeId } = await seedEvent(5);
+          await seedAllCounters(eventId, typeId);
+          await rebuild();
+
+          // 「COMMIT は送信済みだがサーバ側でまだ処理中」を再現する:
+          // client には即座に接続断エラーを返し、サーバ側の COMMIT は遅延後に確定させる。
+          // 検証用 connection がこの window（元 transaction 終了前）で control state を
+          // 読んでしまうと、旧 source mode を読み「未適用」（exit 4 相当）と誤報告する。
+          // 修正後の検証は同じ排他 advisory barrier を取得してから読むため、
+          // 元 transaction の終了（= 遅延 COMMIT の確定）を待ってから target mode を読む。
+          const COMMIT_DELAY_MS = 200;
+          function midCommitRacePool(base: Pool): Pool {
+            return {
+              connect: async () => {
+                const client = await base.connect();
+                let sawTableLock = false;
+                let backgroundCommit: Promise<void> | null = null;
+                const wrapped = Object.create(client) as typeof client;
+                wrapped.query = (async (text: unknown, params?: unknown[]) => {
+                  const sql = typeof text === 'string' ? text : '';
+                  if (sql.includes('LOCK TABLE events IN EXCLUSIVE MODE')) {
+                    sawTableLock = true;
+                  }
+                  if (sawTableLock && sql.trim() === 'COMMIT') {
+                    backgroundCommit = (async () => {
+                      await delay(COMMIT_DELAY_MS);
+                      await client.query('COMMIT');
+                    })();
+                    backgroundCommit.catch(() => undefined);
+                    throw new Error(
+                      'connection lost while COMMIT is still being processed (injected)',
+                    );
+                  }
+                  return client.query(text as never, params as never);
+                }) as typeof client.query;
+                wrapped.release = ((err?: Error | boolean) => {
+                  // 実運用では COMMIT は既に送信済みでサーバが処理を継続する。
+                  // simulation では遅延 COMMIT を同じ client 経由で発行するため、
+                  // それが確定するまで実 release（socket 破棄）を遅らせる。
+                  const done = backgroundCommit ?? Promise.resolve();
+                  void done.finally(() => client.release(err as never));
+                }) as typeof client.release;
+                return wrapped;
+              },
+              end: () => base.end(),
+            } as unknown as Pool;
+          }
+
+          const outcome = await runWriterModeSwitch(
+            { pool: midCommitRacePool(pool), valkey, opensearch },
+            {
+              targetMode: 'ticket_type',
+              opensearchIndex: index,
+              timeouts: TEST_TIMEOUTS,
+            },
+          );
+          expect(outcome.status).toBe('commit_ambiguous');
+          if (outcome.status !== 'commit_ambiguous') {
+            throw new Error('unreachable');
+          }
+          // race window（COMMIT 確定前）に検証が走っても legacy と誤断定せず、
+          // barrier で元 transaction の終了を待ってから target mode を確定する。
+          expect(outcome.verifiedMode).toBe('ticket_type');
+          expect(outcome.result).not.toBeNull();
+          expect(await currentMode()).toBe('ticket_type');
+        },
+      );
+    });
+
+    it('検証用 barrier 取得が timeout した場合は「未適用」へ倒さず実行エラーで停止する', async () => {
+      await withHarness(
+        async ({ pool, valkey, opensearch, index, seedEvent, seedAllCounters, rebuild, currentMode }) => {
+          const { eventId, typeId } = await seedEvent(5);
+          await seedAllCounters(eventId, typeId);
+          await rebuild();
+
+          // 元 transaction が終了しない状況を再現する: COMMIT で即座に例外を返しつつ、
+          // release を保留して transaction（排他 barrier 保持）を開いたままにする。
+          // 検証用 barrier 取得は lock_timeout で失敗し、source / target のどちらにも
+          // 断定せず実行エラー（exit 1 相当）で停止しなければならない（exit 4 禁止）。
+          const held: { release: (() => void) | null } = { release: null };
+          function barrierHeldPool(base: Pool): Pool {
+            return {
+              connect: async () => {
+                const client = await base.connect();
+                let sawTableLock = false;
+                const wrapped = Object.create(client) as typeof client;
+                wrapped.query = (async (text: unknown, params?: unknown[]) => {
+                  const sql = typeof text === 'string' ? text : '';
+                  if (sql.includes('LOCK TABLE events IN EXCLUSIVE MODE')) {
+                    sawTableLock = true;
+                  }
+                  if (sawTableLock && sql.trim() === 'COMMIT') {
+                    throw new Error(
+                      'connection lost while COMMIT is still being processed (injected)',
+                    );
+                  }
+                  return client.query(text as never, params as never);
+                }) as typeof client.query;
+                wrapped.release = ((err?: Error | boolean) => {
+                  if (sawTableLock) {
+                    // transaction を開いたまま保持する（後で必ず破棄する）。
+                    held.release = () => client.release(true as never);
+                    return;
+                  }
+                  client.release(err as never);
+                }) as typeof client.release;
+                return wrapped;
+              },
+              end: () => base.end(),
+            } as unknown as Pool;
+          }
+
+          try {
+            await expect(
+              runWriterModeSwitch(
+                { pool: barrierHeldPool(pool), valkey, opensearch },
+                {
+                  targetMode: 'ticket_type',
+                  opensearchIndex: index,
+                  timeouts: TEST_TIMEOUTS,
+                },
+              ),
+            ).rejects.toThrow(
+              /COMMIT outcome is unknown and writer mode verification failed/,
+            );
+          } finally {
+            // 保持していた transaction を破棄する（abort）。
+            held.release?.();
+          }
+          expect(await currentMode()).toBe('legacy');
+        },
+      );
+    });
+
     it('旧 writer 復活: activation 後の top-level legacy write は #376 fence が拒否する', async () => {
       await withHarness(
         async ({ dataSource, pool, seedEvent, seedAllCounters, currentMode }) => {
