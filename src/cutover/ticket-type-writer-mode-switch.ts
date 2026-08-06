@@ -15,6 +15,7 @@ import type { Pool, PoolClient } from 'pg';
 import type { Client as OpenSearchClient } from '@opensearch-project/opensearch';
 import {
   acquireExclusiveInventoryWriterBarrier,
+  INVENTORY_WRITER_TABLE_LOCK_SQL,
   InventoryWriterMode,
   updateInventoryWriterMode,
 } from '../database/inventory-writer-control';
@@ -36,9 +37,23 @@ export function oppositeWriterMode(
   return mode === 'legacy' ? 'ticket_type' : 'legacy';
 }
 
+// writer mode の実行時妥当性検査（executeWriterModeSwitch / runWriterModeSwitch の
+// 両公開入口で共有する単一実装。型を欺く実行時入力を fail closed で拒否する）。
+function assertTargetWriterMode(mode: InventoryWriterMode): void {
+  if (mode !== 'legacy' && mode !== 'ticket_type') {
+    throw new Error(`invalid target writer mode: ${String(mode)}`);
+  }
+}
+
+// toError は release(err) / cause 用に unknown を Error へ正規化します。
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
 // SET LOCAL はパラメータ化できないため、interpolate する値の形式を fail closed に
-// 制限する（単位付き非負整数のみ）。
-const TIMEOUT_LITERAL = /^[0-9]+(ms|s|min)$/;
+// 制限する。PostgreSQL では timeout 0 は「timeout 無効化」を意味し fail-closed の
+// 前提が崩れるため、正の値だけを許す（先頭の余分な 0 は許容、値としての 0 は拒否）。
+const TIMEOUT_LITERAL = /^0*[1-9][0-9]*(ms|s|min)$/;
 
 export interface WriterModeSwitchTimeouts {
   // lock_timeout は排他 barrier の取得待ち（= in-flight writer の drain 待ち）と
@@ -58,21 +73,12 @@ export const DEFAULT_WRITER_MODE_SWITCH_TIMEOUTS: WriterModeSwitchTimeouts = {
 
 function assertTimeoutLiteral(value: string, label: string): string {
   if (!TIMEOUT_LITERAL.test(value)) {
-    throw new Error(`${label} must match ${TIMEOUT_LITERAL}: ${value}`);
+    throw new Error(
+      `${label} must be a positive duration matching ${TIMEOUT_LITERAL}: ${value}`,
+    );
   }
   return value;
 }
-
-// #336 / #376 migration と同一の順序・lock mode（ADR-0028 / ADR-0032）。
-// events を先頭の gate として既存 transaction を drain し、後段は NOWAIT で
-// 「後段 lock を先取した想定外 writer」を待たずに即 rollback する。
-export const WRITER_MODE_SWITCH_TABLE_LOCK_SQL = `
-LOCK TABLE events IN EXCLUSIVE MODE;
-LOCK TABLE purchases IN ACCESS EXCLUSIVE MODE NOWAIT;
-LOCK TABLE ticket_types IN SHARE ROW EXCLUSIVE MODE NOWAIT;
-LOCK TABLE ticket_inventory IN SHARE ROW EXCLUSIVE MODE NOWAIT;
-LOCK TABLE ticket_type_inventory IN SHARE ROW EXCLUSIVE MODE NOWAIT;
-`;
 
 // assertNoCutoverViolations は violation が 1 件でもあれば category 一覧付きで
 // fail closed に停止します。
@@ -101,6 +107,9 @@ export interface ExecuteWriterModeSwitchResult {
   sourceMode: InventoryWriterMode;
   targetMode: InventoryWriterMode;
   schemaRevision: string;
+  // 切替後（target mode）の DB parity 検査の全 category 結果。成功時も「全 category
+  // violation 0 で commit した」ことの機械可読な証跡として呼び出し側が保存できる。
+  postSwitchDatabaseResults: TicketTypeCutoverReadinessResult[];
 }
 
 // executeWriterModeSwitch は ADR-0032 の切替 transaction を実行します。
@@ -111,9 +120,7 @@ export async function executeWriterModeSwitch(
   targetMode: InventoryWriterMode,
   options: ExecuteWriterModeSwitchOptions = {},
 ): Promise<ExecuteWriterModeSwitchResult> {
-  if (targetMode !== 'legacy' && targetMode !== 'ticket_type') {
-    throw new Error(`invalid target writer mode: ${String(targetMode)}`);
-  }
+  assertTargetWriterMode(targetMode);
   const sourceMode = oppositeWriterMode(targetMode);
   const timeouts: WriterModeSwitchTimeouts = {
     ...DEFAULT_WRITER_MODE_SWITCH_TIMEOUTS,
@@ -141,8 +148,9 @@ export async function executeWriterModeSwitch(
     // 排他 barrier: shared 保持中の in-flight writer の commit / abort を待って drain し、
     // 新規 writer を block する（lock_timeout が drain 待ちの上限になる）。
     await acquireExclusiveInventoryWriterBarrier(client);
-    // barrier を通らない直接 SQL writer / 旧 binary への defense-in-depth。
-    await client.query(WRITER_MODE_SWITCH_TABLE_LOCK_SQL);
+    // barrier を通らない直接 SQL writer / 旧 binary への defense-in-depth
+    // （#336 / #376 migration と同一の決定的 lock 順。共有定数）。
+    await client.query(INVENTORY_WRITER_TABLE_LOCK_SQL);
 
     // 切替前 parity: 現在の control state が source mode として無違反であることを確認する。
     const before = await checkCutoverDatabase(client, sourceMode);
@@ -168,12 +176,20 @@ export async function executeWriterModeSwitch(
 
     await updateInventoryWriterMode(client, targetMode);
 
-    // 切替後 parity: 同じ snapshot 上で target mode としても無違反であることを確認して
+    // 切替後 parity: 同じ transaction 上で target mode としても無違反であることを確認して
     // から commit する（違反があれば ROLLBACK され、mode 変更は永続化されない）。
     const after = await checkCutoverDatabase(client, targetMode);
     if (after.writerMode !== targetMode) {
       throw new Error(
         `writer mode switch aborted: control state did not converge to ${targetMode}`,
+      );
+    }
+    // table lock 対象外の table（typeorm_migrations 等）への migration commit は
+    // READ COMMITTED では statement ごとに可視になる。切替前後の 2 回の読み取りで
+    // revision が動いていたら fail closed で停止する。
+    if (after.schemaRevision !== before.schemaRevision) {
+      throw new Error(
+        `writer mode switch aborted: schema revision changed during switch transaction (started at ${before.schemaRevision}, found ${after.schemaRevision})`,
       );
     }
     assertNoCutoverViolations(after.results, `post-switch (${targetMode})`);
@@ -183,14 +199,42 @@ export async function executeWriterModeSwitch(
       sourceMode,
       targetMode,
       schemaRevision: before.schemaRevision,
+      postSwitchDatabaseResults: after.results,
     };
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      // ROLLBACK 失敗は握りつぶさず記録する。connection は aborted のままの可能性が
+      // あるため、呼び出し側は release(error) で pool へ返さず破棄する。
+      console.error('writer mode switch rollback failed');
+      console.error(
+        rollbackError instanceof Error
+          ? (rollbackError.stack ?? rollbackError.message)
+          : rollbackError,
+      );
+    }
     throw error;
   }
 }
 
 // --- preflight + 切替の合成（CLI 本体） ---
+
+// WriterModeSwitchPhaseTwoError は「preflight は green だったが切替 transaction が
+// 失敗した」ことを表します。構築済みの preflight evidence を保持し、呼び出し側
+// （CLI）が証跡として出力・保存できるようにします（evidence の握りつぶし防止）。
+export class WriterModeSwitchPhaseTwoError extends Error {
+  readonly evidence: string;
+
+  constructor(evidence: string, cause: unknown) {
+    const causeError = toError(cause);
+    super(`writer mode switch transaction failed: ${causeError.message}`, {
+      cause: causeError,
+    });
+    this.name = 'WriterModeSwitchPhaseTwoError';
+    this.evidence = evidence;
+  }
+}
 
 export interface WriterModeSwitchClients {
   pool: Pool;
@@ -220,21 +264,22 @@ export type WriterModeSwitchOutcome =
 // transaction を開始せず evidence を返します（呼び出し側は exit 2）。
 // Valkey / OpenSearch は DB transaction に参加できないため、直前の in-process 実行で
 // TOCTOU 窓を最小化し、DB parity だけは切替 transaction 内で再検査します。
+// Phase 2 の失敗は WriterModeSwitchPhaseTwoError として preflight evidence を添えて
+// 投げます。
 export async function runWriterModeSwitch(
   clients: WriterModeSwitchClients,
   options: RunWriterModeSwitchOptions,
 ): Promise<WriterModeSwitchOutcome> {
   const { pool, valkey, opensearch } = clients;
   const targetMode = options.targetMode;
-  if (targetMode !== 'legacy' && targetMode !== 'ticket_type') {
-    throw new Error(`invalid target writer mode: ${String(targetMode)}`);
-  }
+  assertTargetWriterMode(targetMode);
   const sourceMode = oppositeWriterMode(targetMode);
 
   // Phase 1: in-process preflight（check-ticket-type-cutover-readiness と同じ規則）。
   const snapshotClient = await pool.connect();
   let databaseCheck: Awaited<ReturnType<typeof checkCutoverDatabase>>;
   let valkeyResults: TicketTypeCutoverReadinessResult[];
+  let snapshotError: Error | undefined;
   let transactionStarted = false;
   try {
     await snapshotClient.query(
@@ -259,12 +304,24 @@ export async function runWriterModeSwitch(
     await snapshotClient.query('COMMIT');
     transactionStarted = false;
   } catch (error) {
+    snapshotError = toError(error);
     if (transactionStarted) {
-      await snapshotClient.query('ROLLBACK').catch(() => undefined);
+      try {
+        await snapshotClient.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('writer mode switch preflight rollback failed');
+        console.error(
+          rollbackError instanceof Error
+            ? (rollbackError.stack ?? rollbackError.message)
+            : rollbackError,
+        );
+      }
     }
     throw error;
   } finally {
-    snapshotClient.release();
+    // 失敗時は release(error) で connection を pool へ返さず破棄する
+    // （aborted transaction の connection を後続に再利用させない）。
+    snapshotClient.release(snapshotError);
   }
 
   // control state を attest できなければ切替を試みない（実行エラーで停止）。
@@ -284,14 +341,18 @@ export async function runWriterModeSwitch(
   // OpenSearch reconciliation は #377 実装が自前 snapshot を開始するため専用 connection。
   const projectionClient = await pool.connect();
   let opensearchCheck: Awaited<ReturnType<typeof checkCutoverOpenSearch>>;
+  let projectionError: Error | undefined;
   try {
     opensearchCheck = await checkCutoverOpenSearch(projectionClient, opensearch, {
       index: options.opensearchIndex,
       pageSize: options.pageSize,
       maxFindings: options.maxFindings,
     });
+  } catch (error) {
+    projectionError = toError(error);
+    throw error;
   } finally {
-    projectionClient.release();
+    projectionClient.release(projectionError);
   }
 
   const results = [
@@ -315,13 +376,18 @@ export async function runWriterModeSwitch(
 
   // Phase 2: 切替 transaction（drain・table lock・parity・UPDATE・parity を 1 transaction）。
   const switchClient = await pool.connect();
+  let switchError: Error | undefined;
   try {
     const result = await executeWriterModeSwitch(switchClient, targetMode, {
       expectedSchemaRevision: databaseCheck.schemaRevision,
       timeouts: options.timeouts,
     });
     return { status: 'switched', evidence, result };
+  } catch (error) {
+    switchError = toError(error);
+    // preflight green の evidence を添えて失敗を報告する（証跡の握りつぶし防止）。
+    throw new WriterModeSwitchPhaseTwoError(evidence, error);
   } finally {
-    switchClient.release();
+    switchClient.release(switchError);
   }
 }

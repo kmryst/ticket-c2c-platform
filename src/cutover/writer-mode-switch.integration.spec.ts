@@ -32,6 +32,7 @@ import { parseTicketTypeCutoverEvidence } from './ticket-type-cutover-readiness'
 import {
   executeWriterModeSwitch,
   runWriterModeSwitch,
+  WriterModeSwitchPhaseTwoError,
 } from './ticket-type-writer-mode-switch';
 import { Baseline1751594400000 } from '../database/migrations/1751594400000-baseline';
 import { AddUsers1783251707172 } from '../database/migrations/1783251707172-add-users';
@@ -314,6 +315,15 @@ describeIntegration(
             expect(outcome.result.schemaRevision).toBe(
               'AddTicketTypeCompatibilityWriter1785542400000',
             );
+            // 切替後（target mode）parity 検査の機械可読な証跡（全 category 0 件）。
+            expect(
+              outcome.result.postSwitchDatabaseResults.length,
+            ).toBeGreaterThan(0);
+            expect(
+              outcome.result.postSwitchDatabaseResults.every(
+                (r) => r.violationCount === 0,
+              ),
+            ).toBe(true);
             expect(await currentMode()).toBe(target);
 
             // preflight evidence は PR-1 parser でそのまま roundtrip できる。
@@ -411,43 +421,44 @@ describeIntegration(
       );
     });
 
-    it('lock 競合: shared barrier 保持中の in-flight writer がいると lock_timeout で失敗し、mode は変わらない', async () => {
+    it('lock 競合: shared barrier 保持中の in-flight writer がいると lock_timeout で失敗し、mode 不変・preflight evidence は保全される', async () => {
       await withHarness(
-        async ({ pool, seedEvent, seedAllCounters, currentMode }) => {
+        async ({ pool, seedEvent, seedAllCounters, rebuild, currentMode, runSwitch }) => {
           const { eventId, typeId } = await seedEvent(5);
           await seedAllCounters(eventId, typeId);
+          await rebuild();
 
           // in-flight writer を模す: 別 connection が shared barrier を保持したままにする。
           const writer = await pool.connect();
           await writer.query('BEGIN');
           await acquireSharedInventoryWriterBarrier(writer);
           try {
-            const client = await pool.connect();
+            // preflight は green（read-only で advisory lock に依存しない）だが、
+            // Phase 2 の排他 barrier 取得が lock_timeout（55P03）で失敗する。
+            // その場合も構築済み preflight evidence が error に添付される。
+            let caught: unknown;
             try {
-              await expect(
-                executeWriterModeSwitch(client, 'ticket_type', {
-                  timeouts: TEST_TIMEOUTS,
-                }),
-              ).rejects.toMatchObject({ code: '55P03' });
-            } finally {
-              client.release();
+              await runSwitch('ticket_type');
+            } catch (error) {
+              caught = error;
             }
+            expect(caught).toBeInstanceOf(WriterModeSwitchPhaseTwoError);
+            const phaseTwoError = caught as WriterModeSwitchPhaseTwoError;
+            expect(
+              (phaseTwoError.cause as { code?: string } | undefined)?.code,
+            ).toBe('55P03');
+            const parsed = parseTicketTypeCutoverEvidence(phaseTwoError.evidence);
+            expect(parsed.checkPhase).toBe('preflight');
+            expect(parsed.writerMode).toBe('legacy');
             expect(await currentMode()).toBe('legacy');
           } finally {
             await writer.query('ROLLBACK').catch(() => undefined);
             writer.release();
           }
 
-          // writer が commit（drain 完了）した後は切替が成功する。
-          const client = await pool.connect();
-          try {
-            const result = await executeWriterModeSwitch(client, 'ticket_type', {
-              timeouts: TEST_TIMEOUTS,
-            });
-            expect(result.targetMode).toBe('ticket_type');
-          } finally {
-            client.release();
-          }
+          // writer が完了（drain）した後は同じ経路で切替が成功する。
+          const outcome = await runSwitch('ticket_type');
+          expect(outcome.status).toBe('switched');
           expect(await currentMode()).toBe('ticket_type');
         },
       );

@@ -13,7 +13,9 @@
 // - 0: 切替成功（preflight evidence と切替結果を stdout へ 1 行 JSON で出力）
 // - 2: preflight violation あり（切替せず evidence を出力する）
 // - 1: 実行エラー（接続失敗・lock timeout・切替 transaction 内の違反検出・
-//      既に target mode・control state 不明等。切替は永続化されない）
+//      既に target mode・control state 不明等。切替は永続化されない。
+//      preflight green 後の切替 transaction 失敗時は、構築済み preflight evidence を
+//      stdout へ出力してから停止する）
 //
 // この CLI は inventory_writer_control の 1 行 UPDATE 以外に何も書き込みません。
 // Valkey / OpenSearch の seed / reconcile / rebuild は #389 / #377 の primitive と
@@ -26,26 +28,16 @@ import { EVENTS_INDEX } from '../search/events-projection.store';
 import {
   createProjectionClients,
   parseIntOption,
+  parseStringOption,
 } from '../search/projection-cli.shared';
 import type { InventoryWriterMode } from '../database/inventory-writer-control';
-import { runWriterModeSwitch } from './ticket-type-writer-mode-switch';
+import {
+  runWriterModeSwitch,
+  WriterModeSwitchPhaseTwoError,
+} from './ticket-type-writer-mode-switch';
 
 const USAGE =
   'usage: --target-mode <legacy|ticket_type> [--page-size N] [--max-findings N]';
-
-// parseStringOption は `--name=value` / `--name value` 形式の文字列オプションを読みます。
-function parseStringOption(argv: string[], name: string): string | undefined {
-  const prefix = `--${name}=`;
-  const eq = argv.find((a) => a.startsWith(prefix));
-  if (eq) {
-    return eq.slice(prefix.length);
-  }
-  const idx = argv.indexOf(`--${name}`);
-  if (idx >= 0 && idx + 1 < argv.length) {
-    return argv[idx + 1];
-  }
-  return undefined;
-}
 
 // --target-mode は既定値を持たない必須オプションにする。activation と rollback は
 // 同じ CLI の逆方向実行なので、方向を明示しない実行は使用エラーで停止する（fail closed）。
@@ -82,15 +74,25 @@ async function main(): Promise<void> {
   try {
     await valkey.connect();
 
-    const outcome = await runWriterModeSwitch(
-      { pool, valkey, opensearch },
-      {
-        targetMode,
-        opensearchIndex: EVENTS_INDEX,
-        pageSize,
-        maxFindings,
-      },
-    );
+    let outcome;
+    try {
+      outcome = await runWriterModeSwitch(
+        { pool, valkey, opensearch },
+        {
+          targetMode,
+          opensearchIndex: EVENTS_INDEX,
+          pageSize,
+          maxFindings,
+        },
+      );
+    } catch (error) {
+      // preflight green 後に切替 transaction が失敗した場合も、構築済みの preflight
+      // evidence を証跡として stdout へ残してから実行エラーで停止する（握りつぶし防止）。
+      if (error instanceof WriterModeSwitchPhaseTwoError) {
+        console.log(error.evidence);
+      }
+      throw error;
+    }
 
     // preflight evidence は成否にかかわらず証跡として出力する（secret を含まない）。
     console.log(outcome.evidence);
@@ -107,11 +109,25 @@ async function main(): Promise<void> {
         sourceMode: outcome.result.sourceMode,
         targetMode: outcome.result.targetMode,
         schemaRevision: outcome.result.schemaRevision,
+        // 切替 transaction 内の target mode parity 検査（全 category violation 0 で
+        // commit したこと）の機械可読な証跡。
+        postSwitchDatabaseResults: outcome.result.postSwitchDatabaseResults,
       }),
     );
   } finally {
+    // cleanup の失敗で本体の結果（切替成功 = exit 0 / violation = exit 2）を
+    // 上書きしない。切替は commit 済みであり、cleanup 失敗は stderr への記録に留める。
     valkey.disconnect();
-    await pool.end();
+    try {
+      await pool.end();
+    } catch (poolEndError) {
+      console.error('writer mode switch cleanup failed: pool shutdown error');
+      console.error(
+        poolEndError instanceof Error
+          ? (poolEndError.stack ?? poolEndError.message)
+          : poolEndError,
+      );
+    }
   }
 }
 

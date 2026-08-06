@@ -10,6 +10,20 @@ export type InventoryWriterMode = 'legacy' | 'ticket_type';
 // requestId lock は bigint key-space を使うため、この 2-key barrier と衝突しません。
 export const INVENTORY_WRITER_BARRIER_KEYS = [335, 376] as const;
 
+// INVENTORY_WRITER_TABLE_LOCK_SQL は既知 writer 入口を閉じる決定的な table lock 順です。
+// #336 / #376 migration の LOCK_WRITER_TABLES_SQL と同一文字列を共有の正とし、
+// 一致は単体テスト（ticket-type-writer-mode-switch.spec.ts）で強制します
+// （適用済み migration の up() 本体には手を入れない）。
+export const INVENTORY_WRITER_TABLE_LOCK_SQL = `
+-- 旧 writer の入口である events を先に gate とし、既存 transaction を drain する。
+-- 後段 table に想定外の直接 writer がいれば、events を保持したまま待たず rollback する。
+LOCK TABLE events IN EXCLUSIVE MODE;
+LOCK TABLE purchases IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK TABLE ticket_types IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+LOCK TABLE ticket_inventory IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+LOCK TABLE ticket_type_inventory IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+`;
+
 type QueryClient = Pick<PoolClient, 'query'>;
 
 export async function acquireSharedInventoryWriterBarrier(

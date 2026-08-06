@@ -9,9 +9,12 @@ import {
   DEFAULT_WRITER_MODE_SWITCH_TIMEOUTS,
   executeWriterModeSwitch,
   oppositeWriterMode,
-  WRITER_MODE_SWITCH_TABLE_LOCK_SQL,
 } from './ticket-type-writer-mode-switch';
-import type { InventoryWriterMode } from '../database/inventory-writer-control';
+import {
+  INVENTORY_WRITER_TABLE_LOCK_SQL,
+  InventoryWriterMode,
+} from '../database/inventory-writer-control';
+import { LOCK_WRITER_TABLES_SQL } from '../database/migrations/1785542400000-add-ticket-type-compatibility-writer';
 
 // checkCutoverDatabase が要求する DB / control / schema category（13 件）。
 const DATABASE_CATEGORIES = [
@@ -36,6 +39,9 @@ interface FakeClientOptions {
   // 何回目の readiness 検査で violation を返すか（1-origin。undefined なら常に 0 件）。
   violationOnReadinessCall?: number;
   violationCategory?: (typeof DATABASE_CATEGORIES)[number];
+  // readiness 検査の回数（1-origin）ごとに schemaRevision を差し替える
+  // （切替 transaction 中の migration commit を模す）。
+  schemaRevisionByReadinessCall?: Record<number, string>;
 }
 
 interface FakeClient {
@@ -96,7 +102,10 @@ function createFakeClient(options: FakeClientOptions): FakeClient {
           : { rows: [{ writer_mode: fake.currentMode }], rowCount: 1 };
       }
       if (sql.includes('FROM public.typeorm_migrations')) {
-        return { rows: [{ name: schemaRevision }], rowCount: 1 };
+        const name =
+          options.schemaRevisionByReadinessCall?.[readinessCalls] ??
+          schemaRevision;
+        return { rows: [{ name }], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
     },
@@ -143,11 +152,18 @@ describe('executeWriterModeSwitch', () => {
     const fake = createFakeClient({ initialMode: 'legacy' });
     const result = await executeWriterModeSwitch(fake, 'ticket_type');
 
-    expect(result).toEqual({
-      sourceMode: 'legacy',
-      targetMode: 'ticket_type',
-      schemaRevision: 'AddTicketTypeCompatibilityWriter1785542400000',
-    });
+    expect(result.sourceMode).toBe('legacy');
+    expect(result.targetMode).toBe('ticket_type');
+    expect(result.schemaRevision).toBe(
+      'AddTicketTypeCompatibilityWriter1785542400000',
+    );
+    // 切替後（target mode）parity 検査の全 category 結果を機械可読な証跡として返す。
+    expect(result.postSwitchDatabaseResults).toHaveLength(
+      DATABASE_CATEGORIES.length,
+    );
+    expect(
+      result.postSwitchDatabaseResults.every((r) => r.violationCount === 0),
+    ).toBe(true);
     expect(fake.committed).toBe(true);
     expect(fake.rolledBack).toBe(false);
     expect(fake.currentMode).toBe('ticket_type');
@@ -182,7 +198,13 @@ describe('executeWriterModeSwitch', () => {
     expect(commit).toBeGreaterThan(secondParity);
   });
 
-  it('table lock 順は #336 / #376 migration と同一（events → purchases → ticket_types → ticket_inventory → ticket_type_inventory）', () => {
+  it('共有 table lock SQL は #336 / #376 migration の LOCK_WRITER_TABLES_SQL と完全一致する', () => {
+    // 共有定数と適用済み migration の lock 順が乖離したらこのテストで検出する
+    // （migration の up() 本体は変更しない。export のみ追加）。
+    expect(INVENTORY_WRITER_TABLE_LOCK_SQL).toBe(LOCK_WRITER_TABLES_SQL);
+  });
+
+  it('table lock 順は決定的（events → purchases → ticket_types → ticket_inventory → ticket_type_inventory）', () => {
     const order = [
       'LOCK TABLE events IN EXCLUSIVE MODE;',
       'LOCK TABLE purchases IN ACCESS EXCLUSIVE MODE NOWAIT;',
@@ -192,7 +214,7 @@ describe('executeWriterModeSwitch', () => {
     ];
     let cursor = -1;
     for (const statement of order) {
-      const next = WRITER_MODE_SWITCH_TABLE_LOCK_SQL.indexOf(statement);
+      const next = INVENTORY_WRITER_TABLE_LOCK_SQL.indexOf(statement);
       expect(next).toBeGreaterThan(cursor);
       cursor = next;
     }
@@ -259,13 +281,48 @@ describe('executeWriterModeSwitch', () => {
     expect(indexOfExecuted(fake, 'UPDATE inventory_writer_control')).toBe(-1);
   });
 
+  it('切替 transaction 中に schema revision が動いたら COMMIT せず停止する', async () => {
+    // table lock 対象外の typeorm_migrations への commit は READ COMMITTED で
+    // statement ごとに可視になる。切替前後の 2 回の読み取りで差分を検出する。
+    const fake = createFakeClient({
+      initialMode: 'legacy',
+      schemaRevisionByReadinessCall: {
+        2: 'SomeNewerMigration1790000000000',
+      },
+    });
+    await expect(
+      executeWriterModeSwitch(fake, 'ticket_type'),
+    ).rejects.toThrow(/schema revision changed during switch transaction/);
+    expect(fake.rolledBack).toBe(true);
+    expect(fake.committed).toBe(false);
+  });
+
+  it('timeout 0（PostgreSQL では timeout 無効化）は拒否する', async () => {
+    for (const zero of ['0s', '0ms', '000min']) {
+      const fake = createFakeClient({ initialMode: 'legacy' });
+      await expect(
+        executeWriterModeSwitch(fake, 'ticket_type', {
+          timeouts: { lockTimeout: zero },
+        }),
+      ).rejects.toThrow(/lock_timeout must be a positive duration/);
+      expect(fake.executed).toHaveLength(0);
+    }
+    const fakeStatement = createFakeClient({ initialMode: 'legacy' });
+    await expect(
+      executeWriterModeSwitch(fakeStatement, 'ticket_type', {
+        timeouts: { statementTimeout: '0s' },
+      }),
+    ).rejects.toThrow(/statement_timeout must be a positive duration/);
+    expect(fakeStatement.executed).toHaveLength(0);
+  });
+
   it('不正な timeout literal は transaction 開始前に拒否する', async () => {
     const fake = createFakeClient({ initialMode: 'legacy' });
     await expect(
       executeWriterModeSwitch(fake, 'ticket_type', {
         timeouts: { lockTimeout: "10s'; DROP TABLE events; --" },
       }),
-    ).rejects.toThrow(/lock_timeout must match/);
+    ).rejects.toThrow(/lock_timeout must be a positive duration/);
     expect(fake.executed).toHaveLength(0);
   });
 
