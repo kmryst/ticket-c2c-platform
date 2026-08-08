@@ -73,7 +73,7 @@ counter と revision は hash tag `{<eventId>:<ticketTypeId>}` を共有し、Re
 
 ### 経路選択（writer mode 追従）
 
-前段フィルタが Event 単位 counter と Ticket Type 単位 counter のどちらを使うかは、`inventory_writer_control.writer_mode`（#378 所有）に追従します。Valkey 単独の activation switch は追加しません。
+前段フィルタが Event 単位 counter と Ticket Type 単位 counter のどちらを使うかは、`inventory_writer_control.writer_mode`（#378 所有）に追従します。Valkey 単独の activation switch は追加しません。なお、fresh session の final cleanup における切替の所有は final cleanup transaction へ移管します（[ADR-0033](../adr/0033-ticket-type-migration-irreversible-boundaries.md)）。
 
 - `legacy` mode: 従来どおり Event 単位 counter を使う。
 - `ticket_type` mode: Ticket Type 単位 counter を使う。
