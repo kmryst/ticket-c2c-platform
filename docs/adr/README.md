@@ -103,3 +103,4 @@ YYYY-MM-DD
 | [0030](./0030-ticket-type-valkey-inventory-compatibility.md) | Ticket Type 単位の Valkey 在庫前段フィルタを compatibility artifact として実装する | Accepted |
 | [0031](./0031-versioned-ticket-type-search-projection.md) | version 付き Ticket Type 在庫 event と検索 projection を実装する | Accepted |
 | [0032](./0032-single-transaction-writer-mode-switch-cli.md) | writer mode切替を排他barrier下の単一transaction CLIで行う | Accepted |
+| [0033](./0033-ticket-type-migration-irreversible-boundaries.md) | Ticket Type 移行の不可逆境界を policy / enforcement / evidence 分離で配置する | Accepted |

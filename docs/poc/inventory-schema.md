@@ -83,7 +83,7 @@ DB は次を強制する。
 | `writer_mode` | `TEXT` | `legacy` または `ticket_type` |
 | `updated_at` | `TIMESTAMPTZ` | mode 更新日時 |
 
-row は正確に1件で、初期値は `legacy` である。application writer は shared barrier の取得後にこの row を読む。Issue #376 は切替可能な artifact までを所有し、exclusive barrier、preflight、実環境 activation / rollback は Issue #378 が所有する。
+row は正確に1件で、初期値は `legacy` である。application writer は shared barrier の取得後にこの row を読む。Issue #376 は切替可能な artifact までを所有し、exclusive barrier、preflight、実環境 activation / rollback は Issue #378 が所有する。fresh session の final cleanup に限り、切替の所有は final cleanup transaction へ移管する（[ADR-0033](../adr/0033-ticket-type-migration-irreversible-boundaries.md)）。
 
 ### `ticket_inventory`
 
