@@ -238,4 +238,4 @@ ADR-0031 の rollback 方針に統一する。
 > rebuild で OpenSearch を再収束させる。OpenSearch から PostgreSQL へ逆同期しない。
 
 - mapping は additive なので rollback 時に field や index を削除しない。
-- 在庫 read/write 全体の activation / rollback は #378 が所有する。
+- 在庫 read/write 全体の activation / rollback は #378 が所有する。fresh session の final cleanup における writer mode 切替の所有は final cleanup transaction へ移管する（[ADR-0033](../adr/0033-ticket-type-migration-irreversible-boundaries.md)）。
