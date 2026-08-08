@@ -32,7 +32,7 @@ jobs:
   # caller job には name を付けない。job id にフォールバックさせることで、
   # callee側 job 名（Dependency Audit）との文字列重複を避ける（idp-golden-path#106参照）。
   root:
-    uses: kmryst/idp-golden-path/.github/workflows/dependency-audit.yml@v1.3.1
+    uses: kmryst/idp-golden-path/.github/workflows/dependency-audit.yml@v1.4.0
     with:
       package-manager: npm
       working-directory: .
@@ -40,7 +40,7 @@ jobs:
       contents: read
 
   frontend:
-    uses: kmryst/idp-golden-path/.github/workflows/dependency-audit.yml@v1.3.1
+    uses: kmryst/idp-golden-path/.github/workflows/dependency-audit.yml@v1.4.0
     with:
       package-manager: npm
       working-directory: frontend
