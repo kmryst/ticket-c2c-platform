@@ -105,3 +105,4 @@ ValkeyとOpenSearchは切替transactionに参加できない。次の3層で扱�
 - evidence formatにversion 2（取得時刻等）が導入され、外部evidence入力の鮮度検証が可能になったとき。
 - Issue #391 / contract cleanupでcompatibility artifactを撤去するとき。
 - 切替の実行頻度が上がり、購入API停止を伴わないonline切替（段階的traffic shift等）が要件になったとき。
+- fresh session の final cleanup への切替所有の移管（[ADR-0033](./0033-ticket-type-migration-irreversible-boundaries.md)）が実装されたとき。本CLIは移管後に退役する。

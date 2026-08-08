@@ -22,7 +22,7 @@ application設定だけで正本を切り替えると、複数ECS taskの設定�
 
 singleton table `inventory_writer_control`を作り、`writer_mode`を`legacy`または`ticket_type`に制限する。migrationが作る初期rowは必ず`legacy`とし、schema再適用でも既存modeを上書きしない。
 
-PR merge、deploy、migration適用はactive writerを変更しない。exclusive barrier、preflight、環境ごとのmode transitionとrollbackはIssue #378が所有する。
+PR merge、deploy、migration適用はactive writerを変更しない。exclusive barrier、preflight、環境ごとのmode transitionとrollbackはIssue #378が所有する。ただし、fresh session の final cleanup における `legacy -> ticket_type` 切替の所有は final cleanup transaction へ移管する（[ADR-0033](./0033-ticket-type-migration-irreversible-boundaries.md)）。
 
 ### barrierとlock順序
 
