@@ -23,6 +23,14 @@ import {
   ticketTypeCounterKey,
   ticketTypeCounterRevisionKey,
 } from './inventory-cache.keys';
+// init / ticket-type sync の Lua script は inventory-cache.scripts.ts が正本です
+// （Issue #378 で seed / reconcile CLI と共有するため抽出。script 文字列は不変）。
+// reserve / release / legacy sync は購入 API 専用のためこのファイルに残しています。
+import {
+  INIT_SCRIPT,
+  TICKET_TYPE_INIT_SCRIPT,
+  TICKET_TYPE_SYNC_SCRIPT,
+} from './inventory-cache.scripts';
 // emitMetric は Valkey fail-open（障害時に判定を DB へ流した事象）の発生量を記録します（ADR-0014）。
 import { emitMetric } from '../observability/emf';
 
@@ -53,15 +61,6 @@ export interface TicketTypeReserveResult {
 // 売り切れ後の再送をどこまで idempotent replay として救済するかの窓で、
 // クライアントの現実的なリトライ間隔（秒〜分）に対して十分長い 24 時間とします。
 const REQUEST_SEEN_TTL_SECONDS = 24 * 60 * 60;
-
-// INIT_SCRIPT はイベント作成時のカウンタ初期化です。
-// KEYS[1]=カウンタ、KEYS[2]=version。version を進めることで、
-// 初期化をまたいだ古い syncCounter の CAS を失敗させます。
-const INIT_SCRIPT = `
-redis.call('SET', KEYS[1], ARGV[1])
-redis.call('INCR', KEYS[2])
-return 'initialized'
-`;
 
 // RESERVE_SCRIPT は「存在確認 → 在庫比較 → 減算」を Valkey 上で原子的に行う Lua script です。
 // GET と DECRBY を分けると同時リクエストで過剰減算が起きるため 1 script にまとめます。
@@ -117,14 +116,6 @@ return 'synced'
 // - inventory:ticket-type:{<eventId>:<ticketTypeId>}:remaining
 // - inventory:ticket-type:{<eventId>:<ticketTypeId>}:revision
 
-// TICKET_TYPE_INIT_SCRIPT は明示的な counter 初期化です。
-// #378 の seed か、EventsService が ticket_type mode で作った default Type だけが呼びます。
-const TICKET_TYPE_INIT_SCRIPT = `
-redis.call('SET', KEYS[1], ARGV[1])
-redis.call('INCR', KEYS[2])
-return 'initialized'
-`;
-
 // TICKET_TYPE_RESERVE_SCRIPT は「存在確認 → 在庫比較 → 減算 → revision 更新 →
 // race-safe な revision 取得」を 1 script で原子的に行います。
 // reserved 時だけ減算後の revision を返します。counter 不在は unknown（fail-open）とし、
@@ -151,25 +142,6 @@ end
 redis.call('INCRBY', KEYS[1], ARGV[1])
 redis.call('INCR', KEYS[2])
 return 'released'
-`;
-
-// TICKET_TYPE_SYNC_SCRIPT は DB の Ticket Type 残数による CAS 上書きです。
-// counter 不在時はキーを作らず skip します（未 seed の Type を暗黙 activation しない）。
-// ARGV[2]（DB 判定前に控えた revision）と現在の revision が一致する場合だけ SET します。
-const TICKET_TYPE_SYNC_SCRIPT = `
-if redis.call('EXISTS', KEYS[1]) == 0 then
-  return 'skipped'
-end
-local revision = redis.call('GET', KEYS[2])
-if revision == false then
-  revision = '0'
-end
-if revision ~= ARGV[2] then
-  return 'skipped'
-end
-redis.call('SET', KEYS[1], ARGV[1])
-redis.call('INCR', KEYS[2])
-return 'synced'
 `;
 
 @Injectable()
