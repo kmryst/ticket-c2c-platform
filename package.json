@@ -42,7 +42,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@aws-sdk/client-eventbridge": "^3.1096.0",
+    "@aws-sdk/client-eventbridge": "^3.1104.0",
     "@aws-sdk/client-secrets-manager": "^3.1084.0",
     "@aws-sdk/client-sqs": "^3.1097.0",
     "@aws-sdk/credential-provider-node": "^3.972.78",
