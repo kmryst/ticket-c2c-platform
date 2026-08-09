@@ -8,12 +8,42 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      # TypeScript 7 は ts-jest が未対応。
+      # 実測: ts-jest@29.4.12（本リポジトリ現行、npm latest も同一）の peer は typescript ">=4.3 <7"（2026-08-09 npm view）。
+      # 影響: Dependabot PR #343（6.0.3→7.0.2）で Backend Build / Playwright E2E が失敗。
+      # 本番影響なし: typescript は devDependency でビルド時のみ。
+      # 解除条件: ts-jest の peer から <7 の上限が外れ、typescript@7 で build / test が通ったら。
+      # frontend の typescript major はブロック元が別（typescript-eslint）のため追跡 Issue を分ける。
+      # 見直し期限: 2026-11-02（terraform-hannibal #542 / idp-golden-path #146 の棚卸し時期と揃える）
+      # 追跡: Issue #425
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      # TypeScript 6.1 以降は typescript-eslint が未対応。
+      # 実測: typescript-eslint@8.66.0（npm latest。本リポジトリは 8.62.1）の peer は typescript ">=4.8.4 <6.1.0"（2026-08-09 npm view）。
+      # 影響: Dependabot PR #353（5.9.3→7.0.2）で Frontend Build / Playwright E2E が失敗。
+      # 本番影響なし: typescript は devDependency でビルド時のみ。
+      # 解除条件: typescript-eslint の peer から <6.1.0 の上限が外れ、typescript@7 で build / lint が通ったら。
+      # 見直し期限: 2026-11-02（root typescript / terraform-hannibal #542 と揃える）
+      # 追跡: Issue #426
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # ESLint 10 は eslint-plugin-react が未対応。
+      # 実測: eslint-plugin-react@7.37.5 の peer eslint は "^3||^4||^5||^6||^7||^8||^9.7" で ^10 なし（2026-08-09 npm view）。
+      # 影響: Dependabot PR #356（9.39.4→10.8.0）で Frontend Build が失敗。
+      # 本番影響なし: eslint は devDependency で lint 時のみ。
+      # 解除条件: eslint-plugin-react の peer が eslint ^10 を許容し、eslint@10 で lint が通ったら。
+      # 見直し期限: 2026-11-02（他 2 件と揃える）
+      # 追跡: Issue #427
+      - dependency-name: "eslint"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
