@@ -299,6 +299,107 @@ describeWithPostgres(
       });
     });
 
+    // ADR-0029 が想定した「compatibility 期間中に旧 binary が rejected key を再試行する」
+    // 操作列を DB transaction として直接組み立て、統合 requestId index が
+    // 在庫補充を含む multi-statement transaction ごと拒否することを確認する（Issue #378）。
+    // 既存 case（同 spec の confirmed 先行 → rejected 試行）とは順序が逆で、
+    // 「rollback が部分書き込みを残さない」ことも未カバーだった。
+    it('rejected key再試行は在庫補充を含むtransactionごと23505で拒否し部分書き込みを残さない', async () => {
+      await withExpandedDatabase(async (dataSource) => {
+        const buyerId = await seedUser(dataSource);
+        const event = await seedEvent(dataSource, 10);
+        await applyMigration(
+          dataSource,
+          new AddTicketTypeCompatibilityWriter1785542400000(),
+          'up',
+        );
+
+        // 先行する確定販売で残数を減らしておく（在庫補充 UPDATE が
+        // remaining <= total の check 制約に当たらない状態を作る）。
+        await dataSource.query(
+          `
+            UPDATE ticket_inventory
+            SET remaining_quantity = remaining_quantity - 2,
+                version = version + 1,
+                updated_at = now()
+            WHERE event_id = $1
+          `,
+          [event.eventId],
+        );
+
+        const requestId = 'rejected-then-confirm-retry';
+        await insertPurchase(dataSource, {
+          buyerId,
+          event,
+          requestId,
+          status: 'rejected',
+          quantity: 2,
+        });
+
+        const legacyBefore = await readLegacyAggregate(
+          dataSource,
+          event.eventId,
+        );
+        const shadowBefore = await readTypeInventory(
+          dataSource,
+          event.defaultTicketTypeId,
+        );
+        expect(await countPurchases(dataSource, requestId)).toBe(1);
+
+        // 旧 write pattern（在庫補充 UPDATE → 同一 requestId の confirmed insert）を
+        // 1 transaction で組み立てる。confirmed insert が統合 index に当たって失敗し、
+        // 先行する在庫補充ごと rollback されることを確認する。
+        const runner = dataSource.createQueryRunner();
+        await runner.connect();
+        await runner.startTransaction();
+        try {
+          await runner.query(
+            `
+              UPDATE ticket_inventory
+              SET remaining_quantity = remaining_quantity + 2,
+                  version = version + 1,
+                  updated_at = now()
+              WHERE event_id = $1
+            `,
+            [event.eventId],
+          );
+          await expectPgError(
+            runner.query(
+              `
+                INSERT INTO purchases (
+                  event_id,
+                  ticket_type_id,
+                  buyer_id,
+                  request_id,
+                  quantity,
+                  status,
+                  remaining_quantity_after
+                )
+                VALUES ($1, $2, $3, $4, 2, 'confirmed', 0)
+              `,
+              [event.eventId, event.defaultTicketTypeId, buyerId, requestId],
+            ),
+            '23505',
+            // 統合前の rejected 専用 index ではなく、統合 index 名で拒否される。
+            'purchases_request_id_uq',
+          );
+        } finally {
+          if (runner.isTransactionActive) await runner.rollbackTransaction();
+          await runner.release();
+        }
+
+        // rollback 後に在庫（legacy 集計と shadow の Type 在庫の両方）と purchases 件数が
+        // transaction 前と完全一致する（部分書き込みなし）。
+        expect(await readLegacyAggregate(dataSource, event.eventId)).toEqual(
+          legacyBefore,
+        );
+        expect(
+          await readTypeInventory(dataSource, event.defaultTicketTypeId),
+        ).toEqual(shadowBefore);
+        expect(await countPurchases(dataSource, requestId)).toBe(1);
+      });
+    });
+
     it('shared writer barrierとexclusive activation barrierを実lock waitで相互排他にする', async () => {
       await withExpandedDatabase(async (dataSource, databaseUrl) => {
         await applyMigration(
@@ -1166,15 +1267,20 @@ function expectConflictResult(results: PromiseSettledResult<unknown>[]): void {
   }
 }
 
+// constraint は任意。指定した場合は SQLSTATE だけでなく制約名まで assert する
+// （既存呼び出しは code のみのまま不変）。
 async function expectPgError(
   promise: Promise<unknown>,
   code: string,
+  constraint?: string,
 ): Promise<void> {
   try {
     await promise;
     throw new Error(`expected PostgreSQL error ${code}`);
   } catch (error) {
-    expect(error).toMatchObject({ code });
+    expect(error).toMatchObject(
+      constraint === undefined ? { code } : { code, constraint },
+    );
   }
 }
 
