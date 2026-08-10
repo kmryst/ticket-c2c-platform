@@ -26,7 +26,8 @@ activation / rollback / postflight の実行順序、合格条件（数値）、
 | 在庫数量 | Aurora PostgreSQL（`ticket_inventory` / `ticket_type_inventory`） | 購入 API（compatibility writer） | Gate B 中に人手で UPDATE しない |
 | control state | Aurora `inventory_writer_control`（1 行） | switch CLI（ADR-0032）のみ | CLI は control row の 1 行 UPDATE 以外に何も書かない |
 | Valkey counter / revision | Aurora（前段フィルタなので再構築可能） | seed / reconcile CLI（`run-cutover-task.sh` の counter operation: `seed-ticket-type` / `seed-legacy` / `reconcile-ticket-type` / `reconcile-legacy`）と稼働中 writer のみ | `redis-cli` 手打ち禁止（counter と revision の対が壊れる）。cutover workflow の choice には載せない |
-| OpenSearch projection | Aurora（projection なので再構築可能） | rebuild / repair CLI のみ | 逆同期しない |
+| OpenSearch mapping | `EVENTS_INDEX_PROPERTIES`（コード） | `search-index:migrate`（`run-cutover-task.sh` の `search-index-migrate`）のみ | additive のみ。**新 Worker 起動前に適用する**（4 章冒頭） |
+| OpenSearch projection | Aurora（projection なので再構築可能） | rebuild / repair CLI のみ（`run-cutover-task.sh` の `projection-rebuild` / `projection-reconcile`。repair は command override） | 逆同期しない。cutover workflow の choice には載せない |
 
 read path は writer mode に従う。`legacy` mode では Event 単位 counter（`inventory:<eventId>`）、
 `ticket_type` mode では Type 単位 counter（`inventory:ticket-type:{<eventId>:<ticketTypeId>}:remaining`）を
@@ -70,6 +71,69 @@ CLUSTER="ticket-c2c-${ENV}"
 API_SERVICE="ticket-c2c-${ENV}-api"
 WORKER_SERVICE="ticket-c2c-${ENV}-worker"
 ```
+
+### 前提: OpenSearch mapping migration は compatibility release の中で済ませる
+
+**この節は Gate B session の手順ではなく、session に入る前提となる release 手順である。**
+Gate B session に入った時点で mapping migration が終わっていないと、後から実行しても手遅れになる。
+
+根拠（[projection runbook](./search-projection-reconciliation-rebuild.md#新-worker-起動前に-1-回が守れなかった場合に起きること順序が本質である理由) が正本）:
+
+- Worker の起動処理（`assertEventsIndexExists`）は **index の存在しか確認せず mapping を適用しない**。
+  index が既にあれば、mapping migration を飛ばしても新 Worker は起動できてしまう。
+- その状態で新 Worker が `ticket_types` を書くと、dynamic mapping が `ticket_types` を `object`
+  として作る。OpenSearch は既存 field の型を変更できないため、以後の additive putMapping は
+  恒久的に失敗し、**index の作り直しが必要になる**。
+
+したがって compatibility release は次の順序で行う（`ticket_types` を書き得る **Worker を起動する前に**
+mapping を適用し終える）。
+
+1. **Worker service を停止側へ倒す**（新 Worker を起動させないため。desiredCount を控えてから 0 にする）。
+
+   ```bash
+   WORKER_DESIRED=$(aws ecs describe-services --cluster "$CLUSTER" \
+     --services "$WORKER_SERVICE" --query 'services[0].desiredCount' --output text)
+   echo "restore target desiredCount = ${WORKER_DESIRED}"   # 復帰用に控える
+   aws ecs update-service --cluster "$CLUSTER" --service "$WORKER_SERVICE" --desired-count 0
+   aws ecs wait services-stable --cluster "$CLUSTER" --services "$WORKER_SERVICE"
+   ```
+
+2. **`deploy-backend-<env>.yml` を実行する**（compatibility artifact をデプロイ）。
+   この workflow は API / Worker の task definition を新 image で register してから service を
+   更新するが、**register と update の間で止める入力を持たない**（`deploy-service.yml` の
+   `Register SHA-pinned task definitions` → `Update services` は同一 job 内で連続する）。
+   Worker の desiredCount を 0 にしておくことが、「新 Worker を起動させずに新 image の
+   task definition を得る」唯一の既存手段である。
+3. **新 API task definition で mapping migration を実行する**。この時点で Worker task は 0 件なので、
+   `ticket_types` を書く経路は存在しない（API は events index を読むだけで書かない）。
+
+   ```bash
+   TASK_DEFINITION_ARN=$(aws ecs describe-services --cluster "$CLUSTER" \
+     --services "$API_SERVICE" --query 'services[0].taskDefinition' --output text)
+
+   AWS_REGION=ap-northeast-1 \
+   CUTOVER_EVIDENCE_FILE="$(pwd)/projection-evidence-${ENV}.jsonl" \
+     ./scripts/deployment/run-cutover-task.sh \
+       "$CLUSTER" "$API_SERVICE" "$TASK_DEFINITION_ARN" search-index-migrate
+   echo "exit=$?"
+   ```
+
+4. **`ticket_types.type == nested` を positive に確認する**。
+   `search-index-migrate` の **exit 0 が型の positive 証拠**になる: この CLI は
+   `ticket_types: {type: nested}` の putMapping を送るので、既存 mapping が `object` に化けていれば
+   OpenSearch が `illegal_argument_exception`（`mapper [ticket_types] cannot be changed from type
+   [object] to [nested]`）で拒否し、CLI は exit 1 になる。**exit 1 なら release を止める**
+   （index の作り直しが必要。#377 へエスカレーションする）。
+   `aws opensearch` API は index の mapping を返さないため、この確認には使えない。
+5. **Worker service を復帰させ、rolling 完了を待つ**。
+
+   ```bash
+   aws ecs update-service --cluster "$CLUSTER" --service "$WORKER_SERVICE" \
+     --desired-count "$WORKER_DESIRED"
+   aws ecs wait services-stable --cluster "$CLUSTER" --services "$WORKER_SERVICE"
+   ```
+
+**Gate B session（下記 step 0 以降）は、この 5 手順が完了してから開始する。**
 
 0. **session 開始時の禁止 workflow 空確認**
    - 実行: 7 章の禁止 workflow に queued / in_progress / waiting / pending / requested の run が
@@ -137,11 +201,46 @@ WORKER_SERVICE="ticket-c2c-${ENV}-worker"
    - 実行: dashboard「Search Projection source queue」widget で backlog と oldest message age を見る。
    - 合格条件: backlog 0 / oldest age 0。
    - 停止条件: 非 0 のまま収束しない場合は projection runbook の検出信号切り分けへ。
-4. **OpenSearch mapping migration / rebuild / reconciliation**
-   - 実行: [projection runbook](./search-projection-reconciliation-rebuild.md) に委譲する
-     （`search-index:migrate` → `projection:rebuild` → `projection:reconcile`）。
-   - 合格条件: reconciliation の差分 0（`metadata_mismatch` を含む）。
-   - 停止条件: `contract_corruption` / `malformed_projection` が出た場合は activation を止める。
+4. **OpenSearch projection の rebuild / reconciliation**
+   - 前提: mapping migration は本章冒頭の release 手順で **新 Worker 起動前に**完了している。
+     この step では mapping を新規に適用しない（適用点はここではない）。
+   - 実行: 手順の意味づけは [projection runbook](./search-projection-reconciliation-rebuild.md) が
+     正本。実行手段は `run-cutover-task.sh` の projection operation（VPC 内 OpenSearch へ
+     operator 端末から直接接続できないため、CLI を素で叩かない）。
+
+     ```bash
+     # step 1 で控えた承認済み API task definition ARN を明示する（`current` に解決させない）。
+     PROJECTION_EVIDENCE="$(pwd)/cutover-evidence-${ENV}-projection.jsonl"
+
+     # 4-a. mapping の positive 確認（適用ではなく検査として実行する）。
+     #      exit 0 = ticket_types が nested である証拠。exit 1 なら activation を止める
+     #      （dynamic mapping で object に化けている可能性。#377 へエスカレーション）。
+     AWS_REGION=ap-northeast-1 CUTOVER_EVIDENCE_FILE="$PROJECTION_EVIDENCE" \
+       ./scripts/deployment/run-cutover-task.sh \
+         "$CLUSTER" "$API_SERVICE" "$TASK_DEFINITION_ARN" search-index-migrate
+     echo "search-index-migrate exit=$?"
+
+     # 4-b. rebuild（Aurora を正本に projection を再構築）。
+     AWS_REGION=ap-northeast-1 CUTOVER_EVIDENCE_FILE="$PROJECTION_EVIDENCE" \
+       ./scripts/deployment/run-cutover-task.sh \
+         "$CLUSTER" "$API_SERVICE" "$TASK_DEFINITION_ARN" projection-rebuild
+     echo "projection-rebuild exit=$?"
+
+     # 4-c. reconciliation（差分 0 を確認）。
+     AWS_REGION=ap-northeast-1 CUTOVER_EVIDENCE_FILE="$PROJECTION_EVIDENCE" \
+       ./scripts/deployment/run-cutover-task.sh \
+         "$CLUSTER" "$API_SERVICE" "$TASK_DEFINITION_ARN" projection-reconcile
+     echo "projection-reconcile exit=$?"
+     ```
+
+   - 合格条件: 4-a が exit 0、4-b が exit 0、4-c が **exit 0（差分 0。`metadata_mismatch` を含む）**。
+     evidence JSON の `counts` が 14 category すべてを持ち、全件 0 であること。
+   - 停止条件:
+     - 4-a が exit 1: mapping が壊れている可能性。activation を止め、#377 へエスカレーションする。
+     - 4-b が exit 1: bulk item error。projection runbook の切り分けへ。
+     - 4-c が exit 2 で `contract_corruption` / `malformed_projection` が非 0: activation を止める
+       （rebuild では収束しない。projection-repair CLI の手順へ）。
+     - 4-c が exit 2 でその他の category のみ: rebuild → reconciliation を再実行して収束を確認する。
 5. **Valkey ticket-type namespace の seed**
    - 実行: seed / reconcile は cutover workflow の choice に載せていない（書き込み primitive の
      起動面を増やさないため）。**`run-cutover-task.sh` の counter operation として手動実行する**。
@@ -209,7 +308,8 @@ WORKER_SERVICE="ticket-c2c-${ENV}-worker"
       taskArn / taskDefinition / image digest、9 章の数値を #335 へ comment する。
     - **hash / provenance の確認**: artifact をダウンロードし、JSON Lines の各行が
       lineage（`operation` / `exitCode` / `taskArn` / `taskDefinition` / `image` / `imageDigest` /
-      `operationStartedAtUtc` / `runUrl`）を持つことと、行数が実行した operation 数と一致することを
+      `operationStartedAtUtc` / `clientToken` / `startedBy` / `executionContext` / `runUrl`）を
+      持つことと、行数が実行した operation 数と一致することを
       確認したうえで、**SHA-256 を計算して #335 の comment に併記する**（後から差し替えられて
       いないことを示すため）。
 
@@ -220,10 +320,51 @@ WORKER_SERVICE="ticket-c2c-${ENV}-worker"
       sha256sum ./evidence/cutover-evidence.jsonl
       ```
 
+    - **ローカル実行分も同じ session の証跡として残す**（下記「ローカル実行の証跡（provenance）」）。
     - 合格条件: **destroy 前に** remote（GitHub）へ永続化されていること。lineage 欠落行が 0、
-      SHA-256 を記録済み。
+      SHA-256 を記録済み。workflow 経由分と手動実行分の両方が揃っていること。
     - 停止条件: 証跡を残せない、lineage が欠けている、行数が実行した operation 数と合わない
       場合、環境を destroy しない。
+
+### ローカル実行の証跡（provenance）
+
+counter operation（`seed-*` / `reconcile-*`）と projection operation（`search-index-migrate` /
+`projection-rebuild` / `projection-reconcile`）は workflow から起動しないため、
+**GitHub Actions の step summary も artifact も作られない**。`runUrl` も存在しない。
+
+`run-cutover-task.sh` はこれを検出して lineage の形を切り替える（壊れた `//actions/runs/` を
+出力しない）。
+
+| field | workflow 経由 | ローカル実行 |
+| --- | --- | --- |
+| `executionContext` | `"github-actions"` | `"local"` |
+| `runUrl` | run の URL | **出力しない** |
+| `operator` / `operatorHost` | 出力しない | 実行者（`CUTOVER_OPERATOR` / `id -un`）とホスト名 |
+| `operation` / `exitCode` / `taskArn` / `taskDefinition` / `image` / `imageDigest` / `operationStartedAtUtc` / `clientToken` / `startedBy` | あり | あり |
+
+**保存先（remote）**: ローカル実行の JSON Lines は、その session の証跡 comment（#335）に
+**本文として貼り付け、SHA-256 を併記する**。GitHub Actions artifact のような別置き場は作らない
+（destroy 後も残る remote は #335 の comment だけであり、置き場を増やすと「どちらが正か」が
+曖昧になる）。
+
+```bash
+# 実行者を明示する（既定は `id -un`。CI 以外の共有端末では必ず指定する）。
+export CUTOVER_OPERATOR="<github-username>"
+
+# 1 session 分をまとめて 1 ファイルへ追記する（operation ごとに 1 行）。
+LOCAL_EVIDENCE="$(pwd)/cutover-evidence-${ENV}-local.jsonl"
+
+# 実行後の確認と #335 への貼り付け。
+jq -c '.lineage' "$LOCAL_EVIDENCE"
+wc -l "$LOCAL_EVIDENCE"          # 手動実行した operation 数と一致すること
+sha256sum "$LOCAL_EVIDENCE"
+jq -e 'all(.lineage.executionContext == "local" and (.lineage | has("runUrl") | not))' \
+  <(jq -s '.' "$LOCAL_EVIDENCE")   # 壊れた runUrl が混ざっていないこと
+```
+
+- 合格条件: 行数が手動実行した operation 数と一致し、全行が `executionContext` / `operator` /
+  `operatorHost` / `clientToken` / `startedBy` / `taskArn` を持つ。SHA-256 を #335 へ記録済み。
+- 停止条件: いずれかが欠けている場合、環境を destroy しない。
 
 ### postflight 差分の収束手順
 
@@ -243,9 +384,10 @@ workflow は自動で reconcile しない（ADR-0032 は reconcile の実行順�
    ```
 
    合格条件: exit 0 かつ evidence の `initialized == 0`、`processed == synced + skipped`。
-3. OpenSearch 差分: projection runbook の rebuild / repair に従う
-   （`search-index:migrate` / `projection:rebuild` / `projection:reconcile` は projection runbook が
-   正本であり、本 runbook の counter operation には含めない）。
+3. OpenSearch 差分: projection runbook の rebuild / repair に従う。実行手段は 4 章 step 4 と同じ
+   projection operation（`search-index-migrate` / `projection-rebuild` / `projection-reconcile`）。
+   個別 document の修復（`projection-repair`）は対象 ID の手打ちと `--apply` の明示が本質なので
+   helper の allowlist に無い。projection runbook の手順に従って command override で実行する。
 4. DB 差分（在庫・未紐付け）: **CLI では収束させない**。#376 の failure domain として調査する。
 5. checker を再実行し、差分 0 を確認する。差分が残るなら次の操作へ進まない。
 
@@ -320,6 +462,13 @@ seed CLI の guard（active 側 namespace への seed を exit 2 で refuse す�
   cancel を防げない）。**cancel 後の control state は「1 回読んで終わり」にしない**（下記）。
 - gate step が job を失敗させた場合（raw exit code が 0 / 3 以外、raw exit code が空、
   `evidence_valid` が true でない、postflight が success 以外）。
+- **RunTask の応答喪失で task ARN を特定できない場合**（script が
+  `failed to obtain the ECS task ARN ...` を出力して exit 1 した場合）。AWS 側では task が
+  受理されて動いている可能性がある。**`inventory_writer_control` の読み取りを含め、次の操作を
+  一切行わない**。下記「run を cancel した場合の手順」の 1 と同じ方法で task を特定し、
+  STOPPED を確定させてから判断する。特定できなければ session を FAIL とする。
+- 4 章 step 4 の `search-index-migrate` が exit 1 になった場合（mapping が `object` に化けている
+  可能性。index の作り直しが必要になり得るため #377 へエスカレーションする）。
 - reconciliation が `contract_corruption` または `malformed_projection` を示した場合
   （projection runbook を参照）。
 - smoke が 1 件でも失敗した場合。
@@ -340,17 +489,43 @@ cancel 直後に `inventory_writer_control` を 1 回読むだけでは足りな
 runner が既に落ちている状況で無期限に待たないための意図的な上限であり、**待ちきれなかった場合は
 警告を出して終了する**。したがって cancel 後は必ず人が次を実施する。
 
-1. **exact taskArn を特定する**（cancel した run のログに `taskArn=...` が出ている。
-   出ていない場合は `--started-by` で引く）。
+1. **exact taskArn を特定する**。
 
-   ```bash
-   aws ecs list-tasks --cluster "$CLUSTER" --started-by "cutover-<operation>" \
-     --desired-status STOPPED --query 'taskArns' --output text
-   aws ecs list-tasks --cluster "$CLUSTER" --started-by "cutover-<operation>" \
-     --desired-status RUNNING --query 'taskArns' --output text
+   `run-cutover-task.sh` は RunTask を **投げる前に** session 固有の `clientToken` と `startedBy` を
+   run log（および step summary / evidence lineage）へ出力する。
+
+   ```text
+   clientToken=cutover-<uuid> startedBy=cutover-<operation>-cutover-<uuid>
+   taskArn=arn:aws:ecs:...:task/ticket-c2c-<env>/<task-id> startedBy=cutover-<operation>-cutover-<uuid>
    ```
 
-2. **task の停止を確定させるまで、他の一切の操作を行わない**（checker も switch も dispatch しない）。
+   - **`taskArn=` の行がある場合**: その ARN をそのまま使う。
+   - **`clientToken=` の行はあるが `taskArn=` が無い場合**（RunTask 応答喪失）: 同じ token・
+     **同じ引数**で RunTask を再実行すると、ECS は元の結果を返す（ECS API Reference:
+     Ensuring idempotency。TTL 24 時間。引数が 1 つでも違うと `ConflictException` になる）。
+     script はこれを自動で 3 回まで行うが、それでも取れなかった場合は人が回収する。
+
+     ```bash
+     # 回収経路 A: startedBy 単独の ListTasks（この session の task だけがヒットする）。
+     # **startedBy を使うときは、それが唯一の filter でなければならない**
+     # （ECS ListTasks: "When you specify startedBy as the filter, it must be the only filter
+     # that you use."）。--desired-status 等との併用は API 仕様違反なので使わない。
+     aws ecs list-tasks --cluster "$CLUSTER" \
+       --started-by "cutover-<operation>-cutover-<uuid>" \
+       --query 'taskArns' --output text
+
+     # 絞り込み（RUNNING / STOPPED の判別）は describe-tasks 側で行う。
+     aws ecs describe-tasks --cluster "$CLUSTER" --tasks $TASK_ARNS \
+       --query 'tasks[].{taskArn:taskArn,lastStatus:lastStatus,startedBy:startedBy}' --output json
+     ```
+
+   - **`clientToken=` の行も無い場合**（step が起動直後に落ちた等）: task は起動していない可能性が
+     高いが、断定しない。cluster 全体の RUNNING task を列挙し、`startedBy` が `cutover-` で
+     始まるものを探す。特定できなければ **session を FAIL とする**（下の 3 の最終項目と同じ扱い）。
+
+2. **task の停止を確定させるまで、他の一切の操作を行わない**（checker も switch も dispatch しない。
+   **`inventory_writer_control` の読み取りも含む**。task がまだ COMMIT し得る間に読んだ値は
+   最終状態である保証がない）。
 
    ```bash
    aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
@@ -384,10 +559,16 @@ session 開始前に確認し、session 中は次を実行しない。
 - [ ] PoC script 等、共有 writer barrier を取得しない直接 SQL writer を実行しない。
 - [ ] seed（`seed-ticket-type` / `seed-legacy`）を active 側 namespace に対して実行しない
       （CLI が exit 2 で refuse するが、手順としても禁止する）。
-- [ ] seed / reconcile CLI を `run-cutover-task.sh` を通さずに直接叩かない（exit code の取り違え・
-      evidence 未取得・lineage 欠落を招く）。cutover workflow の choice にも載せない。
+- [ ] seed / reconcile / projection CLI を `run-cutover-task.sh` を通さずに直接叩かない
+      （exit code の取り違え・evidence 未取得・lineage 欠落を招く）。cutover workflow の
+      choice にも載せない（`operation` は 6 択のまま増やさない）。
 - [ ] cutover workflow を `task_definition_arn` 空欄（`current` 解決）で dispatch しない。
       session 開始時に確認した承認済み ARN を毎回明示する。
+      **workflow 側で `required: true` と空文字 / `current` の拒否を機械強制している**が、
+      手順としても毎回明示する。
+- [ ] Gate B session 中に `search-index-migrate` を「mapping の適用」目的で実行しない。
+      適用点は compatibility release（4 章冒頭）であり、session 中の実行は **positive 確認**
+      としてのみ行う。exit 1 なら session を止める。
 - [ ] `redis-cli` で counter / revision を直接編集しない。
 - [ ] OpenSearch から PostgreSQL への逆同期を行わない。
 
@@ -418,6 +599,11 @@ session 開始前に確認し、session 中は次を実行しない。
 - source queue の backlog と oldest message age（いずれも 0）。
 - seed の `processed` / `initialized` 件数（namespace 別）と、対応する DB 行数。
 - reconcile を実行した場合は `synced` / `skipped` 件数。
+- projection: `search-index-migrate` の exit code（0）、`projection-rebuild` の
+  `processedEvents` / `processedTicketTypes` / `bulkRequests`、`projection-reconcile` の
+  `checkedEvents` / `checkedDocuments` / category 別 `counts`（14 category すべて。全 0）と
+  `totalDiffs`（0）。
+- 各 operation の `clientToken` / `startedBy` / `taskArn`（RunTask 応答喪失時の回収に必要）。
 - smoke の成功数 / 失敗数。
 - 在庫超過が 0 であること。
 
