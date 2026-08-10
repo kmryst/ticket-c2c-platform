@@ -33,7 +33,7 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: "1.14.8"
+          terraform_version: "1.12.1"
 
       - name: Configure AWS credentials (apply role)
         uses: aws-actions/configure-aws-credentials@v6
