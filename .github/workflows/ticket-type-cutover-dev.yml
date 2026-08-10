@@ -7,11 +7,19 @@
 # 増やさない）。runbook の手順から ECS run-task で実行する。
 #
 # false-green 防止の構造:
-# 1. cutover step は exit code を GITHUB_OUTPUT へ捕捉し、step 自体は失敗させない。
-# 2. postflight step は exit code 0 / 3 のときだけ同一 run 内で実行する（exit 3 =
-#    COMMIT 応答喪失だが切替は有効、なので postflight を必ず取る）。
-# 3. gate step は `if: always()` で必ず実行し、exit code が 0 / 3 以外（空文字 = step の
-#    異常終了を含む）か、postflight が success 以外なら job を失敗させる。
+# 1. cutover step は step 自体を失敗させず、run-cutover-task.sh が raw の
+#    container_exit_code と evidence_valid を **別々の output** として GITHUB_OUTPUT へ書く。
+# 2. postflight step は raw exit code が 0 / 3 のときだけ同一 run 内で実行する（exit 3 =
+#    COMMIT 応答喪失だが切替は有効、なので postflight を必ず取る）。ここは raw を使う。
+# 3. gate step は `if: always()` で必ず実行し、次の 3 条件を **すべて** 必須にする。
+#    (a) raw exit code が 0 / 3（空文字 = step の異常終了を含めて失敗）
+#    (b) evidence_valid が true（operation と exit code に一致する evidence が揃った）
+#    (c) postflight の outcome が success
+#    (b) が無いと、exit 3 で CloudWatch Logs の取得が間に合わなかった run が
+#    「exit 3 + postflight success」で green になり、切替結果（commitOutcome /
+#    verifiedMode）も preflight evidence も無いまま Gate B を通過してしまう。
+#    判定式は run-cutover-task.sh の純関数（cutover_gate_ok）に置き、真理値表は
+#    scripts/deployment/run-cutover-task.spec.sh で固定する（workflow へ直書きしない）。
 # なお run の手動 cancel は workflow では防げない。cancel した場合の扱い（exit 1 と同等）は
 # runbook の停止条件に定める。
 #
@@ -34,7 +42,10 @@ on:
           - rollback
           - postflight-rollback
       task_definition_arn:
-        description: "通常は空欄。migration後のservice更新だけ失敗した場合は、そのdeploy logに記録された新task definition ARNを指定"
+        # Gate B session では空欄にしない。runbook 4章 step1 で positive 確認した
+        # 承認済み API task definition ARN を毎回明示する（空欄=current 解決だと、
+        # preflight と switch の間に queue 済みの deploy が挟まると別 revision で切り替わる）。
+        description: "runbook 4章 step1 で確認した承認済み API task definition ARN。Gate B では空欄にしない（空欄時のみ現行serviceのtask definitionを使う）"
         required: false
         type: string
 
@@ -81,14 +92,16 @@ jobs:
           set -uo pipefail
           task_definition="${TASK_DEFINITION_ARN:-current}"
           # exit code 0 / 2 / 3 / 4 / 1 はそれぞれ別の運用判断に対応する。step をここで
-          # 失敗させると exit code を後続 step へ渡せないため、捕捉して gate step で判定する。
+          # 失敗させると後続 step へ判断材料を渡せないため、失敗させずに gate step で判定する。
+          # gate が使う raw の container_exit_code / evidence_valid は script が
+          # GITHUB_OUTPUT へ直接書く（script 側の fail-closed な escalation で raw を
+          # 上書きしないため、runner の exit code とは分けている）。
           set +e
           ./scripts/deployment/run-cutover-task.sh \
             "$CLUSTER" "$SERVICE" "$task_definition" "$OPERATION"
-          exit_code=$?
+          runner_exit_code=$?
           set -e
-          echo "exit_code=${exit_code}" >>"$GITHUB_OUTPUT"
-          echo "cutover operation ${OPERATION} finished with exitCode=${exit_code}"
+          echo "cutover operation ${OPERATION} finished with runnerExitCode=${runner_exit_code}"
 
       - name: Postflight check (same run)
         id: postflight
@@ -96,7 +109,8 @@ jobs:
         # 同一 run 内で postflight 証跡を取る。skip / 失敗はどちらも gate step が job を落とす。
         if: >-
           (inputs.operation == 'activate' || inputs.operation == 'rollback')
-          && (steps.cutover.outputs.exit_code == '0' || steps.cutover.outputs.exit_code == '3')
+          && (steps.cutover.outputs.container_exit_code == '0'
+              || steps.cutover.outputs.container_exit_code == '3')
         shell: bash
         env:
           TASK_DEFINITION_ARN: ${{ inputs.task_definition_arn }}
@@ -124,7 +138,8 @@ jobs:
         shell: bash
         env:
           OPERATION: ${{ inputs.operation }}
-          CUTOVER_EXIT_CODE: ${{ steps.cutover.outputs.exit_code }}
+          CUTOVER_EXIT_CODE: ${{ steps.cutover.outputs.container_exit_code }}
+          CUTOVER_EVIDENCE_VALID: ${{ steps.cutover.outputs.evidence_valid }}
           POSTFLIGHT_OUTCOME: ${{ steps.postflight.outcome }}
         run: |
           set -uo pipefail
@@ -137,13 +152,14 @@ jobs:
             echo
             echo "- operation: \`${OPERATION}\`"
             echo "- cutoverExitCode: \`${CUTOVER_EXIT_CODE:-(未取得)}\`"
+            echo "- evidenceValid: \`${CUTOVER_EVIDENCE_VALID:-(未取得)}\`"
             echo "- postflightOutcome: \`${POSTFLIGHT_OUTCOME:-(未実行)}\`"
             echo "- $(cutover_exit_code_advice "${CUTOVER_EXIT_CODE}")"
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          if cutover_gate_ok "$OPERATION" "$CUTOVER_EXIT_CODE" "$POSTFLIGHT_OUTCOME"; then
+          if cutover_gate_ok "$OPERATION" "$CUTOVER_EXIT_CODE" "$CUTOVER_EVIDENCE_VALID" "$POSTFLIGHT_OUTCOME"; then
             echo "cutover gate passed"
           else
-            echo "cutover gate failed: operation=${OPERATION} exitCode=${CUTOVER_EXIT_CODE:-(未取得)} postflight=${POSTFLIGHT_OUTCOME:-(未実行)}" >&2
+            echo "cutover gate failed: operation=${OPERATION} exitCode=${CUTOVER_EXIT_CODE:-(未取得)} evidenceValid=${CUTOVER_EVIDENCE_VALID:-(未取得)} postflight=${POSTFLIGHT_OUTCOME:-(未実行)}" >&2
             echo "runbook: docs/runbooks/gate-b-ticket-type-cutover.md の停止条件に従う" >&2
             exit 1
           fi
@@ -154,5 +170,6 @@ jobs:
         with:
           name: cutover-evidence-dev-${{ inputs.operation }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cutover-evidence.jsonl
-          if-no-files-found: warn
+          # evidence が 1 件も無い run を green にしない（証跡のない Gate B PASS を禁止する）。
+          if-no-files-found: error
           retention-days: 30
