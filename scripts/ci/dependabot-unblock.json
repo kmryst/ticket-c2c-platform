@@ -13,6 +13,14 @@
     "tracking": "https://github.com/kmryst/ticket-c2c-platform/issues/425"
   },
   {
+    "directory": "/",
+    "dependency-name": "ioredis",
+    "probe": false,
+    "probe-skip-reason": "ブロック要因が build / test の失敗として現れないため probe できない。ioredis 6 に上げても npm ci / tsc / 統合テストはすべて通る（2026-08-10 実測。Dependabot PR #453 の CI も 17 チェック全 SUCCESS）。実際の問題は @opentelemetry/instrumentation-ioredis@0.69.0 の supportedVersions が '>=2.0.0 <6' で計装が無警告で no-op になり、X-Ray から Valkey の span が消えることであり、install + build + test の素朴な probe は必ず成功して UNBLOCKED を誤報する。解除判定には計装の対応範囲そのものを検査する必要がある（Issue #457 の「解除方法」参照）。",
+    "review-by": "2026-11-02",
+    "tracking": "https://github.com/kmryst/ticket-c2c-platform/issues/457"
+  },
+  {
     "directory": "/frontend",
     "dependency-name": "typescript",
     "probe": true,
