@@ -18,7 +18,7 @@
 # リモート state（bootstrap / dev / staging）に記録済みの terraform_version が
 # いずれも 1.14.8 であり、state は前方互換がないためダウングレードできない。
 # CI の 9 workflow に直書きされた terraform_version もこの値と一致させる。
-terraform = "1.14.8"
+terraform = "1.12.1"
 # CI の setup-node（node-version: "24"）と Dockerfile / frontend/Dockerfile
 # （node:24-slim）に合わせる。package.json の engines も 24 系を要求する。
 node = "24.18.0"
