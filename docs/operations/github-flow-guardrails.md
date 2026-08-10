@@ -113,6 +113,12 @@ PR では次の観点を GitHub Actions で検査します。
 
 required status check として扱う check 名は、workflow の job `name` と揃えます。workflow 名や job 名を変える場合は、GitHub 側の branch protection / ruleset 設定との整合を確認します。
 
+### Dependabot の依存更新
+
+- 2026-08-10 に `groups` を導入しました（Issue #447 / PR #448）。1 依存 1 PR のままだと同じ lockfile を触る更新が互いに rebase 待ちになるためで、詳細な方針は `.github/dependabot.yml` 冒頭のコメントに記録しています。
+- 更新をマージしない依存は、PR を都度 close するのではなく `ignore` + 追跡 Issue（`dependabot-ignore` ラベル）で扱います。close だけでは翌週また同じ PR が作られ、判断の根拠もどこにも残らないためです。`ignore` はセキュリティ更新には効かないため、脆弱性の検知は失いません。
+- `ignore` には「上流が追いつくまでの一時的な待ち」と「上流の設計に起因する恒久措置」の 2 種類があります。後者の例が root の `fastify`（Issue #455）で、`@nestjs/platform-fastify` が fastify を exact pin しているため単独更新すると nested 重複が増えるだけで実行時の効果がありません。恒久措置は見直し期限が来ても自動解除せず、解除条件（この例では上流が pin をやめること）が満たされたかだけを確認します。
+
 ## 未採用案と理由
 
 ### `main` への直接 push
