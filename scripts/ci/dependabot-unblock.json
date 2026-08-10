@@ -1,0 +1,39 @@
+[
+  {
+    "directory": "/",
+    "dependency-name": "typescript",
+    "probe": true,
+    "spec": "typescript@7",
+    "steps": [
+      "npm install --no-audit --no-fund typescript@7",
+      "npm run build"
+    ],
+    "review-by": "2026-11-02",
+    "tracking": "https://github.com/kmryst/ticket-c2c-platform/issues/425"
+  },
+  {
+    "directory": "/frontend",
+    "dependency-name": "typescript",
+    "probe": true,
+    "spec": "typescript@7",
+    "steps": [
+      "npm install --no-audit --no-fund typescript@7",
+      "npm run build",
+      "npm run lint"
+    ],
+    "review-by": "2026-11-02",
+    "tracking": "https://github.com/kmryst/ticket-c2c-platform/issues/426"
+  },
+  {
+    "directory": "/frontend",
+    "dependency-name": "eslint",
+    "probe": true,
+    "spec": "eslint@10",
+    "steps": [
+      "npm install --no-audit --no-fund eslint@10",
+      "npm run lint"
+    ],
+    "review-by": "2026-11-02",
+    "tracking": "https://github.com/kmryst/ticket-c2c-platform/issues/427"
+  }
+]
