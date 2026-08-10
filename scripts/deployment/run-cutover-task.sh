@@ -18,18 +18,29 @@
 #   - seed-legacy:           cutover:valkey --namespace legacy      --mode seed
 #   - reconcile-ticket-type: cutover:valkey --namespace ticket-type --mode reconcile
 #   - reconcile-legacy:      cutover:valkey --namespace legacy      --mode reconcile
+#   operation（**workflow からは起動できない**。runbook 手順から手動実行する。kind = projection）:
+#   - search-index-migrate:  search-index:migrate（OpenSearch events index の mapping migration）
+#   - projection-rebuild:    projection:rebuild   --page-size 200 --bulk-size 200
+#   - projection-reconcile:  projection:reconcile --page-size 200
 #   引数はすべて必須（既定値を持たせない）。方向・対象は operation 名に固定し、
 #   --target-mode / --expect-mode / --namespace の手打ち誤指定を構造的に排除する
 #   （ADR-0032 の緩和策）。
 #
-# counter operation（seed / reconcile）を cutover workflow の choice に載せない理由:
+# counter / projection operation を cutover workflow の choice に載せない理由:
 # 「書き込み primitive の起動面を増やさない」は Issue #378 の確定済み設計判断である。
 # seed は activation / rollback session 中に 1 回だけ、checker とセットで人が確認しながら
 # 実行する手順であり、6 択に混ぜると（CLI が refuse するとはいえ）active namespace への
 # 誤発火面が増える。一方で container 名一致の exit code 取得・evidence 検証・
 # JSONL lineage・step summary は check / switch と共通化する価値があるため、
-# **この script の operation allowlist にだけ** counter operation を追加してある。
-# 起動経路は docs/runbooks/gate-b-ticket-type-cutover.md の該当 step（手動実行）だけである。
+# **この script の operation allowlist にだけ** counter / projection operation を追加してある。
+# 起動経路は docs/runbooks/gate-b-ticket-type-cutover.md および
+# docs/runbooks/search-projection-reconciliation-rebuild.md の該当 step（手動実行）だけである。
+#
+# projection operation を足した理由（Codex High-2）:
+# staging / dev の OpenSearch は VPC 内・SigV4 署名必須のため、operator 端末から
+# `node dist/src/search/...` を直接実行できない。runbook が「委譲先にコンテナ内の node コマンド
+# しか書いていない」状態では Gate B step の mapping migration / rebuild / reconciliation を
+# 手順どおり完了できないため、counter operation と同じ RunTask helper 経路を用意する。
 #
 # run-db-migration.sh を流用しない理由（実読確認済み）:
 # 1. mode が migration / ticket-type-readiness の 2 択固定である。
@@ -62,15 +73,107 @@ source "${script_dir}/ecs-task-container-exit-code.sh"
 CUTOVER_CHECK_CLI="dist/src/cutover/check-ticket-type-cutover-readiness.js"
 CUTOVER_SWITCH_CLI="dist/src/cutover/switch-ticket-type-writer-mode.js"
 CUTOVER_COUNTER_CLI="dist/src/cutover/reconcile-inventory-counters.js"
+CUTOVER_MIGRATE_CLI="dist/src/search/search-index-migrate.cli.js"
+CUTOVER_REBUILD_CLI="dist/src/search/inventory-rebuild.cli.js"
+CUTOVER_RECONCILE_CLI="dist/src/search/inventory-reconciliation.cli.js"
 
-# checker evidence の category 数（ticket-type-cutover-readiness.ts の
-# TICKET_TYPE_CUTOVER_READINESS_CATEGORIES と 1 対 1。件数が変わったら evidence 契約の
-# 変更なので、ここも spec も同時に更新する）。
-CUTOVER_EVIDENCE_CATEGORY_COUNT=23
+# projection CLI の bounded page / bulk size（search-projection-reconciliation-rebuild.md の
+# 実行例と同じ値を operation に固定し、手打ちの取り違えを排除する）。
+CUTOVER_PROJECTION_PAGE_SIZE=200
+CUTOVER_PROJECTION_BULK_SIZE=200
+
+# checker evidence の category 集合（ticket-type-cutover-readiness.ts の
+# TICKET_TYPE_CUTOVER_READINESS_CATEGORIES と 1 対 1。件数だけでなく **集合そのもの** を
+# 固定する（Codex Medium-1: 件数一致だけだと 23 件の重複 category を受理してしまう）。
+# 契約が変わったら、ここも spec も同時に更新する）。
+CUTOVER_EVIDENCE_CATEGORIES=(
+	event_without_exactly_one_default
+	event_without_legacy_inventory
+	legacy_inventory_without_default_ticket_type_inventory
+	ticket_type_inventory_without_ticket_type
+	ticket_type_without_ticket_type_inventory
+	purchase_without_ticket_type
+	purchase_ticket_type_event_mismatch
+	legacy_aggregate_total_mismatch
+	legacy_aggregate_remaining_mismatch
+	non_default_ticket_type_inventory_in_legacy_mode
+	writer_control_state_missing_or_invalid
+	writer_control_mode_mismatch
+	compatibility_object_missing_or_invalid
+	valkey_counter_missing
+	valkey_counter_without_inventory_row
+	valkey_counter_value_invalid
+	valkey_counter_remaining_mismatch
+	valkey_revision_missing_or_invalid
+	valkey_legacy_counter_missing
+	valkey_legacy_counter_value_invalid
+	valkey_legacy_counter_remaining_mismatch
+	valkey_legacy_version_value_invalid
+	opensearch_projection_diff
+)
+CUTOVER_EVIDENCE_CATEGORY_COUNT=${#CUTOVER_EVIDENCE_CATEGORIES[@]}
+
+# switch CLI の postSwitchDatabaseResults が持つ category 集合
+# （ticket-type-cutover-readiness.ts の DATABASE_CATEGORIES と 1 対 1。checkCutoverDatabase が
+# 返すのは DB 10 + control state 2 + compatibility object 1 の 13 件で、Valkey / OpenSearch は
+# 含まない）。空配列を受理すると「切替 transaction 内の parity 検査を通った」証跡が無いまま
+# green になるため、集合一致（重複があれば別 category が欠けるので不一致になる）と
+# 全件 violationCount 0 を必須にする（Codex Medium-1）。
+CUTOVER_SWITCH_DB_CATEGORIES=(
+	event_without_exactly_one_default
+	event_without_legacy_inventory
+	legacy_inventory_without_default_ticket_type_inventory
+	ticket_type_inventory_without_ticket_type
+	ticket_type_without_ticket_type_inventory
+	purchase_without_ticket_type
+	purchase_ticket_type_event_mismatch
+	legacy_aggregate_total_mismatch
+	legacy_aggregate_remaining_mismatch
+	non_default_ticket_type_inventory_in_legacy_mode
+	writer_control_state_missing_or_invalid
+	writer_control_mode_mismatch
+	compatibility_object_missing_or_invalid
+)
+
+# reconciliation report の counts が持つ category 集合
+# （inventory-reconciliation.service.ts の RECONCILIATION_CATEGORIES と 1 対 1）。
+CUTOVER_RECONCILIATION_CATEGORIES=(
+	missing_event_document
+	unexpected_event_document
+	missing_ticket_type
+	unexpected_ticket_type
+	ticket_type_total_mismatch
+	ticket_type_remaining_mismatch
+	ticket_type_version_mismatch
+	event_total_mismatch
+	event_remaining_mismatch
+	event_version_mismatch
+	metadata_mismatch
+	contract_corruption
+	unversioned_projection
+	malformed_projection
+)
+
+# CUTOVER_EVIDENCE_SELECT_FILTER は task log の各行から「evidence として保存する JSON」を選ぶ
+# jq filter（step summary と evidence file で同じ定義を使う）。projection CLI の出力は
+# evidenceType / action を持たないため、CLI ごとに一意な必須 field で識別する
+# （migrate: status="ensured" / rebuild: processedEvents / reconcile: hasDiff）。
+CUTOVER_EVIDENCE_SELECT_FILTER='
+	.[]
+	| select(type == "string")
+	| fromjson?
+	| select(type == "object")
+	| select(
+		.evidenceType == "ticket-type-cutover-readiness"
+			or .action != null
+			or (.index != null and (.status == "ensured" or has("processedEvents") or has("hasDiff")))
+	)
+'
 
 CUTOVER_USAGE="usage: run-cutover-task.sh <cluster> <api-service> <task-definition-arn|current> <operation>
 operation (workflow): preflight-activation | activate | postflight-activation | preflight-rollback | rollback | postflight-rollback
-operation (runbook manual only): seed-ticket-type | seed-legacy | reconcile-ticket-type | reconcile-legacy"
+operation (runbook manual only): seed-ticket-type | seed-legacy | reconcile-ticket-type | reconcile-legacy
+operation (runbook manual only): search-index-migrate | projection-rebuild | projection-reconcile"
 
 # set_cutover_operation_command は operation を ECS command override の argv へ機械変換する。
 # 変換結果は配列 cutover_operation_command に格納する（未知の operation は fail closed）。
@@ -107,6 +210,22 @@ set_cutover_operation_command() {
 	reconcile-legacy)
 		cutover_operation_command=(node "$CUTOVER_COUNTER_CLI" --namespace legacy --mode reconcile)
 		;;
+	search-index-migrate)
+		cutover_operation_command=(node "$CUTOVER_MIGRATE_CLI")
+		;;
+	projection-rebuild)
+		cutover_operation_command=(
+			node "$CUTOVER_REBUILD_CLI"
+			--page-size "$CUTOVER_PROJECTION_PAGE_SIZE"
+			--bulk-size "$CUTOVER_PROJECTION_BULK_SIZE"
+		)
+		;;
+	projection-reconcile)
+		cutover_operation_command=(
+			node "$CUTOVER_RECONCILE_CLI"
+			--page-size "$CUTOVER_PROJECTION_PAGE_SIZE"
+		)
+		;;
 	*)
 		cutover_operation_command=()
 		return 1
@@ -118,6 +237,7 @@ set_cutover_operation_command() {
 # - switch:  control state を書き換える（ADR-0032 の切替 CLI）
 # - check:   読み取り専用の readiness checker
 # - counter: Valkey counter を seed / reconcile する（workflow からは起動しない）
+# - projection: OpenSearch mapping migration / rebuild / reconciliation（workflow からは起動しない）
 cutover_operation_kind() {
 	case "$1" in
 	activate | rollback)
@@ -129,6 +249,9 @@ cutover_operation_kind() {
 	seed-ticket-type | seed-legacy | reconcile-ticket-type | reconcile-legacy)
 		echo "counter"
 		;;
+	search-index-migrate | projection-rebuild | projection-reconcile)
+		echo "projection"
+		;;
 	*)
 		return 1
 		;;
@@ -136,7 +259,7 @@ cutover_operation_kind() {
 }
 
 # cutover_workflow_operation は cutover workflow の choice から起動してよい operation かを返す
-# （counter operation は runbook 手順からの手動実行専用）。
+# （counter / projection operation は runbook 手順からの手動実行専用）。
 cutover_workflow_operation() {
 	local kind
 	kind=$(cutover_operation_kind "$1") || return 1
@@ -166,13 +289,36 @@ cutover_switch_modes() {
 	esac
 }
 
-# cutover_counter_expectation は counter operation の namespace / mode を返す（"<namespace> <mode>"）。
+# cutover_counter_expectation は counter operation の namespace / mode / 必須 writerMode を返す
+# （"<namespace> <mode> <required-writer-mode>"）。
+#
+# 第 3 要素は seed operation が成功してよい control state である
+# （reconcile-inventory-counters.ts の assertSeedNamespaceInactive: seed 対象 namespace は
+# 非 active でなければならない。ticket-type namespace は writer_mode=legacy のときだけ、
+# legacy namespace は writer_mode=ticket_type のときだけ seed できる）。
+# これを evidence 側でも固定しないと、**seed 対象と逆の writerMode を持つ evidence** を
+# 受理してしまう（Codex Medium-1。CLI は refuse するが、artifact 取り違えでは検出できない）。
+# reconcile は active / 非 active の双方に対して実行し得るため "-"（検査しない）。
 cutover_counter_expectation() {
 	case "$1" in
-	seed-ticket-type) echo "ticket-type seed" ;;
-	seed-legacy) echo "legacy seed" ;;
-	reconcile-ticket-type) echo "ticket-type reconcile" ;;
-	reconcile-legacy) echo "legacy reconcile" ;;
+	seed-ticket-type) echo "ticket-type seed legacy" ;;
+	seed-legacy) echo "legacy seed ticket_type" ;;
+	reconcile-ticket-type) echo "ticket-type reconcile -" ;;
+	reconcile-legacy) echo "legacy reconcile -" ;;
+	*) return 1 ;;
+	esac
+}
+
+# cutover_projection_expectation は projection operation が出すべき CLI 出力の種別を返す
+# （migrate / rebuild / reconcile）。exit code 規約も CLI ごとに違う:
+# - search-index-migrate（search-index-migrate.cli.ts）: 0 = 成功 / 1 = 実行エラー
+# - projection-rebuild（inventory-rebuild.cli.ts）:      0 = 成功 / 1 = 実行エラー
+# - projection-reconcile（inventory-reconciliation.cli.ts）: 0 = 差分 0 / 2 = 差分あり / 1 = 実行エラー
+cutover_projection_expectation() {
+	case "$1" in
+	search-index-migrate) echo "migrate" ;;
+	projection-rebuild) echo "rebuild" ;;
+	projection-reconcile) echo "reconcile" ;;
 	*) return 1 ;;
 	esac
 }
@@ -187,6 +333,10 @@ cutover_counter_expectation() {
 # - complete が true であること（serializeTicketTypeCutoverEvidence が必ず立てる）
 # - results / categoryCount が 23 category ちょうどであること
 #   （assertTicketTypeCutoverReadinessComplete が欠落・重複を禁じている）
+# - **results の category 集合が正本と完全一致すること**（Codex Medium-1）。
+#   件数一致だけでは「同じ category が 23 個並んだ evidence」を受理してしまい、
+#   全 category を検査した証跡にならない。sort 済み集合の完全一致は重複も同時に排除する
+#   （重複があれば別の category が欠けるので一致しない）。
 # - require_zero_violations = true（exit 0 = 全 category 0）のときは全 violationCount が 0
 # - require_zero_violations = false かつ exit 2 のときは violation が 1 件以上
 #   （checker / switch の exit 2 は hasTicketTypeCutoverViolations と 1 対 1）
@@ -195,12 +345,15 @@ cutover_readiness_evidence_valid() {
 	local expected_mode=$2
 	local expected_phase=$3
 	local violation_expectation=$4 # zero | some | any
+	local expected_categories_json
+	expected_categories_json=$(printf '%s\n' "${CUTOVER_EVIDENCE_CATEGORIES[@]}" | jq -R . | jq -sc 'sort')
 
 	jq -e \
 		--arg expectedMode "$expected_mode" \
 		--arg expectedPhase "$expected_phase" \
 		--arg violations "$violation_expectation" \
-		--argjson categoryCount "$CUTOVER_EVIDENCE_CATEGORY_COUNT" '
+		--argjson categoryCount "$CUTOVER_EVIDENCE_CATEGORY_COUNT" \
+		--argjson expectedCategories "$expected_categories_json" '
 		[
 			.[]
 			| select(type == "string")
@@ -227,6 +380,7 @@ cutover_readiness_evidence_valid() {
 							and (.violationCount | type) == "number"
 					)
 				)
+				and ([.results[].category] | sort) == $expectedCategories
 				and (
 					if $violations == "zero" then
 						(.results | all(.[]; .violationCount == 0))
@@ -247,16 +401,37 @@ cutover_readiness_evidence_valid() {
 #           sourceMode・targetMode が一致（pendingResult を伴う）
 # - exit 4: commitOutcome = ambiguous / verifiedMode = source / switched = false
 #           （result は null なので sourceMode / targetMode は出力されない）
+#
+# exit 0 / 3 では postSwitchDatabaseResults を **13 category の集合一致・全件 0** で
+# 要求する（Codex Medium-1）。ticket-type-writer-mode-switch.ts は checkCutoverDatabase
+# （DATABASE_CATEGORIES 13 件）の結果をそのまま載せ、violation があれば ROLLBACK して
+# ここへ到達しないため、空配列や欠落は「切替 transaction 内の parity 検査を通った証跡が無い」
+# ことを意味する。
 cutover_switch_result_valid() {
 	local task_log_messages_json=$1
 	local source_mode=$2
 	local target_mode=$3
 	local exit_code=$4
+	local expected_db_categories_json
+	expected_db_categories_json=$(printf '%s\n' "${CUTOVER_SWITCH_DB_CATEGORIES[@]}" | jq -R . | jq -sc 'sort')
 
 	jq -e \
 		--arg sourceMode "$source_mode" \
 		--arg targetMode "$target_mode" \
-		--arg exitCode "$exit_code" '
+		--arg exitCode "$exit_code" \
+		--argjson expectedDbCategories "$expected_db_categories_json" '
+		def post_switch_db_ok:
+			(.postSwitchDatabaseResults | type) == "array"
+			and (
+				.postSwitchDatabaseResults
+				| all(
+					.[];
+					(.category | type) == "string"
+						and (.violationCount | type) == "number"
+						and .violationCount == 0
+				)
+			)
+			and ([.postSwitchDatabaseResults[].category] | sort) == $expectedDbCategories;
 		[
 			.[]
 			| select(type == "string")
@@ -273,14 +448,14 @@ cutover_switch_result_valid() {
 							and .sourceMode == $sourceMode
 							and .targetMode == $targetMode
 							and (.schemaRevision | type) == "string"
-							and (.postSwitchDatabaseResults | type) == "array"
+							and post_switch_db_ok
 					elif $exitCode == "3" then
 						.commitOutcome == "ambiguous"
 							and .verifiedMode == $targetMode
 							and .switched == true
 							and .sourceMode == $sourceMode
 							and .targetMode == $targetMode
-							and (.postSwitchDatabaseResults | type) == "array"
+							and post_switch_db_ok
 					elif $exitCode == "4" then
 						.commitOutcome == "ambiguous"
 							and .verifiedMode == $sourceMode
@@ -295,19 +470,28 @@ cutover_switch_result_valid() {
 
 # cutover_counter_result_valid は seed / reconcile CLI の evidence を検証する
 # （reconcile-inventory-counters.ts の serializeCounterReconcileEvidence / refuse 出力と 1 対 1）:
-# - exit 0 かつ seed: refused なし / initialized == processed / synced == 0 / skipped == 0
+# - exit 0 かつ seed: refused なし / initialized == processed / synced == 0 / skipped == 0 /
+#                     writerMode が seed 対象 namespace の非 active 条件と一致
 # - exit 0 かつ reconcile: refused なし / initialized == 0 / processed == synced + skipped
-# - exit 2: refused == true（guard 違反。Valkey への書き込みなし）
+# - exit 2: refused == true（guard 違反。Valkey への書き込みなし）。seed の場合は
+#           writerMode が **必須 mode 以外** であること（refuse の根拠と一致すること）。
+#
+# required_writer_mode は seed 対象 namespace が非 active である control state（"-" = 検査しない）。
+# これを見ないと「seed 対象と逆の writerMode を持つ成功 evidence」を受理してしまう
+# （Codex Medium-1。CLI は refuse するので実出力には現れないが、artifact 取り違えや
+# 出力契約の退行では false-green になる）。
 cutover_counter_result_valid() {
 	local task_log_messages_json=$1
 	local namespace=$2
 	local counter_mode=$3
 	local exit_code=$4
+	local required_writer_mode=${5:--}
 
 	jq -e \
 		--arg namespace "$namespace" \
 		--arg counterMode "$counter_mode" \
-		--arg exitCode "$exit_code" '
+		--arg exitCode "$exit_code" \
+		--arg requiredWriterMode "$required_writer_mode" '
 		[
 			.[]
 			| select(type == "string")
@@ -327,6 +511,7 @@ cutover_counter_result_valid() {
 							and (.initialized | type) == "number"
 							and (.synced | type) == "number"
 							and (.skipped | type) == "number"
+							and ($requiredWriterMode == "-" or .writerMode == $requiredWriterMode)
 							and (
 								if $counterMode == "seed" then
 									.initialized == .processed
@@ -338,11 +523,77 @@ cutover_counter_result_valid() {
 								end
 							)
 					elif $exitCode == "2" then
-						.refused == true and (.reason | type) == "string"
+						.refused == true
+							and (.reason | type) == "string"
+							and ($requiredWriterMode == "-" or .writerMode != $requiredWriterMode)
 					else
 						false
 					end
 				)
+		)
+	' <<<"$task_log_messages_json" >/dev/null 2>&1
+}
+
+# cutover_projection_result_valid は projection CLI の出力を exit code の期待値に対して検証する。
+# projection CLI は evidenceType / action を持たないため、CLI ごとに一意な必須 field で識別する。
+# - migrate（search-index-migrate.cli.ts）: exit 0 のみ valid。`{index, status: "ensured"}`
+# - rebuild（inventory-rebuild.cli.ts）: exit 0 のみ valid。RebuildReport の 3 counter が数値
+# - reconcile（inventory-reconciliation.cli.ts）: exit 0 = hasDiff false / totalDiffs 0 / 全 counts 0、
+#   exit 2 = hasDiff true / totalDiffs > 0。いずれも counts が 14 category ちょうど（重複なし・
+#   欠落なし。RECONCILIATION_CATEGORIES と集合一致）で、totalDiffs が counts の総和と一致すること。
+cutover_projection_result_valid() {
+	local task_log_messages_json=$1
+	local projection_mode=$2
+	local exit_code=$3
+	local expected_categories_json
+	expected_categories_json=$(printf '%s\n' "${CUTOVER_RECONCILIATION_CATEGORIES[@]}" | jq -R . | jq -sc 'sort')
+
+	jq -e \
+		--arg projectionMode "$projection_mode" \
+		--arg exitCode "$exit_code" \
+		--argjson expectedCategories "$expected_categories_json" '
+		[
+			.[]
+			| select(type == "string")
+			| fromjson?
+			| select(type == "object")
+		]
+		| any(
+			.[];
+			if $projectionMode == "migrate" then
+				$exitCode == "0"
+					and (.index | type) == "string"
+					and .status == "ensured"
+			elif $projectionMode == "rebuild" then
+				$exitCode == "0"
+					and (.index | type) == "string"
+					and (.processedEvents | type) == "number"
+					and (.processedTicketTypes | type) == "number"
+					and (.bulkRequests | type) == "number"
+			elif $projectionMode == "reconcile" then
+				(.index | type) == "string"
+					and (.counts | type) == "object"
+					and (.totalDiffs | type) == "number"
+					and (.findings | type) == "array"
+					and (.checkedEvents | type) == "number"
+					and (.checkedDocuments | type) == "number"
+					and (.counts | keys | sort) == $expectedCategories
+					and (.counts | to_entries | all(.[]; (.value | type) == "number"))
+					and .totalDiffs == (.counts | to_entries | map(.value) | add)
+					and (
+						if $exitCode == "0" then
+							.hasDiff == false
+								and .totalDiffs == 0
+						elif $exitCode == "2" then
+							.hasDiff == true
+								and .totalDiffs > 0
+						else
+							false
+						end
+					)
+			else
+				false
+			end
 		)
 	' <<<"$task_log_messages_json" >/dev/null 2>&1
 }
@@ -396,10 +647,16 @@ cutover_evidence_valid() {
 		;;
 	counter)
 		expectation=$(cutover_counter_expectation "$operation") || return 1
-		local namespace counter_mode
-		read -r namespace counter_mode <<<"$expectation"
+		local namespace counter_mode required_writer_mode
+		read -r namespace counter_mode required_writer_mode <<<"$expectation"
 		cutover_counter_result_valid \
-			"$task_log_messages_json" "$namespace" "$counter_mode" "$exit_code"
+			"$task_log_messages_json" "$namespace" "$counter_mode" "$exit_code" \
+			"$required_writer_mode"
+		;;
+	projection)
+		expectation=$(cutover_projection_expectation "$operation") || return 1
+		cutover_projection_result_valid \
+			"$task_log_messages_json" "$expectation" "$exit_code"
 		;;
 	*)
 		return 1
@@ -421,7 +678,9 @@ cutover_evidence_valid() {
 #   evidence_valid が空文字、postflight の skipped / failure / cancelled もすべて失敗。
 # - check operation: raw exit code 0 かつ evidence_valid true（gate 側でも独立に固定する。
 #   script 側の fail-closed と二重化して、片方の退行だけでは green にならないようにする）。
-# - counter operation: workflow からは起動しないが、判定は check と同じ規律にする。
+# - counter / projection operation: workflow からは起動しないが、判定は check と同じ規律にする。
+#   projection-reconcile の exit 2（差分あり）も gate としては失敗にする（差分 0 を合格条件と
+#   する runbook の停止条件と一致させる）。
 # - 未知の operation: 失敗（fail closed）。
 cutover_gate_ok() {
 	local operation=$1
@@ -489,6 +748,42 @@ cutover_cluster=""
 cutover_region=""
 task_arn=""
 task_stopped=false
+cutover_client_token=""
+cutover_started_by=""
+
+# cutover_generate_client_token は RunTask の idempotency token を生成する。
+# ECS RunTask の clientToken は「64 ASCII 文字以内・文字コード 33-126」で、同一 cluster 内で
+# 一意である必要がある（ECS API Reference: RunTask / Ensuring idempotency。TTL 24 時間）。
+# 同じ token・同じ引数での再試行は元の結果を返すため、**RunTask 応答喪失時の回収に使う**。
+# CUTOVER_CLIENT_TOKEN で外から固定できる（spec / 手動再取得用）。
+cutover_generate_client_token() {
+	if [[ -n ${CUTOVER_CLIENT_TOKEN:-} ]]; then
+		printf '%s' "${CUTOVER_CLIENT_TOKEN}"
+		return 0
+	fi
+	local uuid=""
+	if command -v uuidgen >/dev/null 2>&1; then
+		uuid=$(uuidgen)
+	elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+		uuid=$(cat /proc/sys/kernel/random/uuid)
+	elif command -v openssl >/dev/null 2>&1; then
+		uuid=$(openssl rand -hex 16)
+	else
+		uuid="$(date -u +%Y%m%d%H%M%S)-$$-${RANDOM}${RANDOM}"
+	fi
+	printf 'cutover-%s' "${uuid,,}"
+}
+
+# cutover_startedby_for は session 固有の startedBy を組み立てる。
+# 従来の `cutover-<operation>` 固定値では、同じ operation を複数回実行した run を
+# ListTasks で区別できず、cancel 後の回収で「どの run の task か」を特定できない
+# （Codex High-4）。ECS の startedBy は 128 文字以内・英数字 / - / _ / / のみ。
+cutover_startedby_for() {
+	local operation=$1
+	local token=$2
+	local suffix="${token//[^A-Za-z0-9_-]/}"
+	printf 'cutover-%s-%s' "$operation" "${suffix:0:64}"
+}
 
 # cutover_wait_task_stopped_bounded は stop-task 要求後に tasks-stopped を bounded に待つ。
 # `aws ecs wait tasks-stopped` は既定で最大 10 分ポーリングするため、そのまま呼ぶと
@@ -512,6 +807,73 @@ cutover_wait_task_stopped_bounded() {
 	else
 		echo "warning: ECS task ${task_arn} did not reach STOPPED within ${wait_seconds}s; it may still be committing. Confirm with 'aws ecs wait tasks-stopped' before any further cutover operation (runbook stop condition)." >&2
 	fi
+}
+
+# cutover_run_task は RunTask を「応答喪失に耐える形」で実行し、global の task_arn を設定する
+# （Codex High-4）。
+#
+# 問題: AWS が task を受理した **後に** 応答が失われると、従来の実装は task_arn が空のまま
+# exit 1 し、EXIT trap は停止も待機もできない。呼び出し側（runbook / workflow）から見ると
+# 「起動していない」ように見えるため、切替 CLI が走っている最中に次の操作へ進み得る。
+#
+# 対策（ECS API Reference: Ensuring idempotency で確認済み）:
+# 1. RunTask に clientToken を明示する。
+# 2. 応答が取れなかったら、**同じ clientToken・同じ引数で再試行する**。ECS は成功済みの
+#    リクエストの再試行に対して元の結果を返す（引数が違えば ConflictException になるため、
+#    引数は 1 文字も変えない）。
+# 3. それでも取れなければ、session 固有の startedBy で ListTasks から回収する。
+#    **ListTasks では startedBy を使うときそれが唯一の filter でなければならない**
+#    （ECS API Reference: ListTasks "When you specify startedBy as the filter, it must be
+#    the only filter that you use."）。desiredStatus 等での絞り込みは describe-tasks 側で行う。
+cutover_run_task() {
+	local region=$1
+	local cluster=$2
+	local task_def=$3
+	local subnets=$4
+	local security_groups=$5
+	local overrides=$6
+	local attempt max_attempts="${CUTOVER_RUN_TASK_ATTEMPTS:-3}"
+
+	for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+		# 引数は毎回完全に同一にする（clientToken による idempotency の前提）。
+		task_arn=$(aws ecs run-task --region "$region" \
+			--cluster "$cluster" \
+			--task-definition "$task_def" \
+			--launch-type FARGATE \
+			--client-token "$cutover_client_token" \
+			--started-by "$cutover_started_by" \
+			--network-configuration "awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${security_groups}],assignPublicIp=DISABLED}" \
+			--overrides "$overrides" \
+			--query 'tasks[0].taskArn' --output text 2>/dev/null) || task_arn=""
+
+		if [[ -n $task_arn && $task_arn != "None" ]]; then
+			if ((attempt > 1)); then
+				echo "recovered ECS task ARN by retrying RunTask with the same clientToken (attempt ${attempt}): ${task_arn}" >&2
+			fi
+			return 0
+		fi
+
+		echo "warning: RunTask returned no task ARN (attempt ${attempt}/${max_attempts}); retrying with the same clientToken ${cutover_client_token}" >&2
+		sleep 3
+	done
+
+	# 最後の回収経路: startedBy 単独の ListTasks（他の filter と併用しない）。
+	local recovered_arns
+	recovered_arns=$(aws ecs list-tasks --region "$region" \
+		--cluster "$cluster" \
+		--started-by "$cutover_started_by" \
+		--query 'taskArns' --output text 2>/dev/null) || recovered_arns=""
+
+	# session 固有 startedBy なので、回収できるのは 1 件でなければならない。
+	# 複数件は「この session の task を一意に特定できない」状態なので回収しない（fail closed）。
+	if [[ -n $recovered_arns && $recovered_arns != "None" ]] && (($(wc -w <<<"$recovered_arns") == 1)); then
+		task_arn=$(tr -d '[:space:]' <<<"$recovered_arns")
+		echo "recovered ECS task ARN via ListTasks --started-by ${cutover_started_by}: ${task_arn}" >&2
+		return 0
+	fi
+
+	task_arn=""
+	return 1
 }
 
 cleanup_task() {
@@ -600,22 +962,29 @@ main() {
 	echo "container=${container}"
 	echo "command=${cutover_operation_command[*]}"
 
-	task_arn=$(aws ecs run-task --region "$region" \
-		--cluster "$cluster" \
-		--task-definition "$task_def" \
-		--launch-type FARGATE \
-		--started-by "cutover-${operation}" \
-		--network-configuration "awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${security_groups}],assignPublicIp=DISABLED}" \
-		--overrides "$overrides" \
-		--query 'tasks[0].taskArn' --output text)
+	# --- RunTask（応答喪失に耐える経路。Codex High-4） ---------------------------------
+	# RunTask を投げる **前に** clientToken と session 固有 startedBy を確定し、先に出力する。
+	# こうしておくと、応答が失われて task ARN が取れなかった run でも、run log から
+	# token / startedBy を復元して同じ token で再取得（または ListTasks で回収）できる。
+	cutover_client_token=$(cutover_generate_client_token)
+	cutover_started_by=$(cutover_startedby_for "$operation" "$cutover_client_token")
+	echo "clientToken=${cutover_client_token} startedBy=${cutover_started_by}"
+
+	# 回収失敗（非 0）でも set -e で即死させない。下の fail-closed 分岐で
+	# 「次の操作を止めろ」という運用指示を必ず出す。
+	cutover_run_task "$region" "$cluster" "$task_def" "$subnets" "$security_groups" "$overrides" ||
+		true
 
 	if [[ -z $task_arn || $task_arn == "None" ]]; then
-		echo "failed to start ECS task for operation ${operation}" >&2
 		task_arn=""
+		echo "failed to obtain the ECS task ARN for operation ${operation} after retrying RunTask with the same clientToken and recovering via ListTasks." >&2
+		echo "AWS may have accepted the task even though the response was lost. Do NOT run any further cutover operation (including reading inventory_writer_control) until the task is identified and confirmed STOPPED." >&2
+		echo "recover with: aws ecs list-tasks --region ${region} --cluster ${cluster} --started-by ${cutover_started_by}" >&2
+		echo "(startedBy must be the only ListTasks filter; narrow the result with describe-tasks)" >&2
 		exit 1
 	fi
 
-	echo "taskArn=${task_arn} startedBy=cutover-${operation}"
+	echo "taskArn=${task_arn} startedBy=${cutover_started_by}"
 	if ! aws ecs wait tasks-stopped --region "$region" --cluster "$cluster" --tasks "$task_arn"; then
 		echo "ECS waiter failed before task stopped: ${task_arn}" >&2
 		exit 1
@@ -731,6 +1100,44 @@ write_cutover_step_output() {
 	} >>"$output_file"
 }
 
+# cutover_execution_context は実行経路を返す（"github-actions" / "local"）。
+# GitHub Actions の run context（GITHUB_RUN_ID）が無いローカル実行では、
+# `//actions/runs/` のような壊れた runUrl を作らない（Codex Medium-2）。
+cutover_execution_context() {
+	if [[ -n ${GITHUB_RUN_ID:-} && -n ${GITHUB_REPOSITORY:-} && -n ${GITHUB_SERVER_URL:-} ]]; then
+		echo "github-actions"
+	else
+		echo "local"
+	fi
+}
+
+# cutover_run_url は GitHub Actions run の URL を返す（ローカル実行では空文字）。
+cutover_run_url() {
+	if [[ $(cutover_execution_context) == "github-actions" ]]; then
+		echo "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+	else
+		echo ""
+	fi
+}
+
+# cutover_operator は実行者の識別子を返す（ローカル実行 lineage 用。CUTOVER_OPERATOR で上書き可）。
+cutover_operator() {
+	local operator="${CUTOVER_OPERATOR:-}"
+	if [[ -z $operator ]]; then
+		operator=$(id -un 2>/dev/null || echo "unknown")
+	fi
+	echo "$operator"
+}
+
+# cutover_operator_host は実行ホスト名を返す（ローカル実行 lineage 用）。
+cutover_operator_host() {
+	local host="${CUTOVER_OPERATOR_HOST:-}"
+	if [[ -z $host ]]; then
+		host=$(hostname 2>/dev/null || echo "unknown")
+	fi
+	echo "$host"
+}
+
 # write_cutover_step_summary は evidence JSON と lineage を GITHUB_STEP_SUMMARY へ転記する
 # （ADR-0033 決定 5 / #335 の証跡要件。run log にも残るが、summary は destroy 前の
 # 恒久化作業で参照する）。GITHUB_STEP_SUMMARY 未設定のローカル実行では何もしない。
@@ -749,6 +1156,10 @@ write_cutover_step_summary() {
 		return 0
 	fi
 
+	local execution_context run_url
+	execution_context=$(cutover_execution_context)
+	run_url=$(cutover_run_url)
+
 	{
 		echo "### cutover ${operation} (exit ${exit_code})"
 		echo
@@ -757,21 +1168,24 @@ write_cutover_step_summary() {
 		echo "- taskDefinition: \`${task_def}\`"
 		echo "- image: \`${image}\`"
 		echo "- imageDigest: \`${image_digest}\`"
-		echo "- runUrl: \`${GITHUB_SERVER_URL:--}/${GITHUB_REPOSITORY:--}/actions/runs/${GITHUB_RUN_ID:--}\`"
+		echo "- clientToken: \`${cutover_client_token:--}\`"
+		echo "- startedBy: \`${cutover_started_by:--}\`"
+		echo "- executionContext: \`${execution_context}\`"
+		# 壊れた runUrl を出さない（Codex Medium-2）。ローカル実行では実行者・ホストを載せる。
+		if [[ -n $run_url ]]; then
+			echo "- runUrl: \`${run_url}\`"
+		else
+			echo "- operator: \`$(cutover_operator)\`"
+			echo "- operatorHost: \`$(cutover_operator_host)\`"
+		fi
 		echo
 		echo "evidence:"
 		echo
 		echo '```json'
-		jq -r '
-			[
-				.[]
-				| select(type == "string")
-				| fromjson?
-				| select(type == "object")
-				| select(.evidenceType == "ticket-type-cutover-readiness" or .action != null)
-			]
-			| if length == 0 then "(no evidence JSON found in task log)" else .[] | tojson end
-		' <<<"$task_log_messages_json" 2>/dev/null ||
+		jq -r "
+			[${CUTOVER_EVIDENCE_SELECT_FILTER}]
+			| if length == 0 then \"(no evidence JSON found in task log)\" else .[] | tojson end
+		" <<<"$task_log_messages_json" 2>/dev/null ||
 			echo "(failed to parse task log for evidence)"
 		echo '```'
 		echo
@@ -801,6 +1215,18 @@ write_cutover_evidence_file() {
 		return 0
 	fi
 
+	local execution_context run_url
+	execution_context=$(cutover_execution_context)
+	run_url=$(cutover_run_url)
+
+	# lineage schema（provenance）:
+	# - 共通: operation / exitCode / taskArn / taskDefinition / image / imageDigest /
+	#   operationStartedAtUtc / clientToken / startedBy / executionContext
+	# - executionContext == "github-actions": runUrl（run へのリンク）
+	# - executionContext == "local": operator / operatorHost（runUrl は出さない）
+	# ローカル実行では GitHub Actions の artifact / step summary が作られないため、
+	# 壊れた `//actions/runs/` を書く代わりに実行者・ホストで provenance を成立させる
+	# （Codex Medium-2。JSONL の保存先は runbook が定める）。
 	if ! jq -c \
 		--arg operation "$operation" \
 		--arg exitCode "$exit_code" \
@@ -809,27 +1235,37 @@ write_cutover_evidence_file() {
 		--arg image "$image" \
 		--arg imageDigest "$image_digest" \
 		--arg startedAtUtc "$started_at_utc" \
-		--arg runUrl "${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}" '
+		--arg clientToken "$cutover_client_token" \
+		--arg startedBy "$cutover_started_by" \
+		--arg executionContext "$execution_context" \
+		--arg runUrl "$run_url" \
+		--arg operator "$(cutover_operator)" \
+		--arg operatorHost "$(cutover_operator_host)" "
 			{
-				lineage: {
-					operation: $operation,
-					exitCode: $exitCode,
-					taskArn: $taskArn,
-					taskDefinition: $taskDefinition,
-					image: $image,
-					imageDigest: $imageDigest,
-					operationStartedAtUtc: $startedAtUtc,
-					runUrl: $runUrl
-				},
-				evidence: [
-					.[]
-					| select(type == "string")
-					| fromjson?
-					| select(type == "object")
-					| select(.evidenceType == "ticket-type-cutover-readiness" or .action != null)
-				]
+				lineage: (
+					{
+						operation: \$operation,
+						exitCode: \$exitCode,
+						taskArn: \$taskArn,
+						taskDefinition: \$taskDefinition,
+						image: \$image,
+						imageDigest: \$imageDigest,
+						operationStartedAtUtc: \$startedAtUtc,
+						clientToken: \$clientToken,
+						startedBy: \$startedBy,
+						executionContext: \$executionContext
+					}
+					+ (
+						if \$executionContext == \"github-actions\" then
+							{runUrl: \$runUrl}
+						else
+							{operator: \$operator, operatorHost: \$operatorHost}
+						end
+					)
+				),
+				evidence: [${CUTOVER_EVIDENCE_SELECT_FILTER}]
 			}
-		' <<<"$task_log_messages_json" >>"$evidence_file"; then
+		" <<<"$task_log_messages_json" >>"$evidence_file"; then
 		echo "failed to write cutover evidence file ${evidence_file}" >&2
 		return 1
 	fi
