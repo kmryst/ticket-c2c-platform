@@ -6,7 +6,8 @@
     "spec": "typescript@7",
     "steps": [
       "npm install --no-audit --no-fund typescript@7",
-      "npm run build"
+      "npm run build",
+      "npx jest src/observability"
     ],
     "review-by": "2026-11-02",
     "tracking": "https://github.com/kmryst/ticket-c2c-platform/issues/425"
