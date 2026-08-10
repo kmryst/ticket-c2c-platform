@@ -86,6 +86,27 @@ updates:
       # 見直し期限: 2026-11-02（既存 ignore 3 件と揃える。期限到来で自動解除はしない）
       # 追跡: Issue #455
       - dependency-name: "fastify"
+      # ioredis 6 は @opentelemetry/instrumentation-ioredis が未対応（major のみ抑止）。
+      # 実測: @opentelemetry/instrumentation-ioredis@0.69.0（npm latest、本リポジトリ現行も同一）の
+      #   InstrumentationNodeModuleDefinition は 'ioredis' の対応範囲を ">=2.0.0 <6" と宣言している
+      #   （node_modules/@opentelemetry/instrumentation-ioredis/build/src/instrumentation.js:29。2026-08-10）。
+      #   ioredis 5.11.1 では patch 適用ログが出て Redis.prototype.sendCommand が wrap されるが、
+      #   6.0.0 では OTEL_LOG_LEVEL=debug でもログが出ず sendCommand は素の実装のままだった。
+      # 影響: Dependabot PR #453（5.11.1→6.0.0）。src/observability/tracing.ts:65 の
+      #   IORedisInstrumentation が黙って no-op になり、X-Ray から Valkey（在庫カウンタ・レート制限）の
+      #   span が消える。例外は出ずアプリは動き続けるため気付きにくい。
+      #   親 Issue #335 の dev rehearsal は Valkey のトレースが効いている前提の作業。
+      # 動作不良ではない: ioredis 6.0.0 でも tsc 型エラー 0、実 Valkey に対する Lua script の戻り値は v5 と同一
+      #   （replyMapping: "legacy" により RESP3 既定化後も応答形状は RESP2 互換）、
+      #   jest 28 suites / 324 tests・cutover 20 tests・writer-mode-switch 13 tests すべて green。保留理由は観測性のみ。
+      # patch / minor は除外しない: 5.x 系の更新は従来どおり受け入れる。
+      # 解除条件: instrumentation-ioredis の新版が出て対応範囲に ioredis 6 が入り、かつ実 Valkey に対して
+      #   patch 適用ログと Valkey span が実際に出ることを確認できたら（Issue #457 の「解除方法」参照）。
+      # 一時措置: fastify と違い上流の待ちであり、上流が対応版をリリースすれば解除できる。
+      # 見直し期限: 2026-11-02（既存 ignore 4 件と揃える）
+      # 追跡: Issue #457
+      - dependency-name: "ioredis"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "npm"
     directory: "/frontend"
