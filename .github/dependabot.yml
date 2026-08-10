@@ -1,6 +1,26 @@
 # Dependabot 設定
 # 目的: npm / GitHub Actions / Terraform の依存関係更新を週次で自動追従する
 # 有効な ignore の横断一覧: https://github.com/search?q=user%3Akmryst+label%3Adependabot-ignore+is%3Aissue+is%3Aopen&type=issues
+#
+# groups の方針（terraform-hannibal / idp-golden-path と揃える。Issue #447）:
+# - 同じ lockfile を触る密結合な依存群は 1 グループ = 1 PR にまとめる。
+#   1 依存 1 PR のままだと、1 件マージするたびに残りが rebase 待ちになる
+#   （実測: PR #430 `@opentelemetry/sdk-node` と PR #436 `@opentelemetry/context-async-hooks` が
+#    root の package-lock.json で競合し、#430 マージ後に #436 の自動 rebase を待った）。
+# - devDependencies は `npm-dev` グループに集約し、production 依存は原則個別 PR のまま残す
+#   （本番影響のある更新は 1 件ずつ見たいため）。ただし上記のとおり密結合な
+#   production 依存群だけは例外的にグループ化する。
+# - Dependabot は「複数グループにマッチする依存は最初にマッチしたグループに入る」
+#   （first-match-wins）ため、catch-all の `npm-dev` は必ず最後に置く。
+#   個別グループを `npm-dev` より後ろに置くと、その群の devDependencies 側が
+#   先に `npm-dev` へ吸われてグループが分裂する。
+# - グループに `update-types` は指定せず major も同じ PR に含める
+#   （terraform-hannibal / idp-golden-path と同じ挙動。破壊的更新を単独で切り出したい
+#    ケースは、これまでどおり `ignore` + 追跡 Issue で個別に扱う）。
+#
+# 運用メモ: `groups` を追加しても既存の open な Dependabot PR は自動統合されない。
+# `@dependabot recreate` でも統合されず、GitHub Web UI の
+# Insights > Dependency graph > Dependabot で "Check for updates" の手動実行が必要。
 
 version: 2
 updates:
@@ -8,7 +28,37 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+      day: "monday"
+      time: "09:15"
+      timezone: "Asia/Tokyo"
+    # root は production 依存 28 件のうち 18 件を 3 グループへ集約するが、
+    # 残る 10 件は個別 PR のまま（+ npm-dev グループ 1 件）。
+    # limit 5 だと週によっては更新が埋もれるため 10 とする
+    # （grouping 前の最悪ケース 40 PR 超に比べれば十分小さい）。
+    open-pull-requests-limit: 10
+    groups:
+      # @opentelemetry/* は prod 10 件 + dev 1 件（context-async-hooks）に分かれているが、
+      # SDK / instrumentation / exporter がバージョン連動するため実質ひとかたまり。
+      # dependency-type は指定しない。指定すると dev 側の context-async-hooks が
+      # このグループから外れ、今回競合したのと同じ prod / dev 分裂が再発する。
+      # npm-dev より前に置く（first-match-wins）。
+      opentelemetry:
+        patterns:
+          - "@opentelemetry/*"
+      # @aws-sdk/* は client / credential-provider が常に同一バージョンへ揃うリリース形態のため、
+      # 個別 PR にすると必ず lockfile が競合する。全 4 件とも production 依存。
+      aws-sdk:
+        patterns:
+          - "@aws-sdk/*"
+      # @nestjs/* も common / core / platform-fastify が相互に peer 依存しており、
+      # 単独更新すると peer 不整合で npm ci が失敗しうる。全 4 件とも production 依存。
+      nestjs:
+        patterns:
+          - "@nestjs/*"
+      npm-dev:
+        dependency-type: "development"
+        patterns:
+          - "*"
     ignore:
       # TypeScript 7 は ts-jest が未対応。
       # 実測: ts-jest@29.4.12（本リポジトリ現行、npm latest も同一）の peer は typescript ">=4.3 <7"（2026-08-09 npm view）。
@@ -25,7 +75,34 @@ updates:
     directory: "/frontend"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:15"
+      timezone: "Asia/Tokyo"
+    # frontend は production 依存 3 件がすべてグループに入るため、
+    # 週あたり最大でも react / next / npm-dev の 3 PR。5 で足りる。
     open-pull-requests-limit: 5
+    groups:
+      # react / react-dom と @types/react* は密結合しており、単独更新すると
+      # 相方が取り残されて CI が壊れる（idp-golden-path PR #53 / #54 / #56 で発生）。
+      # @types/react* を npm-dev ではなくこのグループへ入れるため npm-dev より前に置く。
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      # eslint-config-next は next の major に追随する必要がある
+      # （現行: next 16.3.0 / eslint-config-next 16.2.12）。
+      # eslint-config-next は devDependency のため、npm-dev より前に置かないと
+      # そちらへ吸われて next 本体と別 PR に分かれる。
+      next:
+        patterns:
+          - "next"
+          - "eslint-config-next"
+      npm-dev:
+        dependency-type: "development"
+        patterns:
+          - "*"
     ignore:
       # TypeScript 6.1 以降は typescript-eslint が未対応。
       # 実測: typescript-eslint@8.66.0（npm latest。本リポジトリは 8.62.1）の peer は typescript ">=4.8.4 <6.1.0"（2026-08-09 npm view）。
@@ -50,7 +127,18 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:15"
+      timezone: "Asia/Tokyo"
+    # グループ 1 つに集約されるため 5 で十分。
     open-pull-requests-limit: 5
+    groups:
+      # Actions の更新は workflow ファイルの参照 SHA / タグを書き換えるだけで
+      # lockfile を持たないが、1 action 1 PR だとレビュー対象が無駄に増える。
+      # terraform-hannibal / idp-golden-path と同じく全件を 1 グループにまとめる。
+      github-actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: "terraform"
     directories:
@@ -58,4 +146,15 @@ updates:
       - "/terraform/environments/dev"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:15"
+      timezone: "Asia/Tokyo"
+    # グループ 1 つに集約されるため 5 で十分。
     open-pull-requests-limit: 5
+    groups:
+      # provider のバージョンは bootstrap / dev で揃えたい。
+      # 個別 PR だと環境ごとに .terraform.lock.hcl がずれ、
+      # Terraform Format & Validate の結果が環境間で食い違う原因になる。
+      terraform-providers:
+        patterns:
+          - "*"
