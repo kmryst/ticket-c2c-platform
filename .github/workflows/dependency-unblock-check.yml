@@ -1,0 +1,40 @@
+# Dependency Unblock Check
+# 目的: Dependabot の ignore が「もう外せる」状態になっていないかを週次で実測する
+# 実体は kmryst/idp-golden-path の reusable workflow（ADR-0008 / ADR-0013）。
+# このファイルはトリガー・permissions・concurrency のみを持つ薄い caller workflow
+#
+# 【セキュリティ契約】pull_request / pull_request_target を張ってはならない。
+# 台帳（scripts/ci/dependabot-unblock.json）は任意のシェルコマンドを steps として運び、
+# このジョブは issues: write を持つ（idp-golden-path ADR-0013）。callee 側でも拒否される。
+#
+# 赤緑の意味が他ワークフローと違う。緑 = 無操作でよい / 赤 exit 10 = 朗報（ignore を外せる）
+# / 赤 exit 1 = 機構の故障。詳細は idp-golden-path の docs/operations/dependency-unblock-check.md
+
+name: Dependency Unblock Check
+
+on:
+  schedule:
+    # 毎週月曜 10:15 JST (01:15 UTC)。Dependabot 09:15 JST /
+    # Dependency Audit 09:45 JST より後に置く
+    - cron: "15 1 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # probe 成功時に追跡 Issue へ記録コメントを投稿するために必要
+  issues: write
+
+concurrency:
+  # callee 側と同一 group 名にすると caller/callee 間デッドロックと判定され
+  # run がキャンセルされる（idp-golden-path#106）。caller 側は -caller を付ける
+  group: dependency-unblock-check-caller-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  # caller job には name を付けない。job id にフォールバックさせて
+  # callee 側 job 名との文字列重複を避ける（idp-golden-path#106）
+  dependency-unblock-check:
+    uses: kmryst/idp-golden-path/.github/workflows/dependency-unblock-check.yml@v1.5.0
+    permissions:
+      contents: read
+      issues: write
