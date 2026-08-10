@@ -144,6 +144,7 @@ updates:
     directories:
       - "/terraform/environments/bootstrap"
       - "/terraform/environments/dev"
+      - "/terraform/environments/staging"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -152,7 +153,7 @@ updates:
     # グループ 1 つに集約されるため 5 で十分。
     open-pull-requests-limit: 5
     groups:
-      # provider のバージョンは bootstrap / dev で揃えたい。
+      # provider のバージョンは bootstrap / dev / staging で揃えたい。
       # 個別 PR だと環境ごとに .terraform.lock.hcl がずれ、
       # Terraform Format & Validate の結果が環境間で食い違う原因になる。
       terraform-providers:
