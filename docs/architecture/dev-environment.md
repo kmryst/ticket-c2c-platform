@@ -71,6 +71,8 @@ flowchart LR
 
 [ADR-0003](../adr/0003-terraform-state-and-environment-isolation.md) に従う。
 
+Terraform CLI は 1.14.8 を使う（[ADR-0034](../adr/0034-toolchain-version-standardization-with-mise.md)）。ローカルの正本はリポジトリルートの `.mise.toml` で、`mise install` で取得する。CI 側は各 workflow の `terraform_version` に同じ値を直書きし、両者の一致は PR ごとに `toolchain-version-check / Toolchain Version Check` が機械検査する。bootstrap / dev / staging の各 state に記録済みの `terraform_version` も 1.14.8 であり、state は前方互換がないためこれより古い CLI では操作できない。
+
 ```text
 terraform/
   modules/

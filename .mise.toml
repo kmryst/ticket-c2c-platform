@@ -1,0 +1,24 @@
+# ローカル開発ツールチェーンの正本（ADR-0034 / idp-golden-path ADR-0014）。
+#
+# ここで宣言したバージョンと CI workflow の pin が一致することは、
+# .github/workflows/toolchain-version-check.yml が PR ごとに機械検査する。
+# バージョンを変える場合は、必ず同じ PR で CI 側の pin も更新すること。
+#
+# 使い方:
+#   mise install    # 宣言したバージョンを取得する
+#   mise current    # 実効バージョンを確認する
+#
+# 実際にこのリポジトリで使うツールだけを宣言する。使っていないツールを
+# 「他リポジトリと揃えるため」に宣言しない（ADR-0034）。
+# tflint / terraform-docs / pre-commit は本リポジトリでは未使用のため宣言しない
+# （.tflint.hcl も .pre-commit-config.yaml も存在せず、CI も呼び出していない）。
+
+[tools]
+# 3 リポジトリ共通の標準バージョン。
+# リモート state（bootstrap / dev / staging）に記録済みの terraform_version が
+# いずれも 1.14.8 であり、state は前方互換がないためダウングレードできない。
+# CI の 9 workflow に直書きされた terraform_version もこの値と一致させる。
+terraform = "1.14.8"
+# CI の setup-node（node-version: "24"）と Dockerfile / frontend/Dockerfile
+# （node:24-slim）に合わせる。package.json の engines も 24 系を要求する。
+node = "24.18.0"

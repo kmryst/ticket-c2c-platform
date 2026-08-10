@@ -104,3 +104,4 @@ YYYY-MM-DD
 | [0031](./0031-versioned-ticket-type-search-projection.md) | version 付き Ticket Type 在庫 event と検索 projection を実装する | Accepted |
 | [0032](./0032-single-transaction-writer-mode-switch-cli.md) | writer mode切替を排他barrier下の単一transaction CLIで行う | Accepted |
 | [0033](./0033-ticket-type-migration-irreversible-boundaries.md) | Ticket Type 移行の不可逆境界を policy / enforcement / evidence 分離で配置する | Accepted |
+| [0034](./0034-toolchain-version-standardization-with-mise.md) | ローカルツールチェーンの正本を `.mise.toml` に置き、CI pin との一致を CI で機械検査する | Accepted |

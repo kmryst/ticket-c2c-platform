@@ -25,6 +25,7 @@
   - Dependency Audit: 本リポジトリは root（`package-lock.json`）と `frontend/`（`frontend/package-lock.json`）が独立した 2 つの npm プロジェクトのため、`working-directory` を変えて 2 job 呼び出す構成にした
   - Markdown Lint: 前提となる `lint:md` npm script・`markdownlint-cli2` 設定が本リポジトリになかったため新規追加した。既存 Markdown ファイル 31 件の書式修正（テーブル区切り記法・コードブロック言語タグ・空行）を伴うが、内容変更は `staging-environment.md` の未エスケープ pipe 文字修正（`capacity_profile=normal | full` が列区切りとして誤解釈されていた点）のみ
   - Issue Template Check: 本リポジトリの旧ローカル実装が `idp-golden-path` 側 reusable workflow の移植元だったため、ロジック自体に変更はない
+- Toolchain Version Check は、2026-08-10 に `idp-golden-path` の reusable workflow を `@v1` で呼ぶ caller workflow として新規導入した（Issue #459、[ADR-0034](../adr/0034-toolchain-version-standardization-with-mise.md)）。ローカル正本 `.mise.toml` と CI workflow の Terraform pin の一致を機械検査する。3 リポジトリのツールチェーン統一の一環であり、標準の正本は `idp-golden-path` ADR-0014 にある。他の新規ガードレールと同じく required status checks には追加していない。
 - helper scripts の共通化（`idp-golden-path` の `scripts/github/lib/common.sh` 形式への統一）は未着手（今回のスコープ外）。
 - backend / frontend build、DB migration、smoke test、deploy、Terraform apply / destroy などの業務・PoC 固有 workflow は、このリポジトリ固有の責務として残す。
 
@@ -100,6 +101,7 @@ PR では次の観点を GitHub Actions で検査します。
 - `Terraform Format & Validate`
 - `Playwright E2E`
 - `Gitleaks Secret Scan`
+- `Toolchain Version Check`: `.mise.toml` の宣言と CI workflow の Terraform pin の一致（[ADR-0034](../adr/0034-toolchain-version-standardization-with-mise.md)）
 
 2026-07-19 に GitHub の branch protection を確認した時点で、required status check は次の 5 つ。
 
@@ -109,7 +111,7 @@ PR では次の観点を GitHub Actions で検査します。
 - `pr-policy-check / PR Policy Check`
 - `gitleaks / Gitleaks Secret Scan`
 
-`Frontend Build` と `Playwright E2E` は全 PR で実行されるが required ではなく、失敗だけではマージをブロックしない。これは [Production Readiness L-22](../architecture/production-readiness.md) の未対応ギャップとして扱う。CodeQL / Dependency Audit / Markdown Lint / Issue Template Check も required ではない。
+`Frontend Build` と `Playwright E2E` は全 PR で実行されるが required ではなく、失敗だけではマージをブロックしない。これは [Production Readiness L-22](../architecture/production-readiness.md) の未対応ギャップとして扱う。CodeQL / Dependency Audit / Markdown Lint / Issue Template Check / Toolchain Version Check も required ではない。
 
 required status check として扱う check 名は、workflow の job `name` と揃えます。workflow 名や job 名を変える場合は、GitHub 側の branch protection / ruleset 設定との整合を確認します。
 

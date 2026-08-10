@@ -60,6 +60,22 @@ GitHub リポジトリ名と AWS リソース名は、GitHub OIDC、IAM、Terraf
 - 現行の仕様・構成・運用手順は領域ごとの `docs/architecture/` 正本に記録し、トレードオフを伴う重要な設計判断の背景・理由・再検討条件は ADR に記録する。
 - 秘密情報、`.env`、認証情報はコミットしない。
 
+## ローカル開発ツールチェーン
+
+ローカルで使う Terraform / Node.js のバージョンは `.mise.toml` を正本とします（[ADR-0034](docs/adr/0034-toolchain-version-standardization-with-mise.md)）。[mise](https://mise.jdx.dev/) を導入したうえで、リポジトリルートで取得してください。
+
+```bash
+mise install
+mise current
+```
+
+| ツール | バージョン | 備考 |
+| --- | --- | --- |
+| Terraform | 1.14.8 | リモート state（bootstrap / dev / staging）と CI の pin に一致させる。state は前方互換がないため、これより古い CLI では操作できない |
+| Node.js | 24.18.0 | CI の `setup-node` と `Dockerfile` / `frontend/Dockerfile`（`node:24-slim`）に合わせる |
+
+`.mise.toml` の宣言と CI workflow の Terraform pin が一致していることは、PR ごとに `toolchain-version-check / Toolchain Version Check` が機械検査します。バージョンを変える場合は、`.mise.toml` と CI 側の pin を同じ PR で更新してください。
+
 ## ローカル在庫 PoC
 
 PostgreSQL の条件付き更新で在庫超過を防ぐ最小 PoC を実行できます。
