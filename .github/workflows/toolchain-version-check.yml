@@ -1,0 +1,48 @@
+# Toolchain Version Check
+# 目的: ローカル正本（.mise.toml）が宣言するツールチェーンのバージョンと、
+#       CI workflow に直書きされた pin が一致することを機械検査する
+# 実体は kmryst/idp-golden-path の reusable workflow（ADR-0008）。
+# このファイルはトリガー・permissions・concurrency のみを持つ薄い caller workflow
+#
+# 設計判断は本リポジトリの ADR-0034 と idp-golden-path ADR-0014 に記録している。
+# 本リポジトリは 9 workflow が `terraform_version` を 1 箇所ずつ直書きしており、
+# その値と .mise.toml の宣言の一致は、人間の目視ではなくこの check が保証する。
+#
+# `.mise.toml` が存在しないと skip ではなく fail する（idp-golden-path ADR-0014）。
+# ファイルを消す・移す場合は、同じ PR で本 workflow の扱い
+# （削除するか `mise-config-path` を渡すか）も決めること。
+#
+# input（`mise-config-path` / `workflow-paths`）はどちらも既定値
+# （`.mise.toml` / `.github/workflows/*.yml` と `*.yaml`）で本リポジトリの構成に合うため渡さない。
+
+name: Toolchain Version Check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # idp-golden-path 側の reusable workflow 自身も同名パターンの concurrency group
+  # （toolchain-version-check-<PR番号>）を持つため、caller 側と同一名にすると
+  # 「top level workflow と呼び出し先の間でデッドロック」として GitHub にキャンセルされる
+  # （Commitlint移行 #294 で実測。idp-golden-path#106に記録）。
+  # caller 側は `-caller` を付けて callee の group と衝突しないようにする。
+  group: toolchain-version-check-caller-${{ github.event.pull_request.number }}
+  # 実行中 run のキャンセルは CANCELLED check run を commit に残し、
+  # required status checks の判定に混入して PR を恒久的にブロックする（Issue #61）。
+  cancel-in-progress: false
+
+jobs:
+  # caller job には name を付けない。job id（toolchain-version-check）にフォールバックさせる
+  # ことで、callee側 job 名（Toolchain Version Check）との完全な文字列重複を避ける
+  # （Commitlint移行 #294 で判明した可読性上の教訓。idp-golden-path#106参照）。
+  toolchain-version-check:
+    # Dependabot PR も免除しない。機械的な整合性検査であり、Dependabot が
+    # setup-terraform や workflow を書き換える可能性がある以上、免除は検知の穴になる
+    # （idp-golden-path ADR-0014）。
+    uses: kmryst/idp-golden-path/.github/workflows/toolchain-version-check.yml@v1
+    permissions:
+      contents: read
