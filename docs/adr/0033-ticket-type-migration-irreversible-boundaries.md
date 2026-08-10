@@ -32,7 +32,7 @@ digest/schema guard が実行時に参照する正本は 3 phase で切り替え
 
 不採用案: (i) control row を migration 外で先行 seed する——migration の冪等性と「schema 再適用でも既存 mode を上書きしない」保護（ADR-0029）を壊す。(ii) bootstrap 期間だけ guard を無効化する——guard 前置の不変条件に反し、最も危険な期間（環境が空で何でも起動できる）を無防備にする。(iii) 中間 phase を定義しない 2 phase 構成——control row 生成後〜marker 前は final cleanup 実行を含む最長の期間であり、正規 task 自身が正本不達で fail closed になり実行不能になる。
 
-manifest の具体スキーマ・許可 digest / task definition revision / command の列挙は、要求仕様（#335 不可逆境界 4）と新規(d1) 着手時・#388 runbook が持つ。
+manifest の具体スキーマ・許可 digest / task definition revision / command の列挙は、要求仕様（#335 不可逆境界 4）と #419 着手時・#445 の provisioning runbook が持つ。
 
 ### 3. writer mode 切替の所有を final cleanup transaction へ移管する
 
@@ -50,17 +50,17 @@ fresh session の final cleanup に限り、writer mode の legacy → ticket_ty
 
 環境 destroy より前に evidence（attest versioned JSON・負荷結果・revision/workload）を remote Git へ永続化し、hash と provenance（workflow run / ECS task / artifact digest への lineage）を検証できる状態で残す。destroy 後は merged evidence/config decision PR 内の versioned JSON が writer 遷移を含む runtime 証跡の唯一の正本になる。
 
-理由: ephemeral 環境では destroy が runtime 状態を消すため、事後検証可能性は destroy 前の永続化でしか担保できない。受け入れ条件としての正本は #335、branch 運用・保存手順は #388 runbook が持つ。
+理由: ephemeral 環境では destroy が runtime 状態を消すため、事後検証可能性は destroy 前の永続化でしか担保できない。受け入れ条件としての正本は #335、branch 運用・保存手順は #445 runbook が持つ。
 
 ### 6. fresh 構築は二段階 apply とし、cleanup 完了まで activation しない
 
-- 二段階 apply: 現行 root は apply 内で task definition を必ず latest image で作成し、ECR も同一 apply で作られる（`terraform/modules/ecs-service/main.tf:11` の無条件 TD 作成）ため、単段では guard を registration より前に置けない。段間の resource 境界として、第1段では task definition / service / autoscaling / Scheduler / canary を作成せず、guard PASS 後の第2段でのみ作成する。不採用案: TD 作成をモジュール外へ出す単段構成は module refactor を要し、移行期間中の全環境に影響するため見送る。第2段の方式は同一 root・phase 付き apply を第一候補として #388 着手時に確定する。
+- 二段階 apply: 現行 root は apply 内で task definition を必ず latest image で作成し、ECR も同一 apply で作られる（`terraform/modules/ecs-service/main.tf:11` の無条件 TD 作成）ため、単段では guard を registration より前に置けない。段間の resource 境界として、第1段では task definition / service / autoscaling / Scheduler / canary を作成せず、guard PASS 後の第2段でのみ作成する。不採用案: TD 作成をモジュール外へ出す単段構成は module refactor を要し、移行期間中の全環境に影響するため見送る。第2段の方式は同一 root・phase 付き apply を第一候補として #445 着手時に確定する。
 - activation 順序: 公開 CloudFront 経路の POST・未認証 signup・Worker の即時 SQS poll は起動後の遮断では止められないため、migration と final cleanup が完了するまで service / autoscaling / Scheduler / canary を activation せず、到達しない構造で保証する。
-- 手順の正本は #388 の provisioning runbook / workflow 定義であり、dev リハーサルの実測で詳細化する。手動実行による手順迂回は guard 前置（#335 不可逆境界 3・4）が fail closed で補強する。
+- 手順の正本は #445 の provisioning runbook / workflow 定義であり、dev リハーサルの実測で詳細化する。手動実行による手順迂回は guard 前置（#335 不可逆境界 3・4）が fail closed で補強する。
 
 ### 7. 計画詳細と Gate C/D 再編は rolling wave へ委譲する
 
-- #335 本文が確定で持つのは、不可逆境界（policy）・Gate 判定主体・wave 定義・受け入れ条件のみとする。実行手順・IAM 条件・marker の DB 表現・digest 固定方式・staging mutation 排他の具体機構・saga 手順などの可逆な詳細は、それぞれ #388 runbook・各 Issue 着手時・dry-run 付きスクリプト PR へ委譲する。
+- #335 本文が確定で持つのは、不可逆境界（policy）・Gate 判定主体・wave 定義・受け入れ条件のみとする。実行手順・IAM 条件・marker の DB 表現・digest 固定方式・staging mutation 排他の具体機構・saga 手順などの可逆な詳細は、それぞれ #445 runbook・各 Issue 着手時・dry-run 付きスクリプト PR へ委譲する。
 - Gate C / Gate D の定義再編（fresh staging-full session 方式——構築検証 → final cleanup → attest → 最終アーキテクチャへの負荷試験——に合わせた再配置）は、本 ADR では決定しない。旧 Gate C / D はいずれも NOT RUN であり、Phase 4 着手前にこの定義へ従うべき実装が存在しない。一方、いま #335 だけを改称すると、旧語義で Gate を参照する live 子 Issue（#383 / #384 / #390 / #391）と語義が食い違う。再編は Phase 4 着手時に子 Issue の一括整合（saga）とまとめて確定し、本 ADR への追補または後続 ADR として記録する。
 
 ## 根拠
@@ -78,9 +78,25 @@ fresh session の final cleanup に限り、writer mode の legacy → ticket_ty
 - 親 Issue 本文だけでは実行手順を再現できなくなる（意図的。再現性は runbook と script が担う）。
 - Gate C/D の定義再編を先送りするため、再編までの間、#335 の計画（cleanup 後に最終アーキテクチャへ負荷試験）と現行の Gate C/D 定義（public contract 検証に負荷を含む）の間に表記のずれが残る。両 Gate とも Phase 4 まで実行しないため、このずれが判定に使われることはない。
 
+## 追補（2026-08-10）
+
+### 8. provisioning runbook の所有 Issue を #445 として採番する
+
+本 ADR は §2 / §5 / §6 / §7 で fresh 構築の実行順・preflight 細目・evidence 保存手順・二段階 apply の段間方式の所有先を「#388 runbook」と表記していた。しかし #388 は Gate C 負荷検証の rate-limit 変更・復元 workflow であり、provisioning runbook を所有していない。#335 Phase 4 の新規採番（新規(a) = #418 / 新規(b) = #421 / 新規(d1) = #419 / 新規(d2) = #420）では新規(c) にあたる runbook Issue が起票されておらず、所有先が実在しない参照になっていた。#445 を新規(c) として採番し、本文の該当参照を修正する。#388 の実体（rate-limit workflow）は変更していない。あわせて §2 / §7 の「新規(d1)」表記を採番済みの #419 へ置き換えた。
+
+この誤参照は、参照先の実在性を検証する強制点が存在しなかったために ADR merge 時のレビューを通過した。#335 の受け入れ条件が要求する policy → enforcement → evidence の対応付け検証は、対応先 Issue が実在することの確認を含む。
+
+### 9. 子 Issue と Gate を 1 本に射影した実行順序ビューを #335 に置く
+
+#335 は Gate の状態（Gate 表）と子 Issue の依存（子 Issue 表）を別々に持ち、両者を貫く実行順序をどこにも持っていなかった。Gate と子 Issue の前後関係は各子 Issue 本文の散文（「証跡は #335 Gate C が所有する」等）からしか復元できず、親 Issue だけを読んでも実行順が定まらなかった。#335 に「実行順序（子 Issue × Gate）」節を追加し、全子 Issue と全 Gate が過不足なく 1 回ずつ現れる射影として置く。
+
+- 本節は新しい依存を決めない。依存の正本は各子 Issue 本文、Gate 判定の正本は #335 の Gate 表であり、本節はそこからの導出である。正本の三重化を避けるため、導出であることを節冒頭に明記する。
+- 不採用案: (i) 実行順序を ADR に置く——append-only の ADR に可変な順序を置くと現在状態が読めなくなる（§1 と同じ理由）。(ii) Gate 表に子 Issue 列を足す——4 行の Gate 表に 21 件の子 Issue を詰めると、並行可能性と前提の区別を表現できない。(iii) 順序を持たず各子 Issue 本文に委ねる——これが現状であり、Gate C/D の再編方針と子 Issue 側の旧 Gate C 語義の食い違いを検出できなかった。
+- 現行方針（Gate C/D を fresh staging-full session 内で実行）と、子 Issue 本文の旧 Gate C 語義（public contract 検証時点の負荷判定）の食い違いは §7 のとおり Phase 4 着手時の再編と saga で解消する。それまでの間、実行順序の現行方針は #335 の本節を優先する旨を同節の注記に置く。
+
 ## 再検討のトリガー
 
 - dev リハーサル / Gate B の実測が本 ADR の決定と矛盾した場合。
-- 新規(d1) / #384 / #388 の設計で、3 phase の参照正本・final cleanup marker・二段階 apply の段間境界のいずれかが実装不能と判明した場合。
+- #419 / #384 / #445 の設計で、3 phase の参照正本・final cleanup marker・二段階 apply の段間境界のいずれかが実装不能と判明した場合。
 - policy → enforcement → evidence の対応付けが #335 の受け入れ条件どおりに検証できない（強制点・検証テストと policy 項目の対応が取れない）事例が出た場合。
 - prod 環境を実際に作る判断が生じた場合（本 ADR の前提は ephemeral dev/staging のみ）。
