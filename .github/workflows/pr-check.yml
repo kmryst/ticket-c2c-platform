@@ -86,6 +86,12 @@ jobs:
       - name: Validate ECS task container exit code lookup
         run: bash scripts/deployment/ecs-task-container-exit-code.spec.sh
 
+      # Issue #378 の Gate B cutover 実行 script。operation -> command override 変換（6 択）、
+      # exit code 0 / 2 / 3 / 4 / 1 の伝搬、evidence 欠落時の fail、gate 判定式の真理値表を
+      # AWS CLI スタブで検証する（AWS へは接続しない）。
+      - name: Validate Gate B cutover task runner
+        run: bash scripts/deployment/run-cutover-task.spec.sh
+
       - name: Validate populated Ticket Type migration
         run: npm run test:migration:ticket-type-expand
         env:
