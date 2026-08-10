@@ -36,11 +36,57 @@ PostgreSQL も OpenSearch も変更しない。cross-store snapshot は原子的
 **queue drain 後**（source queue backlog と oldest age が 0 に落ち着いた後）に実行し、必要なら
 再実行する。
 
+AWS 環境（dev / staging）では、OpenSearch は VPC 内にあり SigV4 署名が必須なので、operator 端末から
+`node dist/src/search/...` を直接実行できない。**`scripts/deployment/run-cutover-task.sh` の
+projection operation として、既存 API artifact の task definition を command override で流用して
+ECS run-task から実行する**（下記「AWS 環境での実行手段」）。
+
 ```bash
-# 既存 API artifact の command override で実行する（DB / OpenSearch 双方へ接続できる）。
+# ローカル / コンテナ内での素の実行形（AWS 環境では下記 helper を使う）。
 # exit code: 0 = 差分 0、2 = 差分あり、1 = 実行エラー。
 node dist/src/search/inventory-reconciliation.cli.js --page-size 200
 ```
+
+### AWS 環境での実行手段（ECS run-task helper）
+
+`run-cutover-task.sh` は task definition / network configuration / command override / container 名
+一致の exit code 取得 / task 固有ログの取得 / evidence 検証 / JSONL lineage / step summary を
+まとめて行う。cutover workflow の choice には載せない（書き込み primitive の起動面を増やさない）。
+**手順から手動実行する専用経路**である。
+
+| operation | 実行する CLI | exit code |
+| --- | --- | --- |
+| `search-index-migrate` | `search-index:migrate` | 0 = 成功 / 1 = 実行エラー |
+| `projection-rebuild` | `projection:rebuild --page-size 200 --bulk-size 200` | 0 = 成功 / 1 = 実行エラー |
+| `projection-reconcile` | `projection:reconcile --page-size 200` | 0 = 差分 0 / 2 = 差分あり / 1 = 実行エラー |
+
+```bash
+ENV=dev                     # または staging
+CLUSTER="ticket-c2c-${ENV}"
+API_SERVICE="ticket-c2c-${ENV}-api"
+
+# 承認済み API task definition ARN を明示する（`current` に解決させない）。
+TASK_DEFINITION_ARN=$(aws ecs describe-services --cluster "$CLUSTER" \
+  --services "$API_SERVICE" --query 'services[0].taskDefinition' --output text)
+
+AWS_REGION=ap-northeast-1 \
+CUTOVER_EVIDENCE_FILE="$(pwd)/projection-evidence-${ENV}.jsonl" \
+  ./scripts/deployment/run-cutover-task.sh \
+    "$CLUSTER" "$API_SERVICE" "$TASK_DEFINITION_ARN" projection-reconcile
+echo "exit=$?"
+```
+
+script は exit code をそのまま返す（0 / 2 / 1 を潰さない）が、**exit 0 でも operation に対応する
+evidence JSON が揃っていなければ exit 1 で失敗させる**（false-green 禁止）。
+`CUTOVER_EVIDENCE_FILE` に JSON Lines で lineage（`operation` / `exitCode` / `taskArn` /
+`taskDefinition` / `image` / `imageDigest` / `operationStartedAtUtc` / `clientToken` /
+`startedBy` / `executionContext`、ローカル実行では `operator` / `operatorHost`）と CLI 出力が
+追記される。ローカル実行の証跡の保存先は
+[Gate B runbook の「ローカル実行の証跡（provenance）」](./gate-b-ticket-type-cutover.md#ローカル実行の証跡provenance)
+に従う。
+
+`projection-repair` CLI は対象 ID の手打ちと `--apply` の明示が本質なので、この helper の
+operation allowlist には**載せない**（後述の手順どおり command override で個別に実行する）。
 
 出力は machine-readable JSON（`counts` に category 別件数、`findings` に bounded なサンプル、
 `hasDiff`）。secret は含めない。差分 category は missing / unexpected document、Ticket Type /
@@ -103,7 +149,20 @@ version 遅延系の差分である。次の category は rebuild では収束�
   ため自動収束しない。projection-repair CLI（次節）で対応する。
 
 ```bash
+# AWS 環境（dev / staging）: ECS run-task helper 経由で実行する。
 # rebuild 前後に reconciliation を実行して収束を確認する。
+for op in projection-reconcile projection-rebuild projection-reconcile; do
+  AWS_REGION=ap-northeast-1 \
+  CUTOVER_EVIDENCE_FILE="$(pwd)/projection-evidence-${ENV}.jsonl" \
+    ./scripts/deployment/run-cutover-task.sh \
+      "$CLUSTER" "$API_SERVICE" "$TASK_DEFINITION_ARN" "$op"
+  echo "${op} exit=$?"
+done
+# 期待値: before は 0 / 2 のどちらでもよい。rebuild は 0。after は **0（差分 0）**。
+```
+
+```bash
+# ローカル / コンテナ内での素の実行形（参考）。
 node dist/src/search/inventory-reconciliation.cli.js   # before
 node dist/src/search/inventory-rebuild.cli.js --page-size 200 --bulk-size 200
 node dist/src/search/inventory-reconciliation.cli.js   # after（metadata_mismatch を含め差分 0 を確認）
@@ -203,8 +262,39 @@ node dist/src/search/search-index-migrate.cli.js
 # ローカル: npm run search-index:migrate:local
 ```
 
-AWS 環境では既存 API artifact の command override（ECS run-task）から実行できる。deploy
-pipeline（`deploy-backend-<env>.yml` 相当）への自動組み込みは別 Issue で扱う。
+AWS 環境では、`run-cutover-task.sh` の `search-index-migrate` operation で実行する。
+
+```bash
+AWS_REGION=ap-northeast-1 \
+CUTOVER_EVIDENCE_FILE="$(pwd)/projection-evidence-${ENV}.jsonl" \
+  ./scripts/deployment/run-cutover-task.sh \
+    "$CLUSTER" "$API_SERVICE" "$TASK_DEFINITION_ARN" search-index-migrate
+```
+
+deploy pipeline（`deploy-backend-<env>.yml` 相当）への自動組み込みは別 Issue で扱う。
+
+### 「新 Worker 起動前に 1 回」が守れなかった場合に起きること（順序が本質である理由）
+
+`assertEventsIndexExists`（`src/search/events-projection.store.ts`）は **index の存在しか確認せず、
+mapping を適用しない**。したがって index が既に存在していれば、mapping migration を飛ばしても
+新 Worker は正常に起動する。その状態で Worker が `ticket_types` を書くと、OpenSearch の
+dynamic mapping が `ticket_types` を **`object`** として作成する。
+
+OpenSearch は既存 field の型を変更できないため、以後の additive putMapping は
+`illegal_argument_exception`（`mapper [ticket_types] cannot be changed from type [object] to
+[nested]`）で **恒久的に失敗する**。復旧には index の作り直し（再 rebuild）が必要になる。
+
+この非対称性から、次の 2 つが導かれる。
+
+- **適用点は「新 Worker 起動前」だけ**である。Worker が動き始めた後に migrate を実行しても、
+  壊れた mapping は直らない。
+- **`search-index-migrate` の exit 0 は「`ticket_types` が `nested` である」ことの positive
+  確認になる**。`object` に化けていれば putMapping が拒否され exit 1 になるため、
+  「実行して exit 0 だった」ことが型の positive 証拠として使える（`aws opensearch` API は
+  index の mapping を返さないので、この確認には使えない）。
+
+Gate B での呼び出し順序は
+[Gate B Ticket Type cutover runbook](./gate-b-ticket-type-cutover.md) の 4 章が正本。
 
 ## mixed Worker 期間の制約
 
@@ -238,4 +328,9 @@ ADR-0031 の rollback 方針に統一する。
 > rebuild で OpenSearch を再収束させる。OpenSearch から PostgreSQL へ逆同期しない。
 
 - mapping は additive なので rollback 時に field や index を削除しない。
-- 在庫 read/write 全体の activation / rollback は #378 が所有する。fresh session の final cleanup における writer mode 切替の所有は final cleanup transaction へ移管する（[ADR-0033](../adr/0033-ticket-type-migration-irreversible-boundaries.md)）。
+- 在庫 read/write 全体の activation / rollback は #378 が所有する。手順の正本は
+  [Gate B Ticket Type cutover runbook](./gate-b-ticket-type-cutover.md)。呼び出し関係は次のとおり:
+  **mapping migration は Gate B session の前段（compatibility release 手順。4 章冒頭）**で
+  新 Worker 起動前に 1 回実行し、**rebuild / reconciliation は Gate B session の 4 章 step 4**
+  （旧 Worker 0 件・queue drain 後）から呼ばれる。session 中の `search-index-migrate` は
+  mapping の適用ではなく `ticket_types` が `nested` であることの positive 確認として実行する。fresh session の final cleanup における writer mode 切替の所有は final cleanup transaction へ移管する（[ADR-0033](../adr/0033-ticket-type-migration-irreversible-boundaries.md)）。

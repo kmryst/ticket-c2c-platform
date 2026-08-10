@@ -1,0 +1,189 @@
+# Issue #378 / #335 Gate B の dev 専用 cutover workflow（ADR-0032 / ADR-0033）。
+# 現行 API task definition を ECS RunTask で流用し、preflight / activation / rollback /
+# postflight を実行する。手順・停止条件・証跡は docs/runbooks/gate-b-ticket-type-cutover.md が正本。
+#
+# 方向は operation 名に固定し、--target-mode / --expect-mode の手打ち誤指定を構造的に排除する。
+# Valkey counter の seed / reconcile はこの workflow に載せない（書き込み primitive の起動面を
+# 増やさない）。runbook の手順から ECS run-task で実行する。
+#
+# false-green 防止の構造:
+# 1. cutover step は step 自体を失敗させず、run-cutover-task.sh が raw の
+#    container_exit_code と evidence_valid を **別々の output** として GITHUB_OUTPUT へ書く。
+# 2. postflight step は raw exit code が 0 / 3 のときだけ同一 run 内で実行する（exit 3 =
+#    COMMIT 応答喪失だが切替は有効、なので postflight を必ず取る）。ここは raw を使う。
+# 3. gate step は `if: always()` で必ず実行し、次の 3 条件を **すべて** 必須にする。
+#    (a) raw exit code が 0 / 3（空文字 = step の異常終了を含めて失敗）
+#    (b) evidence_valid が true（operation と exit code に一致する evidence が揃った）
+#    (c) postflight の outcome が success
+#    (b) が無いと、exit 3 で CloudWatch Logs の取得が間に合わなかった run が
+#    「exit 3 + postflight success」で green になり、切替結果（commitOutcome /
+#    verifiedMode）も preflight evidence も無いまま Gate B を通過してしまう。
+#    判定式は run-cutover-task.sh の純関数（cutover_gate_ok）に置き、真理値表は
+#    scripts/deployment/run-cutover-task.spec.sh で固定する（workflow へ直書きしない）。
+# なお run の手動 cancel は workflow では防げない。cancel した場合の扱い（exit 1 と同等）は
+# runbook の停止条件に定める。
+#
+# この workflow は Gate B（compatibility 期間）専用であり、ADR-0033 決定 3 により
+# #384（fresh session final cleanup）実装後に ADR-0032 CLI ごと退役する。
+name: ticket-type-cutover-dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "実行する Gate B operation（方向は operation 名で固定する）"
+        required: true
+        type: choice
+        options:
+          - preflight-activation
+          - activate
+          - postflight-activation
+          - preflight-rollback
+          - rollback
+          - postflight-rollback
+      task_definition_arn:
+        # runbook の positive 確認で控えた承認済み API task definition ARN を毎回明示する。
+        # 空欄や `current` を許すと、preflight と switch の間に queue 済みの deploy が挟まった
+        # ときに **別 revision で切り替わる** 経路が残る。required: true にしたうえで、
+        # 実行 step でも空文字と `current` を明示的に拒否する（Codex High-3。UI の必須指定
+        # だけでは、空白のみの入力や API 経由の dispatch を塞げないため二重化する）。
+        description: "runbook 4章 step1 で確認した承認済み API task definition ARN（必須。空欄・current は拒否する）"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  # backend rollout、DB migration、Gate A readiness、Gate B cutoverを同一環境で直列化する。
+  # terraform-apply / terraform-destroy は別 group（terraform-<env>）のため機械排他されない。
+  # 同時起動しないことは runbook の禁止操作チェックリストで担保する（#419 が恒久解の受け皿）。
+  group: backend-database-operation-dev
+
+jobs:
+  cutover:
+    runs-on: ubuntu-latest
+    environment: dev
+    # 未実測の見積り: Gate A readinessの実績15分に、切替のlock / statement timeoutと
+    # 同一run内postflightの分を加えた控えめな値。dev rehearsalの実測で見直す。
+    timeout-minutes: 20
+    env:
+      CLUSTER: ticket-c2c-dev
+      SERVICE: ticket-c2c-dev-api
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (apply role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Run cutover operation
+        id: cutover
+        shell: bash
+        env:
+          TASK_DEFINITION_ARN: ${{ inputs.task_definition_arn }}
+          OPERATION: ${{ inputs.operation }}
+          # evidence JSON と lineage を JSON Lines で追記し、artifact として保存する
+          # （ADR-0033 決定 5 / #335 の証跡要件。#335 への Gate 証跡 comment と remote への
+          # 恒久化は runbook の運用ステップが行う。workflow から Issue へ自動 comment しない）。
+          CUTOVER_EVIDENCE_FILE: ${{ runner.temp }}/cutover-evidence.jsonl
+        run: |
+          set -uo pipefail
+          # 承認済み task definition の固定を機械強制する（Codex High-3）。
+          # fallback は持たない: 空欄も `current` も拒否して job を失敗させる。
+          task_definition="${TASK_DEFINITION_ARN}"
+          if [ -z "${task_definition// /}" ] || [ "$task_definition" = "current" ]; then
+            echo "::error::task_definition_arn must be the approved API task definition ARN (empty or 'current' is rejected)" >&2
+            echo "runbook: docs/runbooks/gate-b-ticket-type-cutover.md 4章 step1 で positive 確認した ARN を指定する" >&2
+            exit 1
+          fi
+          # exit code 0 / 2 / 3 / 4 / 1 はそれぞれ別の運用判断に対応する。step をここで
+          # 失敗させると後続 step へ判断材料を渡せないため、失敗させずに gate step で判定する。
+          # gate が使う raw の container_exit_code / evidence_valid は script が
+          # GITHUB_OUTPUT へ直接書く（script 側の fail-closed な escalation で raw を
+          # 上書きしないため、runner の exit code とは分けている）。
+          set +e
+          ./scripts/deployment/run-cutover-task.sh \
+            "$CLUSTER" "$SERVICE" "$task_definition" "$OPERATION"
+          runner_exit_code=$?
+          set -e
+          echo "cutover operation ${OPERATION} finished with runnerExitCode=${runner_exit_code}"
+
+      - name: Postflight check (same run)
+        id: postflight
+        # exit 0（切替成功）と exit 3（COMMIT 応答喪失だが切替は有効）は、どちらも
+        # 同一 run 内で postflight 証跡を取る。skip / 失敗はどちらも gate step が job を落とす。
+        if: >-
+          (inputs.operation == 'activate' || inputs.operation == 'rollback')
+          && (steps.cutover.outputs.container_exit_code == '0'
+              || steps.cutover.outputs.container_exit_code == '3')
+        shell: bash
+        env:
+          TASK_DEFINITION_ARN: ${{ inputs.task_definition_arn }}
+          OPERATION: ${{ inputs.operation }}
+          # evidence JSON と lineage を JSON Lines で追記し、artifact として保存する
+          # （ADR-0033 決定 5 / #335 の証跡要件。#335 への Gate 証跡 comment と remote への
+          # 恒久化は runbook の運用ステップが行う。workflow から Issue へ自動 comment しない）。
+          CUTOVER_EVIDENCE_FILE: ${{ runner.temp }}/cutover-evidence.jsonl
+        run: |
+          set -euo pipefail
+          # postflight も同じ revision で実行する（cutover step と同じ拒否条件。Codex High-3）。
+          task_definition="${TASK_DEFINITION_ARN}"
+          if [ -z "${task_definition// /}" ] || [ "$task_definition" = "current" ]; then
+            echo "::error::task_definition_arn must be the approved API task definition ARN (empty or 'current' is rejected)" >&2
+            exit 1
+          fi
+          case "$OPERATION" in
+          activate) postflight_operation="postflight-activation" ;;
+          rollback) postflight_operation="postflight-rollback" ;;
+          *)
+            echo "postflight step must not run for operation ${OPERATION}" >&2
+            exit 1
+            ;;
+          esac
+          ./scripts/deployment/run-cutover-task.sh \
+            "$CLUSTER" "$SERVICE" "$task_definition" "$postflight_operation"
+
+      - name: Gate cutover result
+        if: always()
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          CUTOVER_EXIT_CODE: ${{ steps.cutover.outputs.container_exit_code }}
+          CUTOVER_EVIDENCE_VALID: ${{ steps.cutover.outputs.evidence_valid }}
+          POSTFLIGHT_OUTCOME: ${{ steps.postflight.outcome }}
+        run: |
+          set -uo pipefail
+          # 判定式は run-cutover-task.sh の純関数を source して使う
+          # （shell spec で真理値表を固定するため、workflow へ直書きしない）。
+          # shellcheck source=scripts/deployment/run-cutover-task.sh
+          source ./scripts/deployment/run-cutover-task.sh
+          {
+            echo "### Gate B cutover gate"
+            echo
+            echo "- operation: \`${OPERATION}\`"
+            echo "- cutoverExitCode: \`${CUTOVER_EXIT_CODE:-(未取得)}\`"
+            echo "- evidenceValid: \`${CUTOVER_EVIDENCE_VALID:-(未取得)}\`"
+            echo "- postflightOutcome: \`${POSTFLIGHT_OUTCOME:-(未実行)}\`"
+            echo "- $(cutover_exit_code_advice "${CUTOVER_EXIT_CODE}")"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if cutover_gate_ok "$OPERATION" "$CUTOVER_EXIT_CODE" "$CUTOVER_EVIDENCE_VALID" "$POSTFLIGHT_OUTCOME"; then
+            echo "cutover gate passed"
+          else
+            echo "cutover gate failed: operation=${OPERATION} exitCode=${CUTOVER_EXIT_CODE:-(未取得)} evidenceValid=${CUTOVER_EVIDENCE_VALID:-(未取得)} postflight=${POSTFLIGHT_OUTCOME:-(未実行)}" >&2
+            echo "runbook: docs/runbooks/gate-b-ticket-type-cutover.md の停止条件に従う" >&2
+            exit 1
+          fi
+
+      - name: Upload cutover evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cutover-evidence-dev-${{ inputs.operation }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cutover-evidence.jsonl
+          # evidence が 1 件も無い run を green にしない（証跡のない Gate B PASS を禁止する）。
+          if-no-files-found: error
+          retention-days: 30
