@@ -42,11 +42,13 @@ on:
           - rollback
           - postflight-rollback
       task_definition_arn:
-        # Gate B session では空欄にしない。runbook 4章 step1 で positive 確認した
-        # 承認済み API task definition ARN を毎回明示する（空欄=current 解決だと、
-        # preflight と switch の間に queue 済みの deploy が挟まると別 revision で切り替わる）。
-        description: "runbook 4章 step1 で確認した承認済み API task definition ARN。Gate B では空欄にしない（空欄時のみ現行serviceのtask definitionを使う）"
-        required: false
+        # runbook の positive 確認で控えた承認済み API task definition ARN を毎回明示する。
+        # 空欄や `current` を許すと、preflight と switch の間に queue 済みの deploy が挟まった
+        # ときに **別 revision で切り替わる** 経路が残る。required: true にしたうえで、
+        # 実行 step でも空文字と `current` を明示的に拒否する（Codex High-3。UI の必須指定
+        # だけでは、空白のみの入力や API 経由の dispatch を塞げないため二重化する）。
+        description: "runbook 4章 step1 で確認した承認済み API task definition ARN（必須。空欄・current は拒否する）"
+        required: true
         type: string
 
 permissions:
@@ -90,7 +92,14 @@ jobs:
           CUTOVER_EVIDENCE_FILE: ${{ runner.temp }}/cutover-evidence.jsonl
         run: |
           set -uo pipefail
-          task_definition="${TASK_DEFINITION_ARN:-current}"
+          # 承認済み task definition の固定を機械強制する（Codex High-3）。
+          # fallback は持たない: 空欄も `current` も拒否して job を失敗させる。
+          task_definition="${TASK_DEFINITION_ARN}"
+          if [ -z "${task_definition// /}" ] || [ "$task_definition" = "current" ]; then
+            echo "::error::task_definition_arn must be the approved API task definition ARN (empty or 'current' is rejected)" >&2
+            echo "runbook: docs/runbooks/gate-b-ticket-type-cutover.md 4章 step1 で positive 確認した ARN を指定する" >&2
+            exit 1
+          fi
           # exit code 0 / 2 / 3 / 4 / 1 はそれぞれ別の運用判断に対応する。step をここで
           # 失敗させると後続 step へ判断材料を渡せないため、失敗させずに gate step で判定する。
           # gate が使う raw の container_exit_code / evidence_valid は script が
@@ -121,7 +130,12 @@ jobs:
           CUTOVER_EVIDENCE_FILE: ${{ runner.temp }}/cutover-evidence.jsonl
         run: |
           set -euo pipefail
-          task_definition="${TASK_DEFINITION_ARN:-current}"
+          # postflight も同じ revision で実行する（cutover step と同じ拒否条件。Codex High-3）。
+          task_definition="${TASK_DEFINITION_ARN}"
+          if [ -z "${task_definition// /}" ] || [ "$task_definition" = "current" ]; then
+            echo "::error::task_definition_arn must be the approved API task definition ARN (empty or 'current' is rejected)" >&2
+            exit 1
+          fi
           case "$OPERATION" in
           activate) postflight_operation="postflight-activation" ;;
           rollback) postflight_operation="postflight-rollback" ;;
