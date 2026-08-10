@@ -30,7 +30,9 @@ Accepted
 
 したがって本リポジトリの問題は「バージョンが割れていること」ではない。**正本が無いことと、一致を検査する仕組みが無いこと**である。これは 2 つの実害を生んでいた。
 
-1. **手元から state を扱えない。** ローカル WSL の開発ツールを mise へ一本化した結果（2026-08-10）、Terraform は 1.12.1 しか解決されなくなった。state は前方互換がなく、記録された `terraform_version` より古い CLI での操作を拒否するため、1.14.8 の state を手元から `plan` することすらできない。リポジトリがバージョンを宣言していれば起きなかった。
+1. **手元から state を扱えない。** ローカル WSL の開発ツールを mise へ一本化した際（2026-08-10）、apt 版 Terraform 1.14.8 / 手動配置の terraform-docs 0.20.0 / tflint 0.62.0 を削除した。この時点で mise のグローバル既定 `~/.config/mise/config.toml` が宣言していたのは `node = "24.18.0"` のみで、terraform は宣言されていなかった。当時 `.mise.toml` を持つのは terraform-hannibal だけであり（`terraform = "1.12.1"`）、本リポジトリはそのサブディレクトリではないため、mise の設定階層でその宣言を継承することはできない。結果として、本リポジトリのディレクトリでは **Terraform のバージョンがそもそも解決されず**（`mise ERROR No version is set for shim: terraform`）、CLI を起動することすらできなかった。仮に他リポジトリの 1.12.1 を明示指定して使ったとしても、state は前方互換がなく、記録された `terraform_version` より古い CLI での操作を拒否するため、1.14.8 の state を手元から `plan` することはできない。いずれの経路でも手元から state に触れないという結論は同じであり、リポジトリがバージョンを宣言していれば起きなかった。
+
+   > **出典と再現性**: 上記は 2026-08-10 の WSL 実環境での実測（mise 一本化作業時のシェル出力）にもとづく。**現在の環境では再現しない。** その後 `.mise.toml` を追加し（Issue [#459](https://github.com/kmryst/ticket-c2c-platform/issues/459) / PR [#460](https://github.com/kmryst/ticket-c2c-platform/pull/460)）、さらに後日グローバル既定にも `terraform = "1.14.8"` を追加したため、現在は本リポジトリ配下で `mise ls --current` が `terraform 1.14.8` を `.mise.toml` 由来として返す。この記述は 2026-08-10 時点の状態であり、現在の状態ではない。
 2. **一致が偶然に依存している。** 現在 9 箇所が揃っているのは、誰かが 9 箇所を同時に書いたからにすぎない。1 箇所だけ書き換えた PR を人間のレビューが見逃せば、その workflow だけ別バージョンで動く。Terraform の場合、それは「その層をもう更新できない」という回復困難な事故に直結する。
 
 3 リポジトリ（`idp-golden-path` / `terraform-hannibal` / 本リポジトリ）のツールチェーン統一の第 2 段階として、この 2 点を解消する。標準の正本は idp-golden-path ADR-0014 であり、本 ADR はそれを本リポジトリへ適用した際の判断を記録する。
@@ -102,9 +104,17 @@ CI で mise を使えば正本は 1 つになるが、`hashicorp/setup-terraform
 - **`.mise.toml` 以外のツールチェーン宣言方式へ移行した場合**（`.tool-versions` / devcontainer / Nix など）。検査対象のパーサを差し替える必要がある。
 - **tflint / terraform-docs / pre-commit を導入した場合。** 決定 1 の「実際に使うツールだけ宣言する」に従い、導入と同じ PR で `.mise.toml` に追加する。
 
+## 訂正履歴
+
+本 ADR はステータス Accepted のまま、背景節の事実関係のみを事後訂正している。決定・根拠・トレードオフ・再検討のトリガーは変更していない。
+
+| 日付 | 箇所 | 訂正内容 |
+| --- | --- | --- |
+| 2026-08-11 | 背景 実害 1 | 「mise 一本化の結果 Terraform は 1.12.1 しか解決されなくなった」と記載していたが、実際には本リポジトリのディレクトリで Terraform のバージョンが解決されず（`mise ERROR No version is set for shim: terraform`）CLI を起動できない状態だった。1.12.1 は terraform-hannibal の `.mise.toml` の宣言であり、本リポジトリはそのサブディレクトリではないため継承されない。実害（手元から state を操作できない）という結論と、それにもとづく決定は変わらない。誤りの出所は ADR 執筆時に渡された背景説明であり、本 ADR の調査によるものではない。Issue [#463](https://github.com/kmryst/ticket-c2c-platform/issues/463) |
+
 ## 関連
 
-- Issue: [#459](https://github.com/kmryst/ticket-c2c-platform/issues/459)
+- Issue: [#459](https://github.com/kmryst/ticket-c2c-platform/issues/459) / 背景訂正: [#463](https://github.com/kmryst/ticket-c2c-platform/issues/463)
 - [ADR-0003](./0003-terraform-state-and-environment-isolation.md): Terraform の state / 環境分離設計
 - kmryst/idp-golden-path ADR-0014: Terraform ツールチェーンのバージョンを 3 リポジトリで 1.14.8 に統一し、ローカル正本と CI pin の整合性を CI で検査する（本標準の正本）
 - kmryst/idp-golden-path ADR-0008: CI ガードレールを reusable workflows として提供し、タグ固定（`@v1`）で参照する
