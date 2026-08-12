@@ -24,8 +24,8 @@ on:
       - "terraform/**"
       - "Dockerfile"
       - "frontend/Dockerfile"
-      # caller 自身の変更でも実測できるようにしておく
-      - ".github/workflows/trivy-config-scan.yml"
+      # TEMPORARY (Issue #471 検証用): paths filter の negative case を実測するため
+      # caller 自身のパスを一時的に外している。マージ構成には含まれない。
   schedule:
     # 毎週月曜 00:55 UTC / 09:55 JST。
     # security-scan.yml（00:15）/ codeql.yml（00:30）/ dependency-audit.yml（00:45）と時間をずらす。

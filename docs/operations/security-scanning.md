@@ -52,3 +52,5 @@ blocking 化（`exit-code: '1'` / required status check 昇格）は、finding �
 Trivy Image Scan / Trivy Config Scan は required status checks に**昇格させていません**。
 どちらも非 blocking であり、Trivy Config Scan は paths filter 付きで実行されるため、
 required にすると filter に一致しない PR で check run が作成されず、required check が永久に pending になります。
+
+<!-- TEMPORARY: Issue #471 の paths filter negative case 検証用（このブランチはマージしない） -->
