@@ -11,6 +11,10 @@
 
 name: Security Scan
 on:
+  # TEMPORARY(検証専用): 使い捨て PR で image scan を pull_request 契機に実行するための一時トリガー。
+  # 本命 PR #474 のブランチには含めない
+  pull_request:
+    branches: [main]
   workflow_dispatch:
   schedule:
     # 毎週月曜 00:15 UTC / 09:15 JST。
