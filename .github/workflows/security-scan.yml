@@ -67,6 +67,10 @@ jobs:
   #
   # security-events: write は caller 側でも明示が必要。reusable workflow の job が要求する
   # permission は caller の付与範囲を超えられず、超えると job が 1 つも起動せず run 全体が失敗する。
+  # upload-sarif は明示的に true を渡す。callee の input 宣言に default: true が無く、
+  # workflow_call の boolean input は未指定だと false に評価されるため、
+  # 省略すると SARIF アップロード step が skip される（v1.7.0 で実測。idp 側の docs は
+  # 「未指定時は true」と書いているが実際は効かない）。callee 修正後も明示は無害なので残す。
   trivy-image-backend:
     uses: kmryst/idp-golden-path/.github/workflows/trivy-image.yml@v1.7.0
     permissions:
@@ -75,6 +79,7 @@ jobs:
     with:
       image-name: backend
       dockerfile: Dockerfile
+      upload-sarif: true
 
   trivy-image-frontend:
     uses: kmryst/idp-golden-path/.github/workflows/trivy-image.yml@v1.7.0
@@ -85,6 +90,7 @@ jobs:
       image-name: frontend
       docker-context: frontend
       dockerfile: frontend/Dockerfile
+      upload-sarif: true
 
   summary:
     name: Security Scan Summary
