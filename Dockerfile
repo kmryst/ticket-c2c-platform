@@ -23,3 +23,5 @@ COPY database ./database
 EXPOSE 3000
 USER node
 CMD ["node", "dist/src/main.js"]
+
+# TEMPORARY: Issue #471 の paths filter 検証用コメント（このブランチはマージしない）

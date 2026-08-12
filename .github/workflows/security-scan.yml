@@ -11,6 +11,9 @@
 
 name: Security Scan
 on:
+  # TEMPORARY (Issue #471 の検証用。マージ前に削除する)
+  pull_request:
+    branches: [main]
   workflow_dispatch:
   schedule:
     # 毎週月曜 00:15 UTC / 09:15 JST。
