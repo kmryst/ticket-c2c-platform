@@ -1,0 +1,59 @@
+# Trivy Config Scan
+# 目的: IaC（Terraform）と Dockerfile の設定不備（misconfiguration）を review signal として検出する
+# 実体は kmryst/idp-golden-path の reusable workflow（ADR-0008）。
+# このファイルはトリガー・permissions・concurrency のみを持つ薄い caller workflow
+#
+# security-scan.yml と別ファイルにしているのはトリガーが違うため。
+# image スキャン（週次 + 手動）はビルド込みで 1〜2 分かかり、finding はすべてベースイメージ由来で
+# アプリコードの変更では動かない。一方 config スキャンは 4.5 秒と安価で、
+# terraform/** や Dockerfile を触った PR に即座にフィードバックする価値がある。
+#
+# 【非 blocking】exit-code は既定の '0' のまま。finding（ローカル実測で HIGH,CRITICAL 41 件）が
+# 未棚卸しで accepted risk 候補（ALB の公開、ECR タグ可変性など）を含むため。
+# blocking 化（exit-code: '1' / required status check 昇格）は棚卸し後に別 Issue で判断する。
+# callee は SARIF を送らず、可視化は Step Summary + artifact で行う。
+#
+# スキャンの責務分担は docs/operations/security-scanning.md を参照。
+
+name: Trivy Config Scan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "Dockerfile"
+      - "frontend/Dockerfile"
+      # caller 自身の変更でも実測できるようにしておく
+      - ".github/workflows/trivy-config-scan.yml"
+  schedule:
+    # 毎週月曜 00:55 UTC / 09:55 JST。
+    # security-scan.yml（00:15）/ codeql.yml（00:30）/ dependency-audit.yml（00:45）と時間をずらす。
+    # PR 経由で入らない変更（Trivy のルール追加など）を定期的に拾う。
+    - cron: "55 0 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # callee（idp-golden-path の trivy-config.yml）自身が
+  # trivy-config-<PR番号|run_id> という group を持つため、caller 側と同一名にすると
+  # 「top level workflow と呼び出し先の間でデッドロック」と判定され run がキャンセルされる
+  # （ADR-0008 追記 2026-07-13 / idp-golden-path#106）。caller 側は -caller を付ける。
+  group: trivy-config-caller-${{ github.event.pull_request.number || github.run_id }}
+  # 実行中 run のキャンセルは CANCELLED check run を commit に残し、
+  # required status checks の判定に混入し得るため cancel しない
+  cancel-in-progress: false
+
+jobs:
+  # caller job には name を付けない。job id にフォールバックさせることで
+  # callee 側 job 名（Trivy Config Scan）との文字列重複を避ける（ADR-0008 / idp-golden-path#106）。
+  trivy-config:
+    uses: kmryst/idp-golden-path/.github/workflows/trivy-config.yml@v1.7.1
+    permissions:
+      contents: read
+    with:
+      # skip-dirs は指定しない。走査対象になるのは Dockerfile / frontend/Dockerfile /
+      # terraform/** / catalog-info.yaml のみで、除外したい生成物・ベンダリングコードが無いため。
+      scan-ref: "."
