@@ -19,6 +19,10 @@
 
 name: Security Scan
 on:
+  # TEMPORARY (Issue #476 検証専用): 使い捨て PR で本 workflow を PR ref 上で走らせるための
+  # 一時トリガー。この branch / PR はマージせず close する。
+  pull_request:
+    branches: [main]
   workflow_dispatch:
   schedule:
     # 毎週月曜 00:15 UTC / 09:15 JST。
