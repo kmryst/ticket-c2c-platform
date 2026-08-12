@@ -50,7 +50,7 @@ jobs:
   # caller job には name を付けない。job id にフォールバックさせることで
   # callee 側 job 名（Trivy Config Scan）との文字列重複を避ける（ADR-0008 / idp-golden-path#106）。
   trivy-config:
-    uses: kmryst/idp-golden-path/.github/workflows/trivy-config.yml@v1.7.0
+    uses: kmryst/idp-golden-path/.github/workflows/trivy-config.yml@v1.7.1
     permissions:
       contents: read
     with:
