@@ -34,7 +34,7 @@ jobs:
   # caller job には name を付けない。job id にフォールバックさせて
   # callee 側 job 名との文字列重複を避ける（idp-golden-path#106）
   dependency-unblock-check:
-    uses: kmryst/idp-golden-path/.github/workflows/dependency-unblock-check.yml@v1.5.0
+    uses: kmryst/idp-golden-path/.github/workflows/dependency-unblock-check.yml@v1.7.1
     permissions:
       contents: read
       issues: write
