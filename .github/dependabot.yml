@@ -72,8 +72,8 @@ updates:
         update-types: ["version-update:semver-major"]
       # fastify は @nestjs/platform-fastify が exact pin しているため単独更新しない（全 update-types）。
       # 実測: @nestjs/platform-fastify の dependencies.fastify は範囲ではなく固定値
-      #   （11.1.28 → "5.10.0"、11.1.29 → "5.11.0"。2026-08-10 npm view）。
-      #   root の package.json は "fastify": "^5.9.0"、fastify の npm latest は 5.11.3 で pin は常に最新より遅れる。
+      #   （11.1.28 → "5.10.0"、11.1.29 → "5.11.0"。2026-08-10 npm view。12.1.2 → "5.12.5"。2026-10-06 npm view）。
+      #   root の package.json は pin と同じ版を下限にする（12.1.2 移行時に "^5.12.5"。Issue #528）。
       #   本リポジトリの dist/ に require('fastify') は 0 件で、root の fastify は型定義としてしか使われていない。
       # 影響: Dependabot PR #454（5.10.0→5.11.2）。単独更新は実行時に効果がなく、
       #   node_modules/@nestjs/platform-fastify/node_modules/fastify の重複を増やすだけ。

@@ -107,3 +107,4 @@ YYYY-MM-DD
 | [0034](./0034-toolchain-version-standardization-with-mise.md) | ローカルツールチェーンの正本を `.mise.toml` に置き、CI pin との一致を CI で機械検査する | Accepted |
 | [0035](./0035-consolidate-dependency-cve-scanning.md) | 依存 CVE スキャンを npm audit に一本化し、Trivy は image / config へ振り替える | Accepted |
 | [0036](./0036-expiring-npm-audit-exception-for-braces.md) | braces の advisory を Dependency Audit の期限付き例外にする | Accepted |
+| [0037](./0037-keep-backend-commonjs-and-load-esm-nestjs-via-require-esm.md) | NestJS 12 系への移行で backend を CommonJS のまま維持し、ES Module の `@nestjs/*` を `require(esm)` で読み込む | Accepted |
