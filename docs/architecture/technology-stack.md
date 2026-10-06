@@ -42,7 +42,7 @@
 | --- | --- |
 | フロントエンド | Next.js（App Router / SSR）/ React / TypeScript / Tailwind CSS（[ADR-0011](../adr/0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md)） |
 | API 入口 | CloudFront + WAF → ALB。ALB を API / Frontend origin として使用（[ADR-0005](../adr/0005-alb-as-api-entry.md) / [ADR-0011](../adr/0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md)） |
-| バックエンド | NestJS / TypeScript |
+| バックエンド | NestJS 12（Fastify アダプター）/ TypeScript。アプリは CommonJS のまま、ES Module の `@nestjs/*` を Node.js の `require(esm)` で読み込む。Jest は npm script 経由（`--experimental-vm-modules`）で実行する（[ADR-0037](../adr/0037-keep-backend-commonjs-and-load-esm-nestjs-via-require-esm.md)） |
 | API 形式 | REST（実装済み）。OpenAPI 定義は未実装 |
 | 実行環境 | ECS Fargate |
 | 正本 DB | Aurora PostgreSQL |
