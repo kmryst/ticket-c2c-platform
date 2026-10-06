@@ -129,7 +129,7 @@ updates:
           - "@types/react"
           - "@types/react-dom"
       # eslint-config-next は next の major に追随する必要がある
-      # （現行: next 16.3.0 / eslint-config-next 16.2.12）。
+      # （現行: next 16.3.8 / eslint-config-next 16.3.8）。
       # eslint-config-next は devDependency のため、npm-dev より前に置かないと
       # そちらへ吸われて next 本体と別 PR に分かれる。
       next:
