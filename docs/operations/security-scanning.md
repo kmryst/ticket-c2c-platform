@@ -11,7 +11,7 @@
 | workflow | 検出対象 | 実行タイミング | 検出時の扱い |
 | --- | --- | --- | --- |
 | [Gitleaks Secret Scan](../../.github/workflows/gitleaks-secret-scan.yml) | git 履歴への secret / credential 混入 | PR | fail（required status check） |
-| [Dependency Audit](../../.github/workflows/dependency-audit.yml) | npm 依存（root / `frontend/`）の既知脆弱性（CVE） | PR / 週次 / 手動 | high 以上で fail |
+| [Dependency Audit](../../.github/workflows/dependency-audit.yml) | npm 依存（root / `frontend/`）の既知脆弱性（CVE） | PR / 週次 / 手動 | high 以上で fail（[期限付き例外](#dependency-audit-の期限付き例外)を除く） |
 | [CodeQL](../../.github/workflows/codeql.yml) | 自分が書いたコードの脆弱なパターン（SAST） | PR / main push / 週次 | Security > Code scanning alerts に集約 |
 | [Security Scan / trivy-image-backend, trivy-image-frontend](../../.github/workflows/security-scan.yml) | コンテナイメージの中身（`node:24-slim` の OS パッケージ、Node 公式イメージ同梱の npm 自身の依存） | 週次 / 手動 | 非 blocking。Security > Code scanning alerts と Step Summary |
 | [Trivy Config Scan](../../.github/workflows/trivy-config-scan.yml) | IaC（`terraform/**`）と Dockerfile の設定不備（misconfiguration） | PR（paths filter 付き）/ 週次 / 手動 | 非 blocking。Step Summary + artifact |
@@ -38,6 +38,43 @@ Trivy Image Scan は `fs` の代替ではありません。実行イメージは
 （backend は `Dockerfile` の `npm prune --omit=dev`、frontend は Next.js standalone output）。
 devDependencies を含む全依存区分を見ているのは
 `npm audit`（`--include=prod --include=dev --include=optional --include=peer`）です。
+
+## Dependency Audit の期限付き例外
+
+修正版のない advisory は、reusable workflow の `npm-audit-exceptions` input で期限付き例外にできます
+（idp-golden-path ADR-0008 追記 2026-07-28 / [ADR-0036](../adr/0036-expiring-npm-audit-exception-for-braces.md)）。
+宣言場所は [dependency-audit.yml](../../.github/workflows/dependency-audit.yml) の各 job の `with:` です。
+
+- 各要素は `id`（GHSA ID）・`expires`（UTC の `YYYY-MM-DD`、登録日から最大 90 日）・`tracking`（追跡 Issue の URL）の 3 つだけを持つ
+- 例外は full audit にだけ適用される。本番依存（`--omit=dev`）の audit は例外なしで先に判定され、そこで high 以上があれば例外を適用する前に fail closed になる
+- critical は例外にできない。期限切れ・書式不正も fail closed になる
+- 判定結果は job の Step Summary（`Dependency Audit exception gate (npm)`）に表で出る。例外の GHSA が検出されなくなると `not detected (remove the stale exception)` と表示される
+
+### 現在の例外
+
+| GHSA | package | job | 依存経路 | expires | tracking |
+| --- | --- | --- | --- | --- | --- |
+| [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | `braces@3.0.3`（修正版なし） | root | devDependency の `markdownlint-cli2` → `micromatch` → `braces` | 2026-12-31 | [#522](https://github.com/kmryst/ticket-c2c-platform/issues/522) |
+| [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | `braces@3.0.3`（修正版なし） | frontend | devDependency の `eslint-config-next` → `@next/eslint-plugin-next` → `fast-glob` → `micromatch` → `braces` | 2026-12-31 | [#522](https://github.com/kmryst/ticket-c2c-platform/issues/522) |
+
+root は本番依存に別の high が残っている間、本番依存の判定で fail closed になるため、braces の例外は適用されません。
+
+### 解除手順
+
+上流で修正版が出た（braces 3.0.4 以上の公開、または依存経路から braces がなくなった）ら、次を 1 つの PR で行います。
+
+1. 依存を更新し、`npm audit --include=dev` で該当 GHSA が出ないことを確認する
+2. `dependency-audit.yml` から該当要素を削除する（要素が空になったら `npm-audit-exceptions` ごと削除する）
+3. 上の「現在の例外」表から該当行を削除し、追跡 Issue を close する
+
+Step Summary に stale 警告が出た場合も同じ手順で削除します。撤去 PR は自動では作られません。
+
+### 期限の更新手順
+
+`expires` までに解除できない場合は、期限が切れる前に次を行います。
+
+1. 追跡 Issue に、現在の依存経路・上流の修正状況・継続理由（実行イメージに含まれないこと、外部入力の経路がないこと）を記録する
+2. `expires` を更新日から最大 90 日の日付にする PR を出し、上の表の `expires` も同じ PR で更新する
 
 ## Trivy Image Scan / Trivy Config Scan を PR ごとに実行しない理由
 
