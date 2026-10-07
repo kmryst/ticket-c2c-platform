@@ -392,6 +392,7 @@ describeWithPostgres(
           expect(firstRun.map((migration) => migration.name)).toEqual([
             'AddTicketTypeExpandSchema1785128190273',
             'AddTicketTypeCompatibilityWriter1785542400000',
+            'AddRefreshTokensLineageIndexes1791365426295',
           ]);
 
           const history = await initializedDataSource.query<
@@ -411,6 +412,7 @@ describeWithPostgres(
             'AddEventsCreatedBy1783342791808',
             'AddTicketTypeExpandSchema1785128190273',
             'AddTicketTypeCompatibilityWriter1785542400000',
+            'AddRefreshTokensLineageIndexes1791365426295',
           ]);
 
           const secondRun = await initializedDataSource.runMigrations({

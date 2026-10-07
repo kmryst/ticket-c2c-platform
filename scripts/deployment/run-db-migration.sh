@@ -12,6 +12,9 @@
 #   - search-index-migration: OpenSearch events index を作成する、または既存 index へ mapping を
 #     additive に適用する（search-index-migrate CLI。冪等。ADR-0039）。
 #   - ticket-type-readiness: Ticket Type expand readiness を読み取り専用で検査する。
+#   - refresh-token-cleanup: refresh_tokens の期限切れ cleanup を手動で 1 回実行する（Issue #542 / ADR-0041）。
+#     日次の実行は api 内の定期実行が行う。api と同じ advisory lock を取るため、重なっても削除は 1 か所だけ。
+#     task-definition-arn を省略して、稼働中の api と同じ task definition で実行する。
 #   deploy-backend workflow は「新イメージのタスク定義を register した直後・サービス更新前」に
 #   新タスク定義 ARN を渡して呼ぶ（migration 成功後にデプロイする運用）。
 #   順序は migration（run_migrations=true の時のみ）→ search-index-migration（毎回）→ サービス更新。
@@ -25,7 +28,7 @@ source "${script_dir}/ticket-type-readiness-evidence.sh"
 # shellcheck source=scripts/deployment/ecs-task-container-exit-code.sh
 source "${script_dir}/ecs-task-container-exit-code.sh"
 
-usage="usage: run-db-migration.sh <cluster> <api-service> [task-definition-arn] [migration|search-index-migration|ticket-type-readiness]"
+usage="usage: run-db-migration.sh <cluster> <api-service> [task-definition-arn] [migration|search-index-migration|ticket-type-readiness|refresh-token-cleanup]"
 if (( $# > 4 )); then
 	echo "$usage" >&2
 	exit 2
@@ -54,6 +57,11 @@ ticket-type-readiness)
 	command_path="dist/src/database/check-ticket-type-expand-readiness.js"
 	started_by="ticket-type-readiness"
 	operation_label="Ticket Type expand readiness"
+	;;
+refresh-token-cleanup)
+	command_path="dist/src/database/cleanup-refresh-tokens.js"
+	started_by="refresh-token-cleanup"
+	operation_label="Refresh token cleanup"
 	;;
 *)
 	echo "unsupported mode: $mode" >&2

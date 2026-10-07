@@ -170,6 +170,9 @@ resource "aws_iam_policy" "apply_infra" {
           "rds:List*",
           "route53:Get*",
           "route53:List*",
+          # EventBridge Scheduler（Issue #195）。Issue #542 / ADR-0041 で refresh token cleanup の Scheduler を
+          # 撤去したが、撤去前に作った環境の state に残る schedule を apply / destroy で読む・消すために残す。
+          # 全環境の state から消えたことを確認してから、bootstrap の変更として外す。
           "scheduler:Describe*",
           "scheduler:Get*",
           "scheduler:List*",
@@ -310,6 +313,7 @@ resource "aws_iam_policy" "apply_infra" {
           "logs:Put*",
           "logs:Tag*",
           "logs:Untag*",
+          # 撤去前に作った環境の schedule を apply / destroy で消すために残す（上の scheduler:Describe* と同じ理由）。
           "scheduler:CreateSchedule",
           "scheduler:DeleteSchedule",
           "scheduler:TagResource",
@@ -347,7 +351,8 @@ resource "aws_iam_policy" "apply_infra" {
           "arn:aws:events:${local.region}:${local.account_id}:rule/${var.managed_resource_name_prefix}*",
           "arn:aws:logs:${local.region}:${local.account_id}:log-group:/ecs/${var.managed_resource_name_prefix}*",
           # EventBridge Scheduler のスケジュール（L-9 残課題 / Issue #195）。schedule group 未指定時は
-          # "default" group に作られる（terraform/modules/scheduled-task）。
+          # "default" group に作られる（旧 terraform/modules/scheduled-task。Issue #542 で撤去。
+          # 撤去前に作った環境の schedule を消すために残す）。
           "arn:aws:scheduler:${local.region}:${local.account_id}:schedule/default/${var.managed_resource_name_prefix}*",
           # SNS アラート通知トピック（L-5 / Issue #200）。subscription ARN は
           # <topic ARN>:<uuid> 形式のため、同じプレフィックスパターンで Unsubscribe も覆える。
@@ -708,8 +713,10 @@ resource "aws_iam_policy" "apply_state_iam" {
       },
       {
         # aws_scheduler_schedule 作成時、EventBridge Scheduler が引き受ける実行ロール
-        # （terraform/modules/scheduled-task の aws_iam_role.scheduler）の受け渡し
+        # （旧 terraform/modules/scheduled-task の aws_iam_role.scheduler）の受け渡し
         # （L-9 残課題 / Issue #195）。呼び出し元（Terraform apply role）に PassRole が必要。
+        # Issue #542 / ADR-0041 で scheduled-task モジュールを撤去したため、新しい schedule は作られない。
+        # scheduler:* と同じく、全環境の state から消えたことを確認してから bootstrap の変更として外す。
         Sid      = "PassRolesToScheduler"
         Effect   = "Allow"
         Action   = "iam:PassRole"

@@ -378,6 +378,7 @@ AWS 側で残存確認する大きめ課金リソース:
 - OpenSearch domain
 - ECS service / cluster
 - Interface VPC Endpoint
+- EventBridge Scheduler schedule（Issue #195 の refresh token cleanup 用。Issue #542 / [ADR-0041](../adr/0041-run-refresh-token-cleanup-in-api-with-advisory-lock.md) で Terraform から撤去したが、撤去前に作った環境の state から消し漏れが無いことを確認するため、`check-residual-resources.sh` の確認対象に残す）
 
 prefix:
 
