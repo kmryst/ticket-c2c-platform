@@ -90,7 +90,7 @@ Aurora と Valkey の断時間の非対称性（84.2秒 vs 18.2秒）は、ア�
 
 staging normal の初回 apply 前に使用したチェックリスト。現在は全項目完了済みで、現行運用手順は [staging 環境設計](./staging-environment.md) を参照する。
 
-- [x] GitHub Environment `staging` / `staging-destroy` に required reviewer と branch restriction を設定する。Environment は先に手動作成して保護設定を入れてから workflow で参照する。対応済み（2026-07-03、Issue #65、PR #66。`staging` / `staging-destroy` は required reviewer あり、`dev` / `dev-destroy` / `staging` / `staging-destroy` の全 4 環境は custom branch policy で `main` 固定）。
+- [x] GitHub Environment `staging` / `staging-destroy` に required reviewer と branch restriction を設定する。Environment は先に手動作成して保護設定を入れてから workflow で参照する。対応済み（2026-07-03、Issue #65、PR #66。`staging` / `staging-destroy` は required reviewer あり、`dev` / `dev-destroy` / `staging` / `staging-destroy` の全 4 環境は custom branch policy で `main` 固定）。2026-10-07 追記: `staging` / `staging-destroy`（と `dev-destroy`）の required reviewer は外した（[ADR-0038](../adr/0038-remove-environment-required-reviewers-except-bootstrap.md)）。現行値は [staging 環境設計](./staging-environment.md)「Environment protection」を参照する。
 - [x] bootstrap の `apply_environments` に `staging` / `staging-destroy` を追加し、bootstrap を再 apply する。対応済み（Issue #89、PR #97 で `bootstrap` / `staging` / `staging-destroy` を trust へ追加し、staging state 読み取り専用ロールも作成。2026-07-04 に bootstrap を再 apply 済み。`terraform-apply-staging.yml` が Environment `staging` の OIDC trust 経由で成功した実績あり（Issue #91 の検証サイクル））。
 - [x] apply IAM ロールを `AdministratorAccess` から縮小する。対応済み（Issue #125、PR #126 / #127。カスタム最小権限ポリシー 2 本へ置換し、dev apply / deploy / destroy と staging plan を検証）。
 - [x] staging 用 Terraform backend key を dev / prod と分離する。対応済み（Issue #78。`terraform/environments/staging/` を `staging/app/terraform.tfstate` で追加）。

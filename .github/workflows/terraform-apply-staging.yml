@@ -1,6 +1,7 @@
 # staging 専用の terraform apply workflow（staging-environment.md「GitHub Actions」）。
 # 環境選択入力は持たず、staging 固有の capacity_profile のみ受け取る。
-# full への追加 confirm は置かない。承認は GitHub Environment `staging` の protection で行う。
+# full への追加 confirm は置かない。staging は使い捨てで、誤って full で立てても destroy すれば済むため。
+# GitHub Environment `staging` は branch restriction（main のみ）で、required reviewer は置かない（ADR-0038）。
 name: terraform-apply-staging
 
 on:

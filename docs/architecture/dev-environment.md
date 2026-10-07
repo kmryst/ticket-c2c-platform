@@ -108,7 +108,7 @@ terraform/
 | --- | --- | --- |
 | `terraform-plan.yml` | PR（`terraform/**`） | fmt / validate / plan。plan 専用ロール |
 | `terraform-apply-dev.yml` | workflow_dispatch | plan → Environment `dev` の branch restriction を通して apply |
-| `terraform-destroy-dev.yml` | workflow_dispatch | `confirm` 入力（`destroy-dev` 完全一致）+ Environment `dev-destroy` の承認 |
+| `terraform-destroy-dev.yml` | workflow_dispatch | `confirm` 入力（`destroy-dev` 完全一致）+ Environment `dev-destroy` の branch restriction（`main` のみ） |
 | `deploy-backend-dev.yml` | workflow_dispatch | backend（api + worker）の Docker build → ECR push → ECS サービス更新。`run_migrations` 入力あり（L-11 / Issue #182 で `deploy-app-dev.yml` から分離） |
 | `deploy-frontend-dev.yml` | workflow_dispatch | frontend（Next.js SSR）の Docker build → ECR push → ECS サービス更新 |
 | `dev-smoke-test.yml` | workflow_dispatch | dev の配線を機械的に検証する smoke / integration test（staging-smoke-test.yml を踏襲。Issue #192）。apply ロールを流用せず、dev state file の S3 read-only に限定した専用ロール（Environment `dev-readonly`）で `terraform output` を取得し、以降の HTTP 検証（`scripts/staging/smoke-test.ts`、`npm run smoke:dev`）は AWS credential を使わない。dev の test data は destroy まで残存する。**セットアップ・実地検証済み**（2026-07-08、Issue #192）: bootstrap apply で `dev_state_readonly_role_arn`（`ticket-c2c-platform-gha-dev-state-readonly`）を作成し、GitHub Environment `dev-readonly`（`staging-readonly` と同じ branch policy = `main` 限定）と repo Variable `AWS_DEV_READONLY_ROLE_ARN` を設定。`terraform-apply-dev` → `deploy-backend-dev`（`run_migrations=true`）→ `dev-smoke-test.yml` の順に実行し、`dev-smoke-test.yml` が AWS credential なしの HTTP 検証込みで成功することを確認。検証後 dev は destroy 済み |
@@ -120,7 +120,7 @@ GitHub Environments / Variables:
 | 種別 | 名前 | 用途 |
 | --- | --- | --- |
 | Environment | `dev` | apply / deploy。`main` branch restriction を設定し、required reviewer は設定しない |
-| Environment | `dev-destroy` | destroy 専用。required reviewer 必須 |
+| Environment | `dev-destroy` | destroy 専用。`main` branch restriction を設定し、required reviewer は設定しない（[ADR-0038](../adr/0038-remove-environment-required-reviewers-except-bootstrap.md)） |
 | Environment | `dev-readonly` | smoke test 専用（Issue #192）。dev state file の S3 read-only ロールのみ引き受け、apply / destroy 権限は持たない。権限が最小のため required reviewer は必須にしない（staging-readonly と同じ方針） |
 | Variable | `AWS_REGION` | `ap-northeast-1` |
 | Variable | `AWS_PLAN_ROLE_ARN` | plan 用読み取りロール |
@@ -129,7 +129,7 @@ GitHub Environments / Variables:
 
 ## destroy の安全策
 
-- workflow_dispatch のみ + `confirm` 入力の完全一致 + protected Environment の三重ゲート。
+- workflow_dispatch のみ + `confirm` 入力の完全一致 + Environment `dev-destroy` の branch restriction（`main` のみ）の三重ゲート。required reviewer は置かない。dev は通常 destroy 済みでデータは使い捨てのため、消されても作り直せば済む（[ADR-0038](../adr/0038-remove-environment-required-reviewers-except-bootstrap.md)）。
 - CloudFront distribution の削除は無効化 + 削除で 15〜20 分以上かかるため、destroy workflow の所要時間はフロントエンド導入後に伸びている（正常挙動）。
 - Aurora は dev では `deletion_protection = false` / `skip_final_snapshot = true`（変数化し、staging / prod では必ず有効化する）。
 - state バケットは bootstrap state 管理 + `prevent_destroy` で destroy 対象外。

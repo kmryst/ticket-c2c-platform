@@ -131,7 +131,7 @@ ADR-0013（ALB 直叩き遮断）: `https-dns` では ALB セキュリティグ�
 Issue #232 で `alb-http-only` 時の ALB ingress `0.0.0.0/0` 全開放を廃止したため、`alb-http-only` の staging へ外部からアクセスするには `alb_allowed_ingress_cidrs` へ明示的に CIDR を渡す必要がある。CI workflow（`terraform-apply-staging.yml`）には CIDR 入力を追加しない。理由:
 
 - `alb_allowed_ingress_cidrs` の設計意図は一時的なデバッグ用 escape hatch であり（ADR-0007 / ADR-0013）、恒常的な CI 入力に昇格させると「既定で閉」という設計を崩す。
-- staging の Environment protection は 1 人運用のセルフ承認のみで、CI 経由にしても実質的な追加の安全性はない。
+- staging の Environment protection は branch restriction（`main` のみ）だけで required reviewer を置かないため（[ADR-0038](../adr/0038-remove-environment-required-reviewers-except-bootstrap.md)）、CI 経由にしても実質的な追加の安全性はない。
 - 通常運用（https-dns + CloudFront prefix list 限定）の workflow を汚さない。
 
 手順（ローカルで AWS 認証済み・`terraform init` 済みであることが前提。S3 backend は CI と共有のため、`terraform-staging` concurrency group の CI が動いていないことを確認してから実行する）。
@@ -254,23 +254,25 @@ dev と staging は workflow を分ける。dev workflow に `normal` / `full` �
 
 `staging-ephemeral-verify.yml` は初期には作らない。apply / deploy / smoke / destroy を個別 workflow として実行し、どこで失敗したかを追いやすくする。
 
-`capacity_profile=full` に追加の confirm 入力は置かない。staging apply は GitHub Environment protection の reviewer / branch restriction で止め、入力 UI は `normal` / `full` の選択に集中させる。
+`capacity_profile=full` に追加の confirm 入力は置かない。staging は使い捨てで、誤って `full` で立てても destroy すれば済むため、入力 UI は `normal` / `full` の選択に集中させる。staging apply を実行できるのは GitHub Environment `staging` の branch restriction により `main` からだけである。
 
 ### Environment protection
 
-GitHub Environment は、workflow が環境別 IAM role を引き受ける境界として使う。2026-07-19 に GitHub 上の設定を確認した現行値は次のとおり。
+GitHub Environment は、workflow が環境別 IAM role を引き受ける境界として使う。2026-10-07 に GitHub 上の設定を確認した現行値は次のとおり。
 
 | Environment | 用途 | `main` branch restriction | required reviewer |
 | --- | --- | ---: | ---: |
 | `bootstrap` | bootstrap apply | あり | あり |
 | `dev` | dev apply / deploy | あり | なし |
-| `dev-destroy` | dev destroy | あり | あり |
+| `dev-destroy` | dev destroy | あり | なし |
 | `dev-readonly` | dev smoke test | あり | なし |
-| `staging` | staging apply / deploy | あり | あり |
-| `staging-destroy` | staging destroy | あり | あり |
+| `staging` | staging apply / deploy | あり | なし |
+| `staging-destroy` | staging destroy | あり | なし |
 | `staging-readonly` | staging smoke test | あり | なし |
 
-read-only Environment は state file の S3 読み取り専用ロールだけを引き受け、apply / destroy 権限を持たないため required reviewer を必須にしない。`environment:` で参照する前に Environment を手動作成する。未作成のまま参照すると保護なし Environment が自動作成されるため、branch restriction と必要な reviewer の設定を先に完了させる。
+required reviewer は `bootstrap` だけに置く。dev / staging は通常 destroy 済みでデータは使い捨てのため、apply / deploy / destroy されても作り直せば済む。`bootstrap` は apply ロールの IAM ポリシーと OIDC trust 自体を変更するため承認を残す（[ADR-0038](../adr/0038-remove-environment-required-reviewers-except-bootstrap.md)、2026-10-07）。`main` 以外からは実行できないため、workflow を改変して apply / destroy するには PR と required status check を通して `main` へマージする必要がある。
+
+`environment:` で参照する前に Environment を手動作成する。未作成のまま参照すると保護なし Environment が自動作成されるため、branch restriction（`bootstrap` は required reviewer も）の設定を先に完了させる。
 
 bootstrap の IAM OIDC trust には、上記 Environment を引き受けられる `sub` を追加する。staging workflow だけ作っても、bootstrap trust が未対応なら AWS credential 取得で失敗する。
 
