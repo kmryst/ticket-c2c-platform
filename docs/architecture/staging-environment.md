@@ -257,7 +257,7 @@ task definition の設定（環境変数・secrets・CPU / メモリ・role・si
 - output が state に無い、service のキーが無い、ARN が revision 番号を含まない、その revision のイメージが `pending-deploy` でない（terraform が登録した revision でない）場合は、イメージの push・register・migration・update-service の前に失敗する。この output を足す前の state しかない環境では、先に `terraform-apply-<env>.yml` を実行する。
 - terraform で設定を変えたら、`terraform-apply-<env>.yml` → `deploy-backend-<env>.yml` / `deploy-frontend-<env>.yml` の順に実行して反映する。apply だけではサービスは変わらない（`ignore_changes = [task_definition]`）。
 - rollback（`image_tag` に過去の short SHA）は「過去のイメージ ＋ 現在の terraform の設定」になる。設定まで戻す手順と、AWS で反映を確認する手順は [runbook](../runbooks/apply-task-definition-config-change.md) にまとめた。
-- apply / destroy と deploy、DB 操作系の workflow は、環境ごとに 1 つの concurrency group（`mutation-<env>`、`queue: max`）で直列化する。
+- apply / destroy と deploy、DB 操作系の workflow は、環境ごとに 1 つの concurrency group（`mutation-<env>`、`queue: max`）で同時実行を防ぐ。実行順は保証されないので、設定を変えたら apply の run が success で完了してから deploy を起動する。
 
 ### terraform apply 直後の初期 deployment（Issue #543）
 

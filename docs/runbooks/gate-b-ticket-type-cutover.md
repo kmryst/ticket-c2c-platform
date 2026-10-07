@@ -524,7 +524,7 @@ session 開始前に確認し、session 中は次を実行しない。
 
 - [ ] 同一環境の `terraform-apply-<env>` / `terraform-destroy-<env>` を起動しない。
       cutover と同じ concurrency group（`mutation-<env>`。Issue #544 / ADR-0042）のため同時には実行されないが、
-      起動順に実行されるだけで、session の step の間（preflight と activation の間など）に割り込み得る
+      `queue: max` でも実行順は保証されず、session の step の間（preflight と activation の間など）に割り込み得る
       （fresh session の guard の受け皿は #419）。
 - [ ] `db-migrate-<env>` を起動しない。
 - [ ] `deploy-backend-<env>` / `deploy-frontend-<env>`（`run_migrations=true` を含む）を起動しない。同一 concurrency group

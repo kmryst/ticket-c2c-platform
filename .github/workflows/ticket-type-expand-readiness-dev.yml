@@ -19,8 +19,9 @@ concurrency:
   # dev を変更する workflow（terraform apply / destroy、backend / frontend deploy、DB migration、
   # Ticket Type readiness / cutover）を 1 つの group で直列化する（Issue #544 / ADR-0042）。
   # deploy は terraform が最後の apply で登録した task definition を state から読むため、apply と並行させない。
-  # 既定（queue: single）は待機中の run を 1 件しか持たず、後から起動した run が待機中の run を cancel する。
-  # queue: max で待機中の run を cancel せず起動順に実行する（pr-policy-check.yml / Issue #220 と同じ）。
+  # concurrency は排他制御のためだけに使う。queue: max は待機中の run を cancel せずに保持するだけで、
+  # 実行順は保証されない（GitHub Docs: "ordering is not guaranteed"）。apply → deploy の順序は運用で守る
+  # （apply の run が success で完了してから deploy を起動する。ADR-0042 / docs/runbooks/apply-task-definition-config-change.md）。
   group: mutation-dev
   queue: max
 

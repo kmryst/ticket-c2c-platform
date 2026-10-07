@@ -26,7 +26,7 @@ DB migration / search index migration の run-task も、deploy が register し
 2. **ARN は terraform の state の output から読む。** dev / staging の環境 root に output `ecs_task_definition_arns`（ECS service 名 → `aws_ecs_task_definition.this.arn`。revision 番号まで含む）を追加する。`deploy-service.yml` は新しい入力 `terraform_dir` の root で `terraform init` → `terraform output -json ecs_task_definition_arns` を実行する（plan / apply はしない）。
 3. **family 名で最新 ACTIVE revision を引かない。service が今使っている revision もコピー元にしない。**
 4. **想定外の値なら register の前に失敗する。** output が無い、service のキーが無い、ARN の family が service 名と違う・revision 番号が無い、その revision のアプリコンテナの名前が service 名でない・イメージが `pending-deploy`（[ADR-0040](./0040-initial-task-definition-uses-unpushed-image-tag.md)。terraform が登録した revision は必ずこのタグを参照する）でない場合。イメージの push より前に判定する。
-5. **apply / destroy と deploy を並行させない。** dev / staging それぞれで、`terraform-apply-*` / `terraform-destroy-*` / `deploy-backend-*` / `deploy-frontend-*` / `db-migrate-*` / `ticket-type-expand-readiness-*` / `ticket-type-cutover-*` の concurrency group を `mutation-<env>` に揃え、`queue: max` で待機中の run を cancel せず起動順に実行する。
+5. **apply / destroy と deploy を並行させない。** dev / staging それぞれで、`terraform-apply-*` / `terraform-destroy-*` / `deploy-backend-*` / `deploy-frontend-*` / `db-migrate-*` / `ticket-type-expand-readiness-*` / `ticket-type-cutover-*` の concurrency group を `mutation-<env>` に揃える。concurrency は排他制御のためだけに使う。`queue: max` は待機中の run を cancel せずに保持するだけで、実行順は保証されない（[GitHub Docs](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)：待機を始めた時刻の FIFO で、"Since the actual start time of a job or run may vary, ordering is not guaranteed."）。apply → deploy の順序は運用で守る（apply の run が success で完了してから deploy を起動する）。
 6. **rollback（`image_tag` に過去の short SHA）は「過去のイメージ ＋ 現在の terraform の設定」になる。** 設定まで戻す場合は、terraform の設定を戻して apply してから deploy する（[runbook](../runbooks/apply-task-definition-config-change.md)）。
 7. AWS での確認用に、`terraform-apply-<env>.yml` の入力 `task_config_check_value`（terraform 変数 `task_config_check_value`）を追加する。値を入れると api / worker / frontend のアプリコンテナに環境変数 `TASK_CONFIG_CHECK_VALUE` が入る。アプリは読まない。既存の環境で「設定だけを変えて再 apply → deploy で反映される」ことを、コードを書き換えずに確認するため。
 
@@ -57,7 +57,20 @@ DB migration / search index migration の run-task も、deploy が register し
 - **deploy を `terraform apply -var image_tag=<SHA>` で行う。** task definition の正本が terraform だけになる定番の方式だが、root module が環境ごとに 1 つ（[ADR-0003](./0003-terraform-state-and-environment-isolation.md)）なので deploy のたびに環境全体の apply になる。`-target` は HashiCorp が日常利用を推奨していない。migration 用の revision をどう用意するかの設計も要る。state 分割の後の長期の別案とする。
 - **family の最新 ACTIVE revision を使う。** 根拠に書いた理由で採用しない。
 
+## 残しているリスク
+
+- **apply と deploy の順序は運用で守る。** `mutation-<env>` は同時実行を防ぐだけで、実行順は保証しない。次の場合、deploy は前回の apply の設定（output）で成功し、エラーにならない。次の apply → deploy で正しい設定になるが、それまで古い設定のまま動く（#544 と同じ見え方）。
+  - apply の完了を待たずに deploy を起動し、両方が待機中になった後に deploy が先に実行された
+  - 失敗した apply を re-run した（先に起動していた deploy が先に実行され得る）
+  - apply が失敗したまま deploy した
+  - ローカルで apply した（`mutation-<env>` の排他の外）
+- deploy 側の安全装置は YAGNI として入れない。dev / staging は運用者が少なく、apply の完了を確認してから deploy を起動する運用（[runbook](../runbooks/apply-task-definition-config-change.md)）で足りると判断した。
+
 ## 再検討のトリガー
+
+- 本番環境を作るとき、運用者が増えるとき、apply と deploy を自動で続けて流す仕組みを入れるとき。順序を運用に任せず、次のどちらかで仕組みにする。
+  - deploy の最初に、同じ環境の `terraform-apply-<env>` / `terraform-destroy-<env>` に queued・in_progress の run があれば失敗する（GitHub API で run を確認する。`actions: read` が要る）。
+  - apply → deploy を `needs` でつないだ設定変更用の workflow を作る（同じ run の中では順序が保証され、apply が失敗すれば deploy は実行されない）。
 
 - state を分割したとき（ADR-0003 の再検討）。ECS の層を deploy と同じ単位で apply できるなら、`terraform apply -var image_tag=<SHA>` 方式を再検討する。分割しない場合も、output の置き場所が変わるなら SSM パラメータ方式と比べ直す。
 - deploy に apply ロール以外の、state を読めない専用ロールを使うことにしたとき（SSM パラメータ方式が有利になる）。

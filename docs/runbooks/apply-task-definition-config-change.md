@@ -13,12 +13,16 @@ ECS service は `ignore_changes = [task_definition]` なので、apply だけで
 
 1. terraform のコードを変える PR をマージする。
 2. `terraform-apply-<env>.yml` を実行する。plan で、対象の `aws_ecs_task_definition` が作り直され（`must be replaced`）、`aws_ecs_service` に差分が無いことを確認する。
-3. 変えた service の deploy workflow を実行する。
+3. **apply の run が success で完了したことを確認してから**、変えた service の deploy workflow を実行する。
    - api / worker: `deploy-backend-<env>.yml`。migration が新しい設定を必要とする場合は `run_migrations=true`。
    - frontend: `deploy-frontend-<env>.yml`。
 4. 「確認する」の手順で、service と migration の task definition に設定が入ったことを確認する。
 
-apply と deploy は同じ concurrency group（`mutation-<env>`、`queue: max`）で直列化されるので、同時には走らない。起動した順に実行される。
+apply と deploy は同じ concurrency group（`mutation-<env>`、`queue: max`）なので同時には走らないが、**実行順は保証されない**。`queue: max` は待機中の run を cancel せずに保持するだけで、順序は待機を始めた時刻の FIFO で、[GitHub Docs](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency) にも "ordering is not guaranteed" とある。concurrency は排他制御のためだけに使い、順序は次のとおり運用で守る（[ADR-0042](../adr/0042-deploy-copies-terraform-registered-task-definition.md)「残しているリスク」）。
+
+- apply の完了を待たずに deploy を起動しない。両方が待機中になると deploy が先に実行され得る。そのとき deploy は前回の apply の設定で成功し、エラーにならない。
+- apply が失敗したまま deploy しない。deploy は前回の apply の設定で成功してしまう。失敗した apply を re-run したときも、完了を確認してから deploy を起動する。
+- ローカルでの apply（alb-http-only の手順など）は `mutation-<env>` の排他の外になる。CI の apply / deploy が動いていないことを確認してから行い、終わってから deploy を起動する。
 
 この output を足す前の state しかない環境（Issue #544 のマージより前に apply し、その後 apply していない環境）では、deploy は `terraform output ecs_task_definition_arns is not in the state` で失敗する。先に `terraform-apply-<env>.yml` を 1 回実行する。
 
