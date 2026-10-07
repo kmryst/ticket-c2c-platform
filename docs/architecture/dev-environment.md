@@ -115,6 +115,8 @@ terraform/
 
 backend / frontend のデプロイは L-11（Issue #182）で分離した。イメージタグは各 workflow が自分のビルド時点のコミット short SHA を独立して使い、backend / frontend でタグを意図的に同期しない。ロールバック（`image_tag` 入力）も workflow 単位で独立して行う。デプロイ手順本体は reusable workflow `deploy-service.yml`（Issue #180）に共通化されている。
 
+`terraform-apply-dev.yml` が作るタスク定義は、どこからも push しないイメージタグ `pending-deploy` を参照する。apply 直後の api / worker / frontend は `CannotPullContainerError` で起動せず、初期 deployment は deployment circuit breaker で FAILED になる。アプリは `deploy-backend-dev.yml`（初回は `run_migrations=true`）/ `deploy-frontend-dev.yml` の update-service で初めて起動する。deploy workflow は `latest` を push しない（Issue #543 / [ADR-0040](../adr/0040-initial-task-definition-uses-unpushed-image-tag.md)。詳細は [staging-environment.md](./staging-environment.md)「terraform apply 直後の初期 deployment」）。
+
 GitHub Environments / Variables:
 
 | 種別 | 名前 | 用途 |

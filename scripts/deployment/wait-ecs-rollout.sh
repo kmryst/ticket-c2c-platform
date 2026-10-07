@@ -47,6 +47,13 @@
 # 返すことがある。1 回の応答では「古い読み取り」と「rollback の完了」を区別できないため、この状態は
 # 即失敗にせず待つ。ECS_ROLLOUT_MAX_UNOBSERVED_POLLS 回を超えても観測できなければ exit 1 にする。
 #
+# terraform apply 直後の最初の deploy（Issue #543 / ADR-0040）:
+# terraform が作る初期 deployment は push しないタグ pending-deploy を参照するため、circuit breaker が
+# FAILED（rollback 先なし、running 0）にしている。update-service 後は今回の deployment が PRIMARY、
+# FAILED の初期 deployment が ACTIVE になり、初期 deployment は task が 0 のまま消える。判定は今回の ARN の
+# deployment と PRIMARY だけを見るため、ACTIVE 側の FAILED は失敗扱いにせず、初期 deployment が消えて
+# deployments が 1 件になってから completed になる。
+#
 # 純関数（ecs_rollout_evaluate_service）は spec から source して検証できるよう、
 # main の実行は「直接実行されたときだけ」に限定する。
 

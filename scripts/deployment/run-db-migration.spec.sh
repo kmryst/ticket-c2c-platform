@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-db-migration.sh のテスト（Issue #538）。
+# run-db-migration.sh のテスト（Issue #538 / #543）。
 # AWS CLI をスタブに置き換え、mode ごとの command override と、container の exit code が
 # script の exit code に反映されること（非 0 なら exit 1 で deploy を止める）を確認する。
 # AWS へは接続しない。
@@ -30,7 +30,7 @@ case "$1 $2" in
 	jq -cn '{
 		containerDefinitions: [{
 			name: "stub-api",
-			image: "111122223333.dkr.ecr.ap-northeast-1.amazonaws.com/stub:abcdef0",
+			image: "111122223333.dkr.ecr.ap-northeast-1.amazonaws.com/stub:\(env.STUB_IMAGE_TAG // "abcdef0")",
 			logConfiguration: {options: {"awslogs-group": "/ecs/stub-api", "awslogs-stream-prefix": "ecs"}}
 		}]
 	}'
@@ -142,6 +142,16 @@ run_case migration-failed migration 1 'migration error' 1
 run_case unknown-mode search-index-migrate 0 '' 2
 if grep -q "run-task" "${work_dir}/calls.log" 2>/dev/null; then
 	echo "FAIL unknown-mode: run-task was called" >&2
+	exit 1
+fi
+
+# 6. terraform の初期タスク定義（pending-deploy。Issue #543）を指していたら、run-task を呼ばずに exit 1。
+#    db-migrate-<env>.yml（API サービスの現行タスク定義を使う）を最初の backend deploy より前に実行した場合。
+STUB_IMAGE_TAG=pending-deploy run_case pending-deploy-image migration 0 '' 1
+grep -q "has not been deployed yet" "${work_dir}/pending-deploy-image.stderr" ||
+	{ echo "FAIL pending-deploy-image: guidance message missing" >&2; exit 1; }
+if grep -q "run-task" "${work_dir}/calls.log" 2>/dev/null; then
+	echo "FAIL pending-deploy-image: run-task was called" >&2
 	exit 1
 fi
 

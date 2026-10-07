@@ -155,9 +155,10 @@ curl -i "http://$(terraform output -raw alb_dns_name)/healthz"
 # 依存込みの readiness を見る場合（DB へ SELECT 1 を投げるため Aurora が auto-pause 中だと時間がかかる）
 curl -i "http://$(terraform output -raw alb_dns_name)/readyz"
 
-# 4. API を実際に叩いて検証する場合は deploy-backend-staging.yml で ECS を最新イメージに更新する
-#    （terraform apply 直後はブートストラップ用 image_tag のまま）。OpenSearch の events index も
-#    この deploy で作られるため、apply 直後から最初の backend deploy までは worker が起動に失敗する
+# 4. API を実際に叩いて検証する場合は deploy-backend-staging.yml（run_migrations=true）を実行する。
+#    terraform apply 直後の api / worker は push されないタグ pending-deploy を参照しており、
+#    最初の backend deploy の update-service まで起動しない（CannotPullContainerError。Issue #543 / ADR-0040）。
+#    それまでは 3. の /healthz も応答しない
 
 # 5. 検証後は必ず destroy する。apply と同じ -var を渡す
 #    （CI の terraform-destroy-staging.yml は変数既定値 https-dns で plan を組むため、
@@ -227,7 +228,7 @@ terraform state list   # 空であること
 
 - migration 本体: `src/database/migrations/`（baseline は 2026-07-04 時点の `database/schema.sql` スナップショット）。適用履歴は DB の `typeorm_migrations` table で管理する。
 - 実行経路は 2 つ。いずれも ECS run-task（API タスク定義 + command override）で private subnet 内から適用する:
-  - `db-migrate-dev.yml` / `db-migrate-staging.yml`: backend deploy とは別に手動起動する単発実行（初回構築後や検証時）。同じ環境のbackend rollout、DB migration、Gate A readinessとは共通concurrency groupを使い、同時実行を防ぐ。
+  - `db-migrate-dev.yml` / `db-migrate-staging.yml`: backend deploy とは別に手動起動する単発実行（検証時など）。API サービスの現行タスク定義を使うため、最初の backend deploy より前（タスク定義が `pending-deploy` を参照している間）は run-task の前に失敗する。新しい環境の初回 migration は `deploy-backend-*.yml` の `run_migrations=true` で行う（Issue #543）。同じ環境のbackend rollout、DB migration、Gate A readinessとは共通concurrency groupを使い、同時実行を防ぐ。
   - `deploy-backend-*.yml` の `run_migrations` 入力: 新イメージのタスク定義 register 後・サービス更新前に migration を実行し、成功した場合のみデプロイへ進む（スキーマ変更を含むリリース用。migration 適用〜サービス更新完了までの間、旧タスクが新スキーマ上で動くため、migration は後方互換（expand-contract）で書く）。
 - migration runner は PostgreSQL advisory lock で直列化されており、誤って多重起動しても DDL は競合しない。
 - スキーマ変更では `npm run migration:create -- src/database/migrations/<PascalCase名>` で migration を追加し、`src/database/data-source.ts` の `migrations` 配列とローカル PoC の正本 `database/schema.sql` を同じ PR で同期更新する。baseline migration は編集しない。
@@ -246,6 +247,15 @@ worker は起動時に OpenSearch の `events` index の存在だけを確認し
 `deploy-service.yml` は `aws ecs wait services-stable` を使わず、`scripts/deployment/wait-ecs-rollout.sh` で対象サービスすべて（backend は api と worker）の rollout を確認する。PRIMARY deployment が今回 register した task definition であること、`rolloutState=COMPLETED`、deployment circuit breaker による FAILED / rollback が無いこと、running が desired と一致することが、連続 3 回の poll（15 秒間隔）で成り立てば成功とする。FAILED / rollback を検出した時点で失敗、約 20 分で完了しなければタイムアウトで失敗する。update-service 直後は ECS の API が更新前の deployment だけを返すことがあるため、今回の task definition の deployment をまだ一度も観測していない間は失敗にせず待ち、8 回（約 2 分）観測できなければ失敗する（Issue #540）。
 
 `services-stable` はその時点の deployments 件数と runningCount だけで判定するため、起動直後に落ちる worker でも success になっていた（2026-10-07 の staging では deploy が success で終わった後に worker の deployment が FAILED になった）。
+
+### terraform apply 直後の初期 deployment（Issue #543）
+
+terraform が作るタスク定義（api / worker / frontend）は、どこからも push しないイメージタグ `pending-deploy` を参照する（`image_tag` 変数の既定値。validation で他の値を拒否する）。`deploy-service.yml` は commit SHA タグだけを push し、`latest` と `pending-deploy` は push もデプロイもしない。判断の背景と不採用案は [ADR-0040](../adr/0040-initial-task-definition-uses-unpushed-image-tag.md) に記録した。
+
+- apply 直後から最初の deploy の update-service までは、各サービスのイベントに `CannotPullContainerError` が出て、初期 deployment は deployment circuit breaker で FAILED（running 0）になる。これは想定した状態で、アプリは DB migration と search index migration より前に起動しない。ALB の target にも登録されない。
+- 最初の deploy は FAILED の初期 deployment からの update-service になる。新しい deployment が PRIMARY になり、初期 deployment は task が 0 のまま消える。成功判定（`wait-ecs-rollout.sh`）は今回の task definition の deployment だけを見るので、FAILED の初期 deployment を失敗とみなさない。
+- ロールバック用の `image_tag` 入力には過去の short SHA を指定する。`latest` と `pending-deploy` は拒否する。
+- Issue #543 より前に作り、destroy せずに使い続ける環境は、ECR に残った `latest` タグを一度だけ削除する（[runbook](../runbooks/remove-ecr-latest-tag.md)）。
 
 ## GitHub Actions
 

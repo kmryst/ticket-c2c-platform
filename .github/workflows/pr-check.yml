@@ -95,6 +95,12 @@ jobs:
       - name: Validate ECS rollout check
         run: bash scripts/deployment/wait-ecs-rollout.spec.sh
 
+      # Issue #543 / ADR-0040: deploy-service.yml の step を順序と if 条件どおりに AWS CLI / docker の
+      # スタブで実行し、latest と pending-deploy を push しないこと、DB migration / search index migration が
+      # 失敗したら update-service を呼ばないことを確認する（AWS へは接続しない）。
+      - name: Validate deploy-service workflow steps
+        run: bash scripts/deployment/deploy-service-workflow.spec.sh
+
       # Issue #378 の Gate B cutover 実行 script。operation -> command override 変換（6 択）、
       # exit code 0 / 2 / 3 / 4 / 1 の伝搬、evidence 欠落時の fail、gate 判定式の真理値表を
       # AWS CLI スタブで検証する（AWS へは接続しない）。
@@ -206,6 +212,19 @@ jobs:
             echo "::group::validate ${env_dir}"
             terraform -chdir="$env_dir" init -backend=false -input=false
             terraform -chdir="$env_dir" validate -no-color
+            echo "::endgroup::"
+          done
+
+      # Issue #543 / ADR-0040: image_tag の validation（pending-deploy 以外を拒否）を mock provider の
+      # plan で確認する。tests/ を持つ環境 root だけが対象。AWS 認証は使わない。
+      - name: Terraform test (mock provider)
+        run: |
+          set -euo pipefail
+          for env_dir in terraform/environments/*/; do
+            [ -d "${env_dir}tests" ] || continue
+            echo "::group::test ${env_dir}"
+            terraform -chdir="$env_dir" init -backend=false -input=false
+            terraform -chdir="$env_dir" test -no-color
             echo "::endgroup::"
           done
 
