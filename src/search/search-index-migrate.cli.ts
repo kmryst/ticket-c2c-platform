@@ -8,8 +8,9 @@
 //   （db-migrate-<env>.yml / migration:run:local）で扱うのと同じパターンです。
 // - Worker の起動処理は mapping 更新 API を呼ばず、index の存在確認だけを行います。
 //   mapping の作成・更新は、deploy 時にこの CLI を 1 回実行して済ませます。
-// - AWS 環境では既存 API artifact の command override（ECS run-task）から実行できますが、
-//   deploy pipeline への自動組み込みは別 Issue で扱います（runbook 参照）。
+// - AWS 環境では deploy-backend-<env>.yml（deploy-service.yml）が、サービス更新の前に毎回
+//   API の task definition を command override した ECS run-task でこの CLI を実行します
+//   （Issue #538 / ADR-0039）。冪等なので毎回実行してよく、失敗したらサービスは更新されません。
 //
 // exit code:
 //   0 = 成功（mapping を作成 / additive 適用済み）

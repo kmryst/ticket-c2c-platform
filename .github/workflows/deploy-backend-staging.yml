@@ -38,3 +38,5 @@ jobs:
       api_service: ticket-c2c-staging-api
       image_tag: ${{ inputs.image_tag }}
       run_migrations: ${{ inputs.run_migrations }}
+      # worker を起動する前に OpenSearch の events index を毎回作成・更新する（Issue #538 / ADR-0039）。
+      run_search_index_migration: true

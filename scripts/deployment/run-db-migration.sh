@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# ECS run-task で DB migration または allowlist 済み DB check を実行する
-# （Issue #92 / #335 / #336）。
+# ECS run-task で DB migration、OpenSearch の search index migration、または allowlist 済み
+# DB check を実行する（Issue #92 / #335 / #336 / #538）。
 # API サービスのタスク定義（または指定タスク定義）を command override で流用し、
 # private subnet 内から Aurora へ接続する。終了コードとログを検証する。
 #
@@ -9,9 +9,13 @@
 #   task-definition-arn 省略時は API サービスの現行タスク定義を使う。
 #   mode:
 #   - migration（既定）: TypeORM versioned migrations を適用する。
+#   - search-index-migration: OpenSearch events index を作成する、または既存 index へ mapping を
+#     additive に適用する（search-index-migrate CLI。冪等。ADR-0039）。
 #   - ticket-type-readiness: Ticket Type expand readiness を読み取り専用で検査する。
 #   deploy-backend workflow は「新イメージのタスク定義を register した直後・サービス更新前」に
 #   新タスク定義 ARN を渡して呼ぶ（migration 成功後にデプロイする運用）。
+#   順序は migration（run_migrations=true の時のみ）→ search-index-migration（毎回）→ サービス更新。
+#   container の exit code が 0 以外なら exit 1 で終わり、workflow はサービスを更新しない。
 
 set -euo pipefail
 
@@ -21,7 +25,7 @@ source "${script_dir}/ticket-type-readiness-evidence.sh"
 # shellcheck source=scripts/deployment/ecs-task-container-exit-code.sh
 source "${script_dir}/ecs-task-container-exit-code.sh"
 
-usage="usage: run-db-migration.sh <cluster> <api-service> [task-definition-arn] [migration|ticket-type-readiness]"
+usage="usage: run-db-migration.sh <cluster> <api-service> [task-definition-arn] [migration|search-index-migration|ticket-type-readiness]"
 if (( $# > 4 )); then
 	echo "$usage" >&2
 	exit 2
@@ -40,6 +44,11 @@ migration)
 	command_path="dist/src/database/run-migrations.js"
 	started_by="db-migrate"
 	operation_label="DB migration"
+	;;
+search-index-migration)
+	command_path="dist/src/search/search-index-migrate.cli.js"
+	started_by="search-index-migrate"
+	operation_label="Search index migration"
 	;;
 ticket-type-readiness)
 	command_path="dist/src/database/check-ticket-type-expand-readiness.js"

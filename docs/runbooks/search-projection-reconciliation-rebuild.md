@@ -52,7 +52,9 @@ node dist/src/search/inventory-reconciliation.cli.js --page-size 200
 `run-cutover-task.sh` は task definition / network configuration / command override / container 名
 一致の exit code 取得 / task 固有ログの取得 / evidence 検証 / JSONL lineage / step summary を
 まとめて行う。cutover workflow の choice には載せない（書き込み primitive の起動面を増やさない）。
-**手順から手動実行する専用経路**である。
+**手順から手動実行する専用経路**である。ただし `search-index-migrate` は、通常の mapping 適用を
+`deploy-backend-<env>.yml` が毎回自動で行う（下記「mapping migration」）。この表の
+`search-index-migrate` は、Gate B の positive 確認と障害時の再実行に使う。
 
 | operation | 実行する CLI | exit code |
 | --- | --- | --- |
@@ -256,13 +258,25 @@ index の存在確認だけを行い、mapping 更新 API を呼ばない（Open
 全体を失敗させる障害モードを持ち込まないため）。
 
 ```bash
-# mapping を含む変更のリリースでは、新 Worker 起動前に 1 回だけ実行する。
 # 未存在なら完全 mapping で index を作成し、存在すれば idempotent な additive putMapping を適用する。
 node dist/src/search/search-index-migrate.cli.js
 # ローカル: npm run search-index:migrate:local
 ```
 
-AWS 環境では、`run-cutover-task.sh` の `search-index-migrate` operation で実行する。
+**AWS 環境（dev / staging）では `deploy-backend-<env>.yml` が毎回自動で実行する**（Issue #538 /
+[ADR-0039](../adr/0039-run-search-index-migration-and-verify-ecs-rollout-in-deploy.md)）。
+`deploy-service.yml` は新イメージの task definition を register した後、DB migration（`run_migrations=true`
+の時のみ）→ search index migration → サービス更新の順に進む。search index migration は新イメージの
+API task definition を command override で使う ECS run-task（`scripts/deployment/run-db-migration.sh`
+の `search-index-migration` mode）で実行し、失敗したらサービスを更新せずに deploy を止める。
+したがって「新 Worker 起動前に 1 回」は deploy のたびに自動で守られ、OpenSearch が空の新しい環境でも
+最初の backend deploy で index が作られてから worker が起動する。手動で index を作る必要はない。
+
+deploy 以外で実行するのは次の場合だけである。どちらも `run-cutover-task.sh` の `search-index-migrate`
+operation を使う。
+
+- Gate B session 中の positive 確認（`ticket_types` が `nested` であることの確認。下記）。
+- deploy の search index migration が失敗した後、原因を直してから単独で再実行して確かめる場合。
 
 ```bash
 AWS_REGION=ap-northeast-1 \
@@ -271,7 +285,11 @@ CUTOVER_EVIDENCE_FILE="$(pwd)/projection-evidence-${ENV}.jsonl" \
     "$CLUSTER" "$API_SERVICE" "$TASK_DEFINITION_ARN" search-index-migrate
 ```
 
-deploy pipeline（`deploy-backend-<env>.yml` 相当）への自動組み込みは別 Issue で扱う。
+deploy の search index migration が失敗した場合（step `Run search index migration (before service
+update)` が exit 1）、サービスは旧 task definition のまま動き続ける。task log の `error` を確認し、
+`mapper [ticket_types] cannot be changed ...` / `cannot change object mapping from non-nested to nested`
+なら mapping が `object` に化けているため、下記のとおり index の作り直し（rebuild）が必要になる
+（#377 へエスカレーションする）。OpenSearch の一時的な不調なら、回復後に deploy を再実行する。
 
 ### 「新 Worker 起動前に 1 回」が守れなかった場合に起きること（順序が本質である理由）
 
@@ -330,7 +348,7 @@ ADR-0031 の rollback 方針に統一する。
 - mapping は additive なので rollback 時に field や index を削除しない。
 - 在庫 read/write 全体の activation / rollback は #378 が所有する。手順の正本は
   [Gate B Ticket Type cutover runbook](./gate-b-ticket-type-cutover.md)。呼び出し関係は次のとおり:
-  **mapping migration は Gate B session の前段（compatibility release 手順。4 章冒頭）**で
-  新 Worker 起動前に 1 回実行し、**rebuild / reconciliation は Gate B session の 4 章 step 4**
+  **mapping migration は Gate B session の前段（compatibility release の backend deploy。4 章冒頭）**で
+  新 Worker 起動前に自動で実行され、**rebuild / reconciliation は Gate B session の 4 章 step 4**
   （旧 Worker 0 件・queue drain 後）から呼ばれる。session 中の `search-index-migrate` は
   mapping の適用ではなく `ticket_types` が `nested` であることの positive 確認として実行する。fresh session の final cleanup における writer mode 切替の所有は final cleanup transaction へ移管する（[ADR-0033](../adr/0033-ticket-type-migration-irreversible-boundaries.md)）。

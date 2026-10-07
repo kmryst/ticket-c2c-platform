@@ -86,6 +86,15 @@ jobs:
       - name: Validate ECS task container exit code lookup
         run: bash scripts/deployment/ecs-task-container-exit-code.spec.sh
 
+      # Issue #538: deploy-service.yml の run-task 実行（DB migration / search index migration）と
+      # rollout 確認を AWS CLI スタブで検証する（AWS へは接続しない）。rollout 確認は COMPLETED /
+      # circuit breaker FAILED / running < desired / IN_PROGRESS のままタイムアウト / rollback を含む。
+      - name: Validate deploy run-task runner
+        run: bash scripts/deployment/run-db-migration.spec.sh
+
+      - name: Validate ECS rollout check
+        run: bash scripts/deployment/wait-ecs-rollout.spec.sh
+
       # Issue #378 の Gate B cutover 実行 script。operation -> command override 変換（6 択）、
       # exit code 0 / 2 / 3 / 4 / 1 の伝搬、evidence 欠落時の fail、gate 判定式の真理値表を
       # AWS CLI スタブで検証する（AWS へは接続しない）。
@@ -145,6 +154,13 @@ jobs:
           TEST_DATABASE_URL: postgresql://ticket_poc:ticket_poc_password@127.0.0.1:5432/ticket_poc
           TEST_VALKEY_URL: redis://127.0.0.1:6379
           TEST_OPENSEARCH_URL: http://127.0.0.1:9200
+
+      # Issue #538: deploy 時に毎回実行する search-index-migrate CLI の冪等性（index なし → 作成、
+      # index あり → 成功し mapping と document を変えない）と、壊れた mapping での exit 1 を実
+      # OpenSearch で確認する。固定名の `events` index を作成・削除するため、他の OpenSearch を使う
+      # integration step より後に置く。
+      - name: Search index migration idempotency (実 OpenSearch 2.19)
+        run: bash scripts/deployment/search-index-migrate.integration.sh http://127.0.0.1:9200
 
   frontend-build:
     name: Frontend Build
