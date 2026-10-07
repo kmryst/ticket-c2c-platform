@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wait-ecs-rollout.sh のテスト（Issue #538）。
+# wait-ecs-rollout.sh のテスト（Issue #538 / #543）。
 # `aws ecs describe-services` を PATH 上のスタブに置き換え、poll ごとに用意した出力を順に返す。
 # AWS へは接続しない。各ケースで exit code と出力を確認する。
 
@@ -48,6 +48,9 @@ chmod +x "${stub_dir}/sleep"
 API_TD_NEW="arn:aws:ecs:ap-northeast-1:111122223333:task-definition/ticket-c2c-staging-api:12"
 WORKER_TD_NEW="arn:aws:ecs:ap-northeast-1:111122223333:task-definition/ticket-c2c-staging-worker:9"
 WORKER_TD_OLD="arn:aws:ecs:ap-northeast-1:111122223333:task-definition/ticket-c2c-staging-worker:8"
+# terraform が作った初期 task definition（image は pending-deploy。Issue #543）。
+API_TD_INITIAL="arn:aws:ecs:ap-northeast-1:111122223333:task-definition/ticket-c2c-staging-api:1"
+WORKER_TD_INITIAL="arn:aws:ecs:ap-northeast-1:111122223333:task-definition/ticket-c2c-staging-worker:1"
 
 printf '%s %s\n%s %s\n' \
 	ticket-c2c-staging-api "$API_TD_NEW" \
@@ -94,6 +97,24 @@ worker_running_short=$(service ticket-c2c-staging-worker 0 1 \
 	"[$(deployment PRIMARY "$WORKER_TD_NEW" COMPLETED 0 1)]")
 worker_in_progress=$(service ticket-c2c-staging-worker 0 1 \
 	"[$(deployment PRIMARY "$WORKER_TD_NEW" IN_PROGRESS 0 1),$(deployment ACTIVE "$WORKER_TD_OLD" COMPLETED 0 0)]")
+
+# terraform apply 直後（Issue #543）: 初期 deployment は pending-deploy を pull できず、circuit breaker が
+# FAILED（rollback 先なし）にしている。running 0。
+api_initial_failed=$(service ticket-c2c-staging-api 0 1 \
+	"[$(deployment PRIMARY "$API_TD_INITIAL" FAILED 0 1 3)]")
+worker_initial_failed=$(service ticket-c2c-staging-worker 0 1 \
+	"[$(deployment PRIMARY "$WORKER_TD_INITIAL" FAILED 0 1 3)]")
+# 最初の update-service の後: 今回の deployment が PRIMARY、FAILED の初期 deployment が ACTIVE に残る。
+api_after_initial_in_progress=$(service ticket-c2c-staging-api 0 1 \
+	"[$(deployment PRIMARY "$API_TD_NEW" IN_PROGRESS 0 1),$(deployment ACTIVE "$API_TD_INITIAL" FAILED 0 1 3)]")
+worker_after_initial_in_progress=$(service ticket-c2c-staging-worker 0 1 \
+	"[$(deployment PRIMARY "$WORKER_TD_NEW" IN_PROGRESS 0 1),$(deployment ACTIVE "$WORKER_TD_INITIAL" FAILED 0 1 3)]")
+# 今回の task が RUNNING になり desired に達したが、初期 deployment がまだ消えていない（deployments 2 件）。
+worker_after_initial_running=$(service ticket-c2c-staging-worker 1 1 \
+	"[$(deployment PRIMARY "$WORKER_TD_NEW" IN_PROGRESS 1 1),$(deployment ACTIVE "$WORKER_TD_INITIAL" FAILED 0 0 3)]")
+# 今回の deployment も circuit breaker で FAILED（戻り先は FAILED の初期 deployment しかない）。
+worker_after_initial_failed=$(service ticket-c2c-staging-worker 0 1 \
+	"[$(deployment PRIMARY "$WORKER_TD_NEW" FAILED 0 1 3),$(deployment ACTIVE "$WORKER_TD_INITIAL" FAILED 0 1 3)]")
 
 response() {
 	jq -cn --argjson a "$1" --argjson b "$2" '{services: [$a, $b], failures: []}'
@@ -232,6 +253,28 @@ expect_polls describe-error-retry 4
 run_case service-missing 1 \
 	"$(jq -cn --argjson a "$api_completed" '{services: [$a], failures: [{arn: "x", reason: "MISSING"}]}')"
 expect_output service-missing "missing or not ACTIVE"
+
+# 10-a. terraform apply 直後の最初の deploy（Issue #543）: 初期 deployment が FAILED（戻り先なし）。
+#       1 poll 目は update-service 前の読み取り（初期 deployment だけ）、その後に今回の deployment が
+#       PRIMARY・初期 deployment が ACTIVE（FAILED）で並び、初期 deployment が消えて COMPLETED が
+#       3 poll 続いたら → 0。ACTIVE 側の FAILED を失敗扱いにしないこと。
+MAX_POLLS=10 run_case initial-failed-then-completed 0 \
+	"$(response "$api_initial_failed" "$worker_initial_failed")" \
+	"$(response "$api_after_initial_in_progress" "$worker_after_initial_in_progress")" \
+	"$(response "$api_completed" "$worker_after_initial_running")" \
+	"$(response "$api_completed" "$worker_completed")" \
+	"$(response "$api_completed" "$worker_completed")" \
+	"$(response "$api_completed" "$worker_completed")"
+expect_polls initial-failed-then-completed 6
+expect_output initial-failed-then-completed "not observed yet (1/3); the response may be stale"
+expect_output initial-failed-then-completed "ECS rollout completed for all services"
+
+# 10-b. 初期 deployment が FAILED のまま、今回の deployment も FAILED → 即 1（success にしない）。
+MAX_POLLS=10 run_case initial-failed-then-failed 1 \
+	"$(response "$api_after_initial_in_progress" "$worker_after_initial_in_progress")" \
+	"$(response "$api_completed" "$worker_after_initial_failed")"
+expect_polls initial-failed-then-failed 2
+expect_output initial-failed-then-failed "circuit breaker marked it FAILED"
 
 # 11. 引数の誤り → 2。
 actual=0

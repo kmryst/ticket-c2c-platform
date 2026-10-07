@@ -117,7 +117,10 @@ resource "aws_ecs_service" "this" {
 
   # deploy workflow は commit SHA タグへ差し替えた新しいタスク定義リビジョンを register して
   # サービスを更新する（production-readiness M-7）。Terraform がそのリビジョンを
-  # 自身のリビジョン（ブートストラップ用イメージタグ）へ巻き戻さないよう、差分を無視する。
+  # 自身のリビジョン（deploy 前の固定タグ pending-deploy。どこからも push しない）へ巻き戻さないよう、
+  # 差分を無視する。ignore_changes は作成時には効かないため、サービス作成時の初期 deployment は
+  # pending-deploy を pull できずに FAILED になり、deploy の update-service まではアプリを起動しない
+  # （Issue #543 / ADR-0040）。
   # 注意: Terraform 側でタスク定義（環境変数・リソースサイズ等）を変更した場合、
   # 新リビジョンは作られるがサービスには自動反映されない。apply 後に deploy-app workflow を
   # 実行して反映する。

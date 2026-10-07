@@ -112,6 +112,16 @@ container=$(jq -r '.containerDefinitions[0].name' <<<"$td_json")
 image=$(jq -r '.containerDefinitions[0].image' <<<"$td_json")
 log_group=$(jq -r '.containerDefinitions[0].logConfiguration.options["awslogs-group"]' <<<"$td_json")
 log_prefix=$(jq -r '.containerDefinitions[0].logConfiguration.options["awslogs-stream-prefix"]' <<<"$td_json")
+
+# terraform が作った初期タスク定義は push しない固定タグ pending-deploy を参照する（Issue #543 / ADR-0040）。
+# API サービスがまだ一度も deploy されていない状態で現行タスク定義を使うと、run-task は
+# CannotPullContainerError で必ず失敗するため、run-task の前に止めて手順を示す。
+if [[ $image == *:pending-deploy ]]; then
+	echo "task definition ${task_def} still uses the image tag pending-deploy (terraform の初期タスク定義)." >&2
+	echo "API service ${service} has not been deployed yet. Run deploy-backend-<env>.yml first (run_migrations=true on a new environment)." >&2
+	exit 1
+fi
+
 overrides=$(jq -cn \
 	--arg container "$container" \
 	--arg command_path "$command_path" \

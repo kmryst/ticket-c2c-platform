@@ -52,14 +52,23 @@ variable "public_endpoint_mode" {
 
 variable "image_tag" {
   description = <<-EOT
-    ECS タスク定義の初期イメージタグ。
-    通常のデプロイは deploy-app workflow が commit SHA タグのタスク定義リビジョンを register して
-    サービスを更新する（production-readiness M-7）。この変数は環境の初回構築時に参照する
-    ブートストラップ用で、初回 deploy-app 実行後はサービス側のリビジョンが正になる
+    terraform が作る ECS タスク定義（api / worker / frontend）の初期イメージタグ（Issue #543 / ADR-0040）。
+    どこからも push しない固定値 pending-deploy だけを許可する。terraform apply 直後の初期 deployment は
+    このタグのイメージを pull できず（CannotPullContainerError）アプリを起動しない。初期 deployment は
+    deployment circuit breaker が FAILED にする。アプリの起動は deploy workflow（deploy-service.yml）が DB migration と
+    search index migration の後に commit SHA タグのタスク定義リビジョンを register し、update-service
+    することで始まる（production-readiness M-7）。以降はサービス側のリビジョンが正になる
     （ecs-service モジュールは task_definition の差分を ignore_changes で無視する）。
+    deploy-service.yml はこの値と latest を push しない。値を変える場合は deploy-service.yml の
+    PENDING_DEPLOY_IMAGE_TAG と tests/image_tag.tftest.hcl も同じ PR で変える。
   EOT
   type        = string
-  default     = "latest"
+  default     = "pending-deploy"
+
+  validation {
+    condition     = var.image_tag == "pending-deploy"
+    error_message = "image_tag は pending-deploy 以外を指定できない。アプリのイメージは deploy-backend-<env>.yml / deploy-frontend-<env>.yml の update-service で反映する（Issue #543 / ADR-0040）。"
+  }
 }
 
 variable "hosted_zone_name" {

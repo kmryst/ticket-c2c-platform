@@ -7,6 +7,8 @@
 # （main のみ）で行う。dev / staging の Environment に required reviewer は置かない（ADR-0038）。
 # backend は DB migration（任意）→ search index migration（毎回）→ サービス更新 → rollout 確認の順に
 # 進み、どこかで失敗したら以降の step を実行しない（Issue #538 / ADR-0039）。
+# イメージは commit SHA タグだけを push する。terraform が作る初期タスク定義は push しない固定タグ
+# pending-deploy を参照するため、アプリはこの workflow の update-service まで起動しない（Issue #543 / ADR-0040）。
 # concurrency group は呼び出し側 workflow で定義する（deploy-backend-dev など）。
 name: deploy-service
 
@@ -39,7 +41,7 @@ on:
         type: string
         default: ""
       image_tag:
-        description: "デプロイする既存 ECR タグ（省略時は現在のコミットをビルドし short SHA タグでデプロイ。ロールバック時は過去の short SHA を指定）"
+        description: "デプロイする既存 ECR タグ（省略時は現在のコミットをビルドし short SHA タグでデプロイ。ロールバック時は過去の short SHA を指定。latest / pending-deploy は拒否する）"
         required: false
         type: string
         default: ""
@@ -67,6 +69,9 @@ env:
   ECR_REPOSITORY: ${{ inputs.ecr_repository }}
   ECS_CLUSTER: ${{ inputs.ecs_cluster }}
   ECS_SERVICES: ${{ inputs.ecs_services }}
+  # terraform の image_tag 変数の既定値（terraform/environments/{dev,staging}/variables.tf の validation が
+  # この値だけを許可する）。初期タスク定義が pull できないよう、このタグは push もデプロイもしない。
+  PENDING_DEPLOY_IMAGE_TAG: pending-deploy
 
 jobs:
   deploy:
@@ -112,6 +117,9 @@ jobs:
 
       # デプロイするタグを決める（production-readiness M-7: タスク定義は commit SHA 固定で参照する）。
       # image_tag 入力があればビルドせず既存タグを使う（ロールバック経路）。存在しないタグは即失敗させる。
+      # pending-deploy（terraform の初期タスク定義が参照する、push しないタグ）と latest（Issue #543 より前の
+      # 可変タグ）は拒否する。どちらも commit を特定できず、pending-deploy を push すると terraform apply 直後に
+      # migration 前のアプリが起動してしまう（ADR-0040）。
       # タグ存在確認は自分の ECR リポジトリのみ行う（L-11: backend / frontend でタグを同期しない。
       # 各 workflow が自分のビルド時点の short SHA を独立して使い、ロールバックも workflow 単位で行う）。
       - name: Resolve image tag
@@ -119,6 +127,10 @@ jobs:
         run: |
           if [ -n "${{ inputs.image_tag }}" ]; then
             TAG="${{ inputs.image_tag }}"
+            if [ "$TAG" = "$PENDING_DEPLOY_IMAGE_TAG" ] || [ "$TAG" = "latest" ]; then
+              echo "::error::image_tag '$TAG' cannot be deployed. Specify a past short SHA tag (Issue #543 / ADR-0040)"
+              exit 1
+            fi
             aws ecr describe-images \
               --repository-name "$ECR_REPOSITORY" \
               --image-ids imageTag="$TAG" \
@@ -129,21 +141,27 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      # :latest も併せて push する。これはデプロイには使わず、Terraform 初回 apply 時の
-      # タスク定義（image_tag 変数の既定値 latest）が参照できるイメージを残すブートストラップ用。
+      # commit SHA タグだけを push する。latest は push しない（Issue #543 / ADR-0040）。
+      # migration より前に latest を push すると、terraform apply 直後の初期 deployment が
+      # そのイメージで起動し、DB migration / search index migration より前にアプリが動いていた。
       - name: Build and push image
         if: inputs.image_tag == ''
         run: |
           IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}"
           TAG="${{ steps.tag.outputs.tag }}"
-          docker build -t "$IMAGE:latest" -t "$IMAGE:$TAG" "${{ inputs.docker_context }}"
-          docker push "$IMAGE:latest"
+          if [ "$TAG" = "$PENDING_DEPLOY_IMAGE_TAG" ] || [ "$TAG" = "latest" ]; then
+            echo "::error::refusing to push image tag '$TAG' (Issue #543 / ADR-0040)"
+            exit 1
+          fi
+          docker build -t "$IMAGE:$TAG" "${{ inputs.docker_context }}"
           docker push "$IMAGE:$TAG"
           echo "pushed $IMAGE:$TAG" >> "$GITHUB_STEP_SUMMARY"
 
       # 現行タスク定義のイメージだけを commit SHA タグへ差し替えた新リビジョンを register する。
       # これによりタスク定義から稼働コミットを特定でき、ロールバックは過去タグの再指定だけで済む
       # （再ビルド不要）。サービス更新は migration（任意）の後に行う。
+      # terraform apply 直後の最初の deploy では、現行タスク定義は terraform のもの（pending-deploy）で、
+      # そのイメージだけをここで差し替える（Issue #543）。
       - name: Register SHA-pinned task definitions
         if: steps.svc.outputs.deploy == 'true'
         id: td

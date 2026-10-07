@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "デプロイする既存 ECR タグ（省略時は現在のコミットをビルドし short SHA タグでデプロイ。ロールバック時は過去の short SHA を指定）"
+        description: "デプロイする既存 ECR タグ（省略時は現在のコミットをビルドし short SHA タグでデプロイ。ロールバック時は過去の short SHA を指定。latest / pending-deploy は拒否する）"
         required: false
         type: string
 
