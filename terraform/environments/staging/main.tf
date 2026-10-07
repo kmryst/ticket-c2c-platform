@@ -6,6 +6,12 @@
 # 4. observability レイヤ
 
 locals {
+  # terraform-apply-<env>.yml の入力 task_config_check_value から api / worker / frontend の task definition に
+  # 入れる確認用の環境変数（Issue #544 / ADR-0042）。アプリは読まない。空なら何も足さない。
+  task_config_check_environment = var.task_config_check_value == "" ? {} : {
+    TASK_CONFIG_CHECK_VALUE = var.task_config_check_value
+  }
+
   environment      = "staging"
   capacity_profile = var.capacity_profile
 
@@ -601,7 +607,8 @@ module "api_service" {
   # X-Ray 分散トレーシング用 ADOT collector sidecar（ADR-0014 / Issue #203）。
   otel_collector_image = local.otel_collector_image
 
-  environment = {
+  # AWS での確認用の環境変数（Issue #544 / ADR-0042）。task_config_check_value が空なら何も足さない。
+  environment = merge(local.task_config_check_environment, {
     PORT                = "3000"
     DB_HOST             = module.aurora.cluster_endpoint
     DB_PORT             = "5432"
@@ -627,7 +634,7 @@ module "api_service" {
     # ビジネスメトリクス（EMF）の名前空間と Service dimension（ADR-0014）。
     METRICS_NAMESPACE = local.metrics_namespace
     METRICS_SERVICE   = "api"
-  }
+  })
 
   secrets = {
     # migration runner（db-migrate workflow の ECS run-task）用。短命接続のためローテーション影響を受けず、静的注入のままでよい（Issue #92）。
@@ -664,7 +671,8 @@ module "worker_service" {
   # X-Ray 分散トレーシング用 ADOT collector sidecar（ADR-0014 / Issue #203）。
   otel_collector_image = local.otel_collector_image
 
-  environment = {
+  # AWS での確認用の環境変数（Issue #544 / ADR-0042）。task_config_check_value が空なら何も足さない。
+  environment = merge(local.task_config_check_environment, {
     SQS_QUEUE_URL       = module.search_projection_queue.queue_url
     OPENSEARCH_ENDPOINT = module.opensearch.endpoint
     # X-Ray 分散トレーシング（ADR-0014 / Issue #203）。Worker 側は API から
@@ -676,7 +684,7 @@ module "worker_service" {
     OTEL_TRACES_SAMPLER_ARG = "0.1"
     METRICS_NAMESPACE       = local.metrics_namespace
     METRICS_SERVICE         = "worker"
-  }
+  })
 }
 
 # ---------- observability ----------
@@ -792,13 +800,14 @@ module "frontend_service" {
   # CPU / Memory アラーム（Issue #218）の通知先。DLQ アラームと同じ SNS トピックへ配線する。
   alarm_actions = module.observability.alarm_action_arns
 
-  environment = {
+  # AWS での確認用の環境変数（Issue #544 / ADR-0042）。task_config_check_value が空なら何も足さない。
+  environment = merge(local.task_config_check_environment, {
     PORT     = "3000"
     HOSTNAME = "0.0.0.0"
     # SSR のサーバー側 fetch は CloudFront 経由の /api を使う（ADR-0013）。
     # ALB 直叩きは prefix list 制限で遮断されるため、SSR も CloudFront + WAF を通す。
     API_BASE_URL = "https://${local.app_fqdn}/api"
-  }
+  })
 }
 
 # ---------- WAF（L-12 / Issue #184） ----------

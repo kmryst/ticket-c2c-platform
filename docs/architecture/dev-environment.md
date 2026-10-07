@@ -116,6 +116,8 @@ backend / frontend のデプロイは L-11（Issue #182）で分離した。イ�
 
 `terraform-apply-dev.yml` が作るタスク定義は、どこからも push しないイメージタグ `pending-deploy` を参照する。apply 直後の api / worker / frontend は `CannotPullContainerError` で起動せず、初期 deployment は deployment circuit breaker で FAILED になる。アプリは `deploy-backend-dev.yml`（初回は `run_migrations=true`）/ `deploy-frontend-dev.yml` の update-service で初めて起動する。deploy workflow は `latest` を push しない（Issue #543 / [ADR-0040](../adr/0040-initial-task-definition-uses-unpushed-image-tag.md)。詳細は [staging-environment.md](./staging-environment.md)「terraform apply 直後の初期 deployment」）。
 
+deploy workflow は、terraform が最後の apply で登録したタスク定義（state の output `ecs_task_definition_arns`）のイメージだけを差し替えて register する。terraform で環境変数などの設定を変えたら、`terraform-apply-dev.yml` の後に deploy workflow を実行して反映する。rollback（`image_tag`）は「過去のイメージ ＋ 現在の terraform の設定」になる。apply / destroy・deploy・DB 操作系の workflow は concurrency group `mutation-dev` で同時実行を防ぐ（実行順は保証されないので、apply の完了を確認してから deploy を起動する。Issue #544 / [ADR-0042](../adr/0042-deploy-copies-terraform-registered-task-definition.md)。詳細は [staging-environment.md](./staging-environment.md)「task definition の設定とイメージの分担」、手順は [runbook](../runbooks/apply-task-definition-config-change.md)）。
+
 GitHub Environments / Variables:
 
 | 種別 | 名前 | 用途 |

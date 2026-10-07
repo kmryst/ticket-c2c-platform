@@ -18,7 +18,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-frontend-staging
+  # staging を変更する workflow（terraform apply / destroy、backend / frontend deploy、DB migration、
+  # Ticket Type readiness / cutover）を 1 つの group で直列化する（Issue #544 / ADR-0042）。
+  # deploy は terraform が最後の apply で登録した task definition を state から読むため、apply と並行させない。
+  # concurrency は排他制御のためだけに使う。queue: max は待機中の run を cancel せずに保持するだけで、
+  # 実行順は保証されない（GitHub Docs: "ordering is not guaranteed"）。apply → deploy の順序は運用で守る
+  # （apply の run が success で完了してから deploy を起動する。ADR-0042 / docs/runbooks/apply-task-definition-config-change.md）。
+  group: mutation-staging
+  queue: max
 
 jobs:
   deploy:
@@ -27,6 +34,8 @@ jobs:
       environment: staging
       ecr_repository: ticket-c2c-staging-frontend
       ecs_cluster: ticket-c2c-staging
+      # task definition のコピー元（terraform が最後の apply で登録した revision）を読む state（ADR-0042）。
+      terraform_dir: terraform/environments/staging
       ecs_services: "ticket-c2c-staging-frontend"
       docker_context: "frontend"
       image_tag: ${{ inputs.image_tag }}

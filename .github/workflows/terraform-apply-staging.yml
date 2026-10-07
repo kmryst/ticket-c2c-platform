@@ -19,13 +19,25 @@ on:
         type: choice
         options: [https-dns, alb-http-only]
         default: https-dns
+      task_config_check_value:
+        description: "AWS での確認用に api / worker / frontend の task definition へ入れる環境変数 TASK_CONFIG_CHECK_VALUE の値（アプリは読まない。空なら入れない。Issue #544 / ADR-0042）"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write
   contents: read
 
 concurrency:
-  group: terraform-staging
+  # staging を変更する workflow（terraform apply / destroy、backend / frontend deploy、DB migration、
+  # Ticket Type readiness / cutover）を 1 つの group で直列化する（Issue #544 / ADR-0042）。
+  # deploy は terraform が最後の apply で登録した task definition を state から読むため、apply と並行させない。
+  # concurrency は排他制御のためだけに使う。queue: max は待機中の run を cancel せずに保持するだけで、
+  # 実行順は保証されない（GitHub Docs: "ordering is not guaranteed"）。apply → deploy の順序は運用で守る
+  # （apply の run が success で完了してから deploy を起動する。ADR-0042 / docs/runbooks/apply-task-definition-config-change.md）。
+  group: mutation-staging
+  queue: max
 
 jobs:
   apply:
@@ -37,6 +49,7 @@ jobs:
     env:
       TF_VAR_capacity_profile: ${{ inputs.capacity_profile }}
       TF_VAR_public_endpoint_mode: ${{ inputs.public_endpoint_mode }}
+      TF_VAR_task_config_check_value: ${{ inputs.task_config_check_value }}
     steps:
       - uses: actions/checkout@v7
 

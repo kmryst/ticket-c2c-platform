@@ -523,12 +523,12 @@ runner が既に落ちている状況で無期限に待たないための意図�
 session 開始前に確認し、session 中は次を実行しない。
 
 - [ ] 同一環境の `terraform-apply-<env>` / `terraform-destroy-<env>` を起動しない。
-      **これらは別の concurrency group（`terraform-<env>`）のため機械排他されない**
-      （恒久解の受け皿は #419）。
+      cutover と同じ concurrency group（`mutation-<env>`。Issue #544 / ADR-0042）のため同時には実行されないが、
+      `queue: max` でも実行順は保証されず、session の step の間（preflight と activation の間など）に割り込み得る
+      （fresh session の guard の受け皿は #419）。
 - [ ] `db-migrate-<env>` を起動しない。
-- [ ] `deploy-backend-<env>`（`run_migrations=true` を含む）を起動しない。同一 concurrency group
-      （`backend-database-operation-<env>`）による直列化は「同時実行の防止」であって
-      「順序の保証」ではない。
+- [ ] `deploy-backend-<env>` / `deploy-frontend-<env>`（`run_migrations=true` を含む）を起動しない。同一 concurrency group
+      （`mutation-<env>`）による直列化は「同時実行の防止」であって「順序の保証」ではない。
 - [ ] smoke workflow を 4 章 step 9 / 5 章 step 5 以外で dispatch しない（smoke は独立 group）。
 - [ ] PoC script 等、共有 writer barrier を取得しない直接 SQL writer を実行しない。
 - [ ] seed（`seed-ticket-type` / `seed-legacy`）を active 側 namespace に対して実行しない

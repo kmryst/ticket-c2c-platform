@@ -56,10 +56,14 @@ permissions:
   contents: read
 
 concurrency:
-  # backend rollout、DB migration、Gate A readiness、Gate B cutoverを同一環境で直列化する。
-  # terraform-apply / terraform-destroy は別 group（terraform-<env>）のため機械排他されない。
-  # 同時起動しないことは runbook の禁止操作チェックリストで担保する（#419 が恒久解の受け皿）。
-  group: backend-database-operation-dev
+  # dev を変更する workflow（terraform apply / destroy、backend / frontend deploy、DB migration、
+  # Ticket Type readiness / cutover）を 1 つの group で直列化する（Issue #544 / ADR-0042）。
+  # deploy は terraform が最後の apply で登録した task definition を state から読むため、apply と並行させない。
+  # concurrency は排他制御のためだけに使う。queue: max は待機中の run を cancel せずに保持するだけで、
+  # 実行順は保証されない（GitHub Docs: "ordering is not guaranteed"）。apply → deploy の順序は運用で守る
+  # （apply の run が success で完了してから deploy を起動する。ADR-0042 / docs/runbooks/apply-task-definition-config-change.md）。
+  group: mutation-dev
+  queue: max
 
 jobs:
   cutover:
