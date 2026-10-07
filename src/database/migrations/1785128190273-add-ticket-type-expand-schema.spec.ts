@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Client } from 'pg';
 import { DataSource, MigrationInterface, QueryRunner } from 'typeorm';
+import { dropDatabaseWhenIdle } from '../../testing/drop-database-when-idle';
 import {
   checkTicketTypeExpandReadiness,
   hasTicketTypeExpandViolations,
@@ -130,9 +131,9 @@ describeWithPostgres(
         if (dataSource.isInitialized) {
           await dataSource.destroy();
         }
-        await adminClient.query(
-          `DROP DATABASE ${quotedDatabaseName} WITH (FORCE)`,
-        );
+        // DataSource の session が server 側で 0 になってから FORCE なしで DROP する
+        // （他の一時 DB spec と同じ方式。#534）。
+        await dropDatabaseWhenIdle(adminClient, databaseName);
       }
     }
 

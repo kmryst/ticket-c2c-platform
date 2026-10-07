@@ -16,6 +16,7 @@ import { Client as OpenSearchClient } from '@opensearch-project/opensearch';
 import Redis from 'ioredis';
 import { Client, Pool } from 'pg';
 import { DataSource } from 'typeorm';
+import { dropDatabaseWhenIdle } from '../testing/drop-database-when-idle';
 import {
   eventCounterKey,
   ticketTypeCounterKey,
@@ -278,7 +279,7 @@ describeIntegration(
         if (dataSource.isInitialized) await dataSource.destroy();
       });
       await runCleanupStep(cleanupErrors, () =>
-        dropDatabaseWhenIdle(adminClient, databaseName, quotedName),
+        dropDatabaseWhenIdle(adminClient, databaseName),
       );
 
       if (!outcome.ok) {
@@ -845,41 +846,4 @@ async function runCleanupStep(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// #394 の決定的な一時 DB cleanup（session 0 を待ってから plain DROP）を踏襲する。
-async function dropDatabaseWhenIdle(
-  adminClient: Client,
-  databaseName: string,
-  quotedName: string,
-): Promise<void> {
-  const deadlineMs = 5_000;
-  const intervalMs = 50;
-  const startedAt = Date.now();
-
-  for (;;) {
-    const { rows } = await adminClient.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1`,
-      [databaseName],
-    );
-    if (rows[0].n === 0) break;
-    if (Date.now() - startedAt >= deadlineMs) {
-      const diagnostics = await adminClient.query(
-        `SELECT pid, state, wait_event_type, wait_event, left(query, 120) AS query
-           FROM pg_stat_activity WHERE datname = $1`,
-        [databaseName],
-      );
-      try {
-        await adminClient.query(`DROP DATABASE ${quotedName} WITH (FORCE)`);
-      } catch {
-        // best-effort。
-      }
-      throw new Error(
-        `一時 DB ${databaseName} の残存 session が ${deadlineMs}ms 以内に 0 になりませんでした: ${JSON.stringify(diagnostics.rows)}`,
-      );
-    }
-    await delay(intervalMs);
-  }
-
-  await adminClient.query(`DROP DATABASE ${quotedName}`);
 }
