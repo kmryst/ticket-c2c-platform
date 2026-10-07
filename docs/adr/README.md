@@ -109,3 +109,4 @@ YYYY-MM-DD
 | [0036](./0036-expiring-npm-audit-exception-for-braces.md) | braces の advisory を Dependency Audit の期限付き例外にする | Accepted |
 | [0037](./0037-keep-backend-commonjs-and-load-esm-nestjs-via-require-esm.md) | NestJS 12 系への移行で backend を CommonJS のまま維持し、ES Module の `@nestjs/*` を `require(esm)` で読み込む | Accepted |
 | [0038](./0038-remove-environment-required-reviewers-except-bootstrap.md) | GitHub Environment の required reviewer を bootstrap 以外で外す | Accepted |
+| [0039](./0039-run-search-index-migration-and-verify-ecs-rollout-in-deploy.md) | backend deploy で search index migration を毎回実行し、成功判定を全サービスの rollout 完了で行う | Accepted |

@@ -82,6 +82,7 @@ migration ステップ（`search-index-migrate` CLI）として扱う（PostgreS
 ため、Worker の起動処理は index の存在確認だけを行い、存在しなければ throw して message
 consumption を開始しない（dynamic mapping での index 自動作成もさせない）。AWS deploy
 pipeline への CLI 自動組み込みは別 Issue で扱う（runbook 参照）。
+（追記: Issue #538 で deploy-backend workflow へ組み込んだ。[ADR-0039](./0039-run-search-index-migration-and-verify-ecs-rollout-in-deploy.md)）
 
 version 比較は Node.js 側の read→compare→write ではなく、OpenSearch 側の Painless scripted
 update（単一 atomic update）で行う。script へ ID や値を文字列連結せず、すべて params で渡す。

@@ -18,8 +18,12 @@
 #   - seed-legacy:           cutover:valkey --namespace legacy      --mode seed
 #   - reconcile-ticket-type: cutover:valkey --namespace ticket-type --mode reconcile
 #   - reconcile-legacy:      cutover:valkey --namespace legacy      --mode reconcile
-#   operation（**workflow からは起動できない**。runbook 手順から手動実行する。kind = projection）:
-#   - search-index-migrate:  search-index:migrate（OpenSearch events index の mapping migration）
+#   operation（**cutover workflow からは起動できない**。runbook 手順から手動実行する。kind = projection）:
+#   - search-index-migrate:  search-index:migrate（OpenSearch events index の mapping migration）。
+#                            通常の適用は deploy-backend-<env>.yml が毎回自動で行う（deploy-service.yml が
+#                            run-db-migration.sh の search-index-migration mode で実行する。Issue #538 /
+#                            ADR-0039）。この operation は Gate B の positive 確認と、deploy で失敗した後の
+#                            単独再実行に使う。
 #   - projection-rebuild:    projection:rebuild   --page-size 200 --bulk-size 200
 #   - projection-reconcile:  projection:reconcile --page-size 200
 #   引数はすべて必須（既定値を持たせない）。方向・対象は operation 名に固定し、
@@ -35,6 +39,8 @@
 # **この script の operation allowlist にだけ** counter / projection operation を追加してある。
 # 起動経路は docs/runbooks/gate-b-ticket-type-cutover.md および
 # docs/runbooks/search-projection-reconciliation-rebuild.md の該当 step（手動実行）だけである。
+# （search-index-migrate CLI 自体は deploy でも実行されるが、それはこの script ではなく
+# run-db-migration.sh を通る。この script の allowlist の起動経路は上記の手動実行だけである。）
 #
 # projection operation を足した理由（Codex High-2）:
 # staging / dev の OpenSearch は VPC 内・SigV4 署名必須のため、operator 端末から

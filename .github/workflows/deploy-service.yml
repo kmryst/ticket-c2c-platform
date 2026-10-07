@@ -3,7 +3,10 @@
 # デプロイ対象（ECR リポジトリ・ECS サービス群・Docker build context）と
 # GitHub Environment 名を input で受け取る。backend（api + worker）/ frontend の
 # どちらか一方だけをビルド・デプロイする（L-11: デプロイとロールバックの独立性）。
-# 実行できる branch の制限は、呼び出し側が指定する GitHub Environment の protection で行う。
+# 実行できる branch の制限は、呼び出し側が指定する GitHub Environment の branch restriction
+# （main のみ）で行う。dev / staging の Environment に required reviewer は置かない（ADR-0038）。
+# backend は DB migration（任意）→ search index migration（毎回）→ サービス更新 → rollout 確認の順に
+# 進み、どこかで失敗したら以降の step を実行しない（Issue #538 / ADR-0039）。
 # concurrency group は呼び出し側 workflow で定義する（deploy-backend-dev など）。
 name: deploy-service
 
@@ -11,7 +14,7 @@ on:
   workflow_call:
     inputs:
       environment:
-        description: "デプロイ承認に使う GitHub Environment 名（dev / staging）"
+        description: "apply ロールを引き受ける GitHub Environment 名（dev / staging）。branch restriction（main のみ）で実行元を制限する。required reviewer は置かない（ADR-0038）"
         required: true
         type: string
       ecr_repository:
@@ -31,7 +34,7 @@ on:
         required: true
         type: string
       api_service:
-        description: "DB migration の run-task に使う API サービス名（run_migrations を使う backend のみ指定）"
+        description: "DB migration / search index migration の run-task に使う API サービス名（backend のみ指定）"
         required: false
         type: string
         default: ""
@@ -42,6 +45,11 @@ on:
         default: ""
       run_migrations:
         description: "サービス更新前に DB migration を実行する（スキーマ変更を含むリリース時。migration 失敗時はデプロイを中断）"
+        required: false
+        type: boolean
+        default: false
+      run_search_index_migration:
+        description: "サービス更新前に OpenSearch の events index を作成・mapping を additive に適用する（backend のみ true。冪等。失敗時はデプロイを中断。ADR-0039）"
         required: false
         type: boolean
         default: false
@@ -175,6 +183,20 @@ jobs:
           ./scripts/deployment/run-db-migration.sh "$ECS_CLUSTER" "${{ inputs.api_service }}" \
             "${{ steps.td.outputs.td_api }}" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # OpenSearch の events index を作成する、または既存 index に mapping を additive に適用する
+      # （Issue #538 / ADR-0039）。worker は起動時に index の存在だけを確認し、無ければ
+      # EventsIndexMissingError で exit 1 する（#396）。新しい worker を起動する前に毎回実行し、
+      # 新しい環境（OpenSearch が空）でも worker が起動できるようにする。
+      # search-index-migrate CLI は冪等（index が無ければ作成、あれば putMapping）なので毎回実行してよい。
+      # DB migration と同じく新イメージの API タスク定義（command override）で ECS run-task から実行する。
+      # 失敗した場合はこの step が失敗し、後続の Update services は実行されない（サービスは旧タスクのまま）。
+      - name: Run search index migration (before service update)
+        if: inputs.run_search_index_migration && steps.svc.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          ./scripts/deployment/run-db-migration.sh "$ECS_CLUSTER" "${{ inputs.api_service }}" \
+            "${{ steps.td.outputs.td_api }}" search-index-migration | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Update services
         if: steps.svc.outputs.deploy == 'true'
         run: |
@@ -186,10 +208,14 @@ jobs:
             echo "updated $SVC -> ${NEW_TD##*/}" >> "$GITHUB_STEP_SUMMARY"
           done < td-map.txt
 
-      - name: Wait for services stable
+      # 成功判定（Issue #538 / ADR-0039）。`aws ecs wait services-stable` は deployments 件数と
+      # runningCount をその時点の観測だけで判定し、rolloutState と circuit breaker の結果を見ないため、
+      # 起動直後に落ちる worker でも success になっていた。対象サービスすべてについて、PRIMARY
+      # deployment が今回の task definition であること・rolloutState=COMPLETED・circuit breaker の
+      # FAILED / rollback が無いこと・running が desired と一致することを、連続した poll で確認する。
+      - name: Wait for ECS rollout completed
         if: steps.svc.outputs.deploy == 'true'
+        shell: bash
         run: |
-          aws ecs wait services-stable \
-            --cluster "$ECS_CLUSTER" \
-            --services $ECS_SERVICES
-          echo "services stable" >> "$GITHUB_STEP_SUMMARY"
+          ./scripts/deployment/wait-ecs-rollout.sh "$ECS_CLUSTER" td-map.txt
+          echo "ECS rollout completed: $ECS_SERVICES" >> "$GITHUB_STEP_SUMMARY"

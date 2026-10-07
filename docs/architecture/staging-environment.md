@@ -156,7 +156,8 @@ curl -i "http://$(terraform output -raw alb_dns_name)/healthz"
 curl -i "http://$(terraform output -raw alb_dns_name)/readyz"
 
 # 4. API を実際に叩いて検証する場合は deploy-backend-staging.yml で ECS を最新イメージに更新する
-#    （terraform apply 直後はブートストラップ用 image_tag のまま）
+#    （terraform apply 直後はブートストラップ用 image_tag のまま）。OpenSearch の events index も
+#    この deploy で作られるため、apply 直後から最初の backend deploy までは worker が起動に失敗する
 
 # 5. 検証後は必ず destroy する。apply と同じ -var を渡す
 #    （CI の terraform-destroy-staging.yml は変数既定値 https-dns で plan を組むため、
@@ -231,6 +232,21 @@ terraform state list   # 空であること
 - migration runner は PostgreSQL advisory lock で直列化されており、誤って多重起動しても DDL は競合しない。
 - スキーマ変更では `npm run migration:create -- src/database/migrations/<PascalCase名>` で migration を追加し、`src/database/data-source.ts` の `migrations` 配列とローカル PoC の正本 `database/schema.sql` を同じ PR で同期更新する。baseline migration は編集しない。
 
+### OpenSearch の search index migration（Issue #538）
+
+worker は起動時に OpenSearch の `events` index の存在だけを確認し、無ければ `EventsIndexMissingError` で exit 1 する（#396）。index の作成と mapping の additive な適用は `search-index-migrate` CLI が行う。
+
+- `deploy-backend-*.yml` は、DB migration（`run_migrations=true` の時のみ）の後・サービス更新の前に、毎回 `search-index-migrate` を ECS run-task（新イメージの API タスク定義 + command override。DB migration と同じ `scripts/deployment/run-db-migration.sh`）で実行する。新しく立てた環境（OpenSearch が空）でも、最初の backend deploy で index が作られてから worker が起動する。
+- CLI は冪等である。index が無ければ完全な mapping で作成し、あれば `putMapping` で additive に適用する。既存 document は変わらない。
+- 失敗した場合（mapping の `ticket_types` が `object` になっているなど）は deploy が止まり、サービスは更新されない。復旧は [projection runbook](../runbooks/search-projection-reconciliation-rebuild.md) に従う。
+- 手動で index を作ってから再 deploy する回避策（2026-10-07 の staging で実施）は不要になった。
+
+### deploy の成功判定（Issue #538）
+
+`deploy-service.yml` は `aws ecs wait services-stable` を使わず、`scripts/deployment/wait-ecs-rollout.sh` で対象サービスすべて（backend は api と worker）の rollout を確認する。PRIMARY deployment が今回 register した task definition であること、`rolloutState=COMPLETED`、deployment circuit breaker による FAILED / rollback が無いこと、running が desired と一致することが、連続 3 回の poll（15 秒間隔）で成り立てば成功とする。FAILED / rollback を検出した時点で失敗、約 20 分で完了しなければタイムアウトで失敗する。
+
+`services-stable` はその時点の deployments 件数と runningCount だけで判定するため、起動直後に落ちる worker でも success になっていた（2026-10-07 の staging では deploy が success で終わった後に worker の deployment が FAILED になった）。
+
 ## GitHub Actions
 
 dev と staging は workflow を分ける。dev workflow に `normal` / `full` の選択肢を出さないため。
@@ -240,13 +256,13 @@ dev と staging は workflow を分ける。dev workflow に `normal` / `full` �
 | workflow | 目的 | 入力 | Environment | 備考 |
 | --- | --- | --- | --- | --- |
 | `terraform-plan.yml` | PR ごとの plan | なし | なし | 既存 workflow。matrix `[bootstrap, dev, staging]` で staging root の plan は既に対応済み。分割対象外 |
-| `terraform-apply-bootstrap.yml` | bootstrap apply | なし | なし | 既存 `terraform-apply.yml` の bootstrap 分を切り出す |
+| `terraform-apply-bootstrap.yml` | bootstrap apply | なし | `bootstrap` | 既存 `terraform-apply.yml` の bootstrap 分を切り出す |
 | `terraform-apply-dev.yml` | dev apply | なし、または軽い confirm のみ | `dev` | 既存 `terraform-apply.yml` の dev 分を切り出す。`environment` 選択入力は持たない |
 | `terraform-destroy-dev.yml` | dev destroy | `confirm=destroy-dev` | `dev-destroy` | destroy 後の残存リソース確認を追加する |
-| `deploy-backend-dev.yml` | dev backend deploy | `image_tag` 任意、`run_migrations` | `dev` | L-11（Issue #182）で `deploy-app-dev.yml` から分離。本体は reusable workflow `deploy-service.yml`（Issue #180） |
+| `deploy-backend-dev.yml` | dev backend deploy | `image_tag` 任意、`run_migrations` | `dev` | L-11（Issue #182）で `deploy-app-dev.yml` から分離。本体は reusable workflow `deploy-service.yml`（Issue #180）。サービス更新前に OpenSearch の search index migration を毎回実行し、成功判定は全サービスの rollout 完了で行う（Issue #538 / [ADR-0039](../adr/0039-run-search-index-migration-and-verify-ecs-rollout-in-deploy.md)） |
 | `deploy-frontend-dev.yml` | dev frontend deploy | `image_tag` 任意 | `dev` | 同上（frontend 側） |
 | `terraform-apply-staging.yml` | staging apply | `capacity_profile=normal \| full`、`public_endpoint_mode=https-dns \| alb-http-only` | `staging` | `terraform/environments/staging` を apply。`environment` 選択入力は持たず、staging 固有の `capacity_profile` のみ受け取る |
-| `deploy-backend-staging.yml` | staging backend deploy | `image_tag` 任意、`run_migrations` | `staging` | ECR / ECS 名は `ticket-c2c-staging` を使う |
+| `deploy-backend-staging.yml` | staging backend deploy | `image_tag` 任意、`run_migrations` | `staging` | ECR / ECS 名は `ticket-c2c-staging` を使う。search index migration と rollout 確認は dev と同じ |
 | `deploy-frontend-staging.yml` | staging frontend deploy | `image_tag` 任意 | `staging` | alb-http-only モード（frontend service 不在）ではサービス更新をスキップ |
 | `db-migrate-staging.yml` | staging DB migration（backend deployとは別に手動起動） | なし | `staging` | ECS run-task でTypeORM migrationsを適用し、backend rollout/readinessとの同時実行は共通concurrency groupで防ぐ（Issue #92）。dev用は`db-migrate-dev.yml` |
 | `staging-smoke-test.yml` | staging smoke / integration test | なし | `staging-readonly` | apply ロールを流用しない。staging state file の S3 read-only に限定した専用 IAM ロールで `terraform output` を取得し、以降の HTTP 検証は AWS credential を使わない |
@@ -282,7 +298,8 @@ staging は毎回 destroy する。自動 destroy ではなく、検証結果を
 
 ```text
 terraform-apply-staging.yml
-  -> deploy-backend-staging.yml（初回・スキーマ変更時は run_migrations=true）
+  -> deploy-backend-staging.yml（初回・スキーマ変更時は run_migrations=true。
+     OpenSearch の events index は毎回自動で作成・更新される）
   -> deploy-frontend-staging.yml（https-dns のみ）
   -> staging-smoke-test.yml
   -> 結果確認

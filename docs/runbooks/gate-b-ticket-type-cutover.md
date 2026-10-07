@@ -26,7 +26,7 @@ activation / rollback / postflight の実行順序、合格条件（数値）、
 | 在庫数量 | Aurora PostgreSQL（`ticket_inventory` / `ticket_type_inventory`） | 購入 API（compatibility writer） | Gate B 中に人手で UPDATE しない |
 | control state | Aurora `inventory_writer_control`（1 行） | switch CLI（ADR-0032）のみ | CLI は control row の 1 行 UPDATE 以外に何も書かない |
 | Valkey counter / revision | Aurora（前段フィルタなので再構築可能） | seed / reconcile CLI（`run-cutover-task.sh` の counter operation: `seed-ticket-type` / `seed-legacy` / `reconcile-ticket-type` / `reconcile-legacy`）と稼働中 writer のみ | `redis-cli` 手打ち禁止（counter と revision の対が壊れる）。cutover workflow の choice には載せない |
-| OpenSearch mapping | `EVENTS_INDEX_PROPERTIES`（コード） | `search-index:migrate`（`run-cutover-task.sh` の `search-index-migrate`）のみ | additive のみ。**新 Worker 起動前に適用する**（4 章冒頭） |
+| OpenSearch mapping | `EVENTS_INDEX_PROPERTIES`（コード） | `search-index:migrate` のみ（`deploy-backend-<env>.yml` が毎回自動実行。手動では `run-cutover-task.sh` の `search-index-migrate`） | additive のみ。**新 Worker 起動前に適用する**（4 章冒頭。deploy が自動で守る） |
 | OpenSearch projection | Aurora（projection なので再構築可能） | rebuild / repair CLI のみ（`run-cutover-task.sh` の `projection-rebuild` / `projection-reconcile`。repair は command override） | 逆同期しない。cutover workflow の choice には載せない |
 
 read path は writer mode に従う。`legacy` mode では Event 単位 counter（`inventory:<eventId>`）、
@@ -85,55 +85,29 @@ Gate B session に入った時点で mapping migration が終わっていない�
   として作る。OpenSearch は既存 field の型を変更できないため、以後の additive putMapping は
   恒久的に失敗し、**index の作り直しが必要になる**。
 
-したがって compatibility release は次の順序で行う（`ticket_types` を書き得る **Worker を起動する前に**
-mapping を適用し終える）。
+したがって compatibility release は、`ticket_types` を書き得る **Worker を起動する前に** mapping を
+適用し終える順序で行う。この順序は `deploy-backend-<env>.yml` が自動で守る（Issue #538 /
+[ADR-0039](../adr/0039-run-search-index-migration-and-verify-ecs-rollout-in-deploy.md)）。
+`deploy-service.yml` は新 image の task definition を register した後、DB migration（`run_migrations=true`
+の時のみ）→ **search index migration（新 API task definition の ECS run-task）** → サービス更新の順に
+進み、search index migration が失敗したらサービスを更新しない。以前の手順にあった「Worker の
+desiredCount を 0 にしてから deploy し、手動で `search-index-migrate` を実行して Worker を戻す」操作は
+不要になった。
 
-1. **Worker service を停止側へ倒す**（新 Worker を起動させないため。desiredCount を控えてから 0 にする）。
-
-   ```bash
-   WORKER_DESIRED=$(aws ecs describe-services --cluster "$CLUSTER" \
-     --services "$WORKER_SERVICE" --query 'services[0].desiredCount' --output text)
-   echo "restore target desiredCount = ${WORKER_DESIRED}"   # 復帰用に控える
-   aws ecs update-service --cluster "$CLUSTER" --service "$WORKER_SERVICE" --desired-count 0
-   aws ecs wait services-stable --cluster "$CLUSTER" --services "$WORKER_SERVICE"
-   ```
-
-2. **`deploy-backend-<env>.yml` を実行する**（compatibility artifact をデプロイ）。
-   この workflow は API / Worker の task definition を新 image で register してから service を
-   更新するが、**register と update の間で止める入力を持たない**（`deploy-service.yml` の
-   `Register SHA-pinned task definitions` → `Update services` は同一 job 内で連続する）。
-   Worker の desiredCount を 0 にしておくことが、「新 Worker を起動させずに新 image の
-   task definition を得る」唯一の既存手段である。
-3. **新 API task definition で mapping migration を実行する**。この時点で Worker task は 0 件なので、
-   `ticket_types` を書く経路は存在しない（API は events index を読むだけで書かない）。
-
-   ```bash
-   TASK_DEFINITION_ARN=$(aws ecs describe-services --cluster "$CLUSTER" \
-     --services "$API_SERVICE" --query 'services[0].taskDefinition' --output text)
-
-   AWS_REGION=ap-northeast-1 \
-   CUTOVER_EVIDENCE_FILE="$(pwd)/projection-evidence-${ENV}.jsonl" \
-     ./scripts/deployment/run-cutover-task.sh \
-       "$CLUSTER" "$API_SERVICE" "$TASK_DEFINITION_ARN" search-index-migrate
-   echo "exit=$?"
-   ```
-
-4. **`ticket_types.type == nested` を positive に確認する**。
-   `search-index-migrate` の **exit 0 が型の positive 証拠**になる: この CLI は
-   `ticket_types: {type: nested}` の putMapping を送るので、既存 mapping が `object` に化けていれば
-   OpenSearch が `illegal_argument_exception`（`mapper [ticket_types] cannot be changed from type
-   [object] to [nested]`）で拒否し、CLI は exit 1 になる。**exit 1 なら release を止める**
-   （index の作り直しが必要。#377 へエスカレーションする）。
+1. **`deploy-backend-<env>.yml` を実行する**（compatibility artifact をデプロイ）。
+2. **step `Run search index migration (before service update)` が成功したことを確認する**。
+   step summary の task log に `{"index":"events","status":"ensured"}` と `exitCode=0` があること。
+   この CLI は `ticket_types: {type: nested}` の putMapping を送るので、既存 mapping が `object` に
+   化けていれば OpenSearch が `illegal_argument_exception` で拒否し、step が失敗する
+   （**exit 0 が型の positive 証拠**になる）。失敗した場合はサービスが更新されないので、
+   release を止める（index の作り直しが必要。#377 へエスカレーションする）。
    `aws opensearch` API は index の mapping を返さないため、この確認には使えない。
-5. **Worker service を復帰させ、rolling 完了を待つ**。
+3. **workflow が success で終わったことを確認する**。step `Wait for ECS rollout completed` は、
+   API / Worker の両方で PRIMARY deployment が新しい task definition・`rolloutState=COMPLETED`・
+   circuit breaker の FAILED / rollback なし・running と desired が一致、を確認してから成功する
+   （`scripts/deployment/wait-ecs-rollout.sh`）。
 
-   ```bash
-   aws ecs update-service --cluster "$CLUSTER" --service "$WORKER_SERVICE" \
-     --desired-count "$WORKER_DESIRED"
-   aws ecs wait services-stable --cluster "$CLUSTER" --services "$WORKER_SERVICE"
-   ```
-
-**Gate B session（下記 step 0 以降）は、この 5 手順が完了してから開始する。**
+**Gate B session（下記 step 0 以降）は、この 3 手順が完了してから開始する。**
 
 0. **session 開始時の禁止 workflow 空確認**
    - 実行: 7 章の禁止 workflow に queued / in_progress / waiting / pending / requested の run が
@@ -202,8 +176,8 @@ mapping を適用し終える）。
    - 合格条件: backlog 0 / oldest age 0。
    - 停止条件: 非 0 のまま収束しない場合は projection runbook の検出信号切り分けへ。
 4. **OpenSearch projection の rebuild / reconciliation**
-   - 前提: mapping migration は本章冒頭の release 手順で **新 Worker 起動前に**完了している。
-     この step では mapping を新規に適用しない（適用点はここではない）。
+   - 前提: mapping migration は本章冒頭の release 手順（backend deploy の自動実行）で
+     **新 Worker 起動前に**完了している。この step では mapping を新規に適用しない（適用点はここではない）。
    - 実行: 手順の意味づけは [projection runbook](./search-projection-reconciliation-rebuild.md) が
      正本。実行手段は `run-cutover-task.sh` の projection operation（VPC 内 OpenSearch へ
      operator 端末から直接接続できないため、CLI を素で叩かない）。
@@ -567,7 +541,7 @@ session 開始前に確認し、session 中は次を実行しない。
       **workflow 側で `required: true` と空文字 / `current` の拒否を機械強制している**が、
       手順としても毎回明示する。
 - [ ] Gate B session 中に `search-index-migrate` を「mapping の適用」目的で実行しない。
-      適用点は compatibility release（4 章冒頭）であり、session 中の実行は **positive 確認**
+      適用点は compatibility release の backend deploy（4 章冒頭）であり、session 中の実行は **positive 確認**
       としてのみ行う。exit 1 なら session を止める。
 - [ ] `redis-cli` で counter / revision を直接編集しない。
 - [ ] OpenSearch から PostgreSQL への逆同期を行わない。
