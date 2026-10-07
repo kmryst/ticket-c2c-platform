@@ -36,6 +36,8 @@ ADR-0031 は deploy pipeline への組み込みを別 Issue に送っていた�
 
    今回の ARN の deployment が `rolloutState=FAILED` になった時点、または PRIMARY が別の task definition に変わった時点（circuit breaker の rollback など）で失敗とする。80 回（約 20 分）で完了しなければタイムアウトで失敗とする。
 
+   追記（Issue #540）: ECS の API は結果整合で、update-service 直後の describe-services が更新前の deployment だけを返すことがある。1 回の応答では古い読み取りと rollback の完了を区別できないため、今回の ARN の deployment をまだ一度も観測していない間は失敗にせず待つ。8 回（約 2 分）観測できなければ失敗とする。一度観測した後にその deployment が消えた場合は、rollback の完了として即失敗とする。
+
 ## 根拠
 
 - `search-index-migrate` は冪等である。`ensureEventsIndex` は index が無ければ完全な mapping で作成し、あれば `putMapping` で additive に適用する。実 OpenSearch 2.19 に 2 回続けて実行し、2 回目も exit 0 で mapping と document が変わらないことを確認した（`scripts/deployment/search-index-migrate.integration.sh`。PR の CI でも実行する）。毎回実行しても副作用はない。

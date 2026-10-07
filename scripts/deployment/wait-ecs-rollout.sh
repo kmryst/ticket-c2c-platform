@@ -11,6 +11,8 @@
 #   ECS_ROLLOUT_POLL_INTERVAL_SECONDS   poll 間隔（既定 15）
 #   ECS_ROLLOUT_MAX_POLLS               poll 回数の上限（既定 80 = 約 20 分）
 #   ECS_ROLLOUT_REQUIRED_STABLE_POLLS   成功条件が連続で成り立つ必要がある poll 回数（既定 3）
+#   ECS_ROLLOUT_MAX_UNOBSERVED_POLLS    今回の ARN の deployment を一度も観測できないまま許容する
+#                                       poll 回数（既定 8 = 約 2 分。Issue #540）
 #
 # exit code:
 #   0   = すべてのサービスで rollout が完了した
@@ -35,15 +37,23 @@
 #
 # 即時失敗（その時点で exit 1）:
 # - 今回の ARN の deployment の rolloutState が FAILED（circuit breaker が失敗と判定した）
-# - PRIMARY deployment の taskDefinition が今回の ARN でない（circuit breaker の rollback、または
-#   別の deploy による上書き）
+# - 今回の ARN の deployment があるのに PRIMARY が別の taskDefinition（circuit breaker の rollback 中、
+#   または別の deploy による上書き）
+# - 今回の ARN の deployment を一度観測した後に、その deployment が消えた（rollback の完了など）
 # - サービスが存在しない、または ACTIVE でない
+#
+# 今回の ARN の deployment をまだ一度も観測していない場合（Issue #540）:
+# ECS の API は結果整合なので、update-service 直後の describe-services が更新前の deployment だけを
+# 返すことがある。1 回の応答では「古い読み取り」と「rollback の完了」を区別できないため、この状態は
+# 即失敗にせず待つ。ECS_ROLLOUT_MAX_UNOBSERVED_POLLS 回を超えても観測できなければ exit 1 にする。
 #
 # 純関数（ecs_rollout_evaluate_service）は spec から source して検証できるよう、
 # main の実行は「直接実行されたときだけ」に限定する。
 
 # ecs_rollout_evaluate_service は describe-services の services[] 1 件と期待する task definition ARN
-# から、状態を 1 語で返す: completed / in_progress / failed / rolled_back / missing。
+# から、状態を 1 語で返す: completed / in_progress / failed / rolled_back / not_observed / missing。
+# not_observed は今回の ARN の deployment が deployments に無いこと（古い読み取りか rollback 完了か
+# はこの関数では判断しない。呼び出し側が「以前に観測したか」で判断する）。
 # 2 行目以降に判定に使った値を出力する（ログ用）。
 ecs_rollout_evaluate_service() {
 	local service_json=$1
@@ -57,7 +67,8 @@ ecs_rollout_evaluate_service() {
 			| ([$deployments[] | select(.status == "PRIMARY")][0]) as $primary
 			| ([$deployments[] | select(.taskDefinition == $td)][0]) as $target
 			| (
-				if $target != null and $target.rolloutState == "FAILED" then "failed"
+				if $target == null then "not_observed"
+				elif $target.rolloutState == "FAILED" then "failed"
 				elif $primary == null then "in_progress"
 				elif $primary.taskDefinition != $td then "rolled_back"
 				elif $primary.rolloutState == "FAILED" then "failed"
@@ -98,10 +109,13 @@ ecs_rollout_main() {
 	local interval="${ECS_ROLLOUT_POLL_INTERVAL_SECONDS:-15}"
 	local max_polls="${ECS_ROLLOUT_MAX_POLLS:-80}"
 	local required_stable="${ECS_ROLLOUT_REQUIRED_STABLE_POLLS:-3}"
+	local max_unobserved="${ECS_ROLLOUT_MAX_UNOBSERVED_POLLS:-8}"
 	local region="${AWS_REGION:-ap-northeast-1}"
 
 	local -a services=()
 	local -A expected=()
+	local -A observed=()
+	local -A unobserved_polls=()
 	local svc td
 	while read -r svc td; do
 		[[ -z ${svc:-} ]] && continue
@@ -111,13 +125,15 @@ ecs_rollout_main() {
 		fi
 		services+=("$svc")
 		expected[$svc]=$td
+		observed[$svc]=false
+		unobserved_polls[$svc]=0
 	done <"$map_file"
 	if ((${#services[@]} == 0)); then
 		echo "no service in ${map_file}" >&2
 		return 2
 	fi
 
-	echo "waiting for ECS rollout: cluster=${cluster} services=${services[*]} interval=${interval}s maxPolls=${max_polls} requiredStablePolls=${required_stable}"
+	echo "waiting for ECS rollout: cluster=${cluster} services=${services[*]} interval=${interval}s maxPolls=${max_polls} requiredStablePolls=${required_stable} maxUnobservedPolls=${max_unobserved}"
 
 	local poll stable=0 described service_json result state detail all_completed
 	for ((poll = 1; poll <= max_polls; poll++)); do
@@ -139,6 +155,9 @@ ecs_rollout_main() {
 			state=$(head -n 1 <<<"$result")
 			detail=$(tail -n +2 <<<"$result")
 			echo "poll ${poll}: ${svc} state=${state} ${detail}"
+			if [[ $state != "not_observed" && $state != "missing" ]]; then
+				observed[$svc]=true
+			fi
 			case "$state" in
 			completed) ;;
 			in_progress) all_completed=false ;;
@@ -146,6 +165,21 @@ ecs_rollout_main() {
 				echo "::error::ECS rollout failed for ${svc} (deployment circuit breaker marked it FAILED)" >&2
 				ecs_rollout_print_events "$service_json"
 				return 1
+				;;
+			not_observed)
+				if [[ ${observed[$svc]} == "true" ]]; then
+					echo "::error::ECS deployment for ${svc} on ${expected[$svc]##*/} disappeared after it was observed (rolled back or replaced)" >&2
+					ecs_rollout_print_events "$service_json"
+					return 1
+				fi
+				unobserved_polls[$svc]=$((${unobserved_polls[$svc]} + 1))
+				if ((${unobserved_polls[$svc]} > max_unobserved)); then
+					echo "::error::ECS deployment for ${svc} on ${expected[$svc]##*/} was not observed in ${max_unobserved} polls (update-service not applied, or already rolled back)" >&2
+					ecs_rollout_print_events "$service_json"
+					return 1
+				fi
+				echo "poll ${poll}: ${svc} deployment on ${expected[$svc]##*/} not observed yet (${unobserved_polls[$svc]}/${max_unobserved}); the response may be stale"
+				all_completed=false
 				;;
 			rolled_back)
 				echo "::error::ECS rollout for ${svc} is no longer on ${expected[$svc]##*/} (rolled back or replaced)" >&2
