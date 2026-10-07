@@ -85,7 +85,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
 # ---------- IAM ロール（canary の実行ロール） ----------
 # canary の Lambda 実体（cwsyn-<name>-*）が引き受けるロール。AWS 公式ドキュメント
 # （Required roles and permissions for canaries）が求める最小権限セットを、
-# このプロジェクトの他モジュール（scheduled-task 等）と同じ最小権限方針で
+# このプロジェクトの他の IAM ロール（ECS タスクロール等）と同じ最小権限方針で
 # リソース限定する。
 data "aws_iam_policy_document" "canary_assume" {
   statement {

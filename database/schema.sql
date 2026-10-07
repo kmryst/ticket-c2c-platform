@@ -85,6 +85,13 @@ CREATE INDEX IF NOT EXISTS refresh_tokens_family_idx ON refresh_tokens (family_i
 -- user_id はユーザー単位の調査・将来の「ログイン中セッション一覧」に使います。
 CREATE INDEX IF NOT EXISTS refresh_tokens_user_idx ON refresh_tokens (user_id);
 
+-- parent_token_id / replaced_by_token_id は自己参照 FK の参照する側の列です（Issue #542）。
+-- refresh token cleanup がファミリーの row を DELETE するとき、PostgreSQL は FK の確認として
+-- これらの列を検索するため、index が無いと削除 1 row ごとに全件走査になります。
+-- NULL の row は FK の確認で検索されないため、部分 index にしています。
+CREATE INDEX IF NOT EXISTS refresh_tokens_parent_token_idx ON refresh_tokens (parent_token_id) WHERE parent_token_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS refresh_tokens_replaced_by_token_idx ON refresh_tokens (replaced_by_token_id) WHERE replaced_by_token_id IS NOT NULL;
+
 -- events は販売対象になるイベントを表す table です。
 -- この PoC では購入対象としての event_id が主役ですが、後続の検索 PoC でも使えるよう最低限の属性を持ちます。
 CREATE TABLE IF NOT EXISTS events (

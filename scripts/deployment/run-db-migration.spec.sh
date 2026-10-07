@@ -138,7 +138,16 @@ expect_equal "migration startedBy" "db-migrate" "$(cat "${work_dir}/started-by.t
 # 4. migration 失敗 → exit 1（回帰）。
 run_case migration-failed migration 1 'migration error' 1
 
-# 5. 未知の mode → exit 2（run-task を呼ばない）。
+# 5. refresh-token-cleanup: 手動実行の CLI を command override で実行する（Issue #542）。
+run_case refresh-token-cleanup-ok refresh-token-cleanup 0 \
+	'refresh token cleanup completed: deleted 0 rows in 0 families (1 batches; retention: expired > 30 days ago, family-wise)' 0
+expect_equal "refresh-token-cleanup command" '["node","dist/src/database/cleanup-refresh-tokens.js"]' \
+	"$(jq -c '.containerOverrides[0].command' "${work_dir}/overrides.json")"
+expect_equal "refresh-token-cleanup startedBy" "refresh-token-cleanup" "$(cat "${work_dir}/started-by.txt")"
+grep -q "Refresh token cleanup completed successfully" "${work_dir}/refresh-token-cleanup-ok.stdout" ||
+	{ echo "FAIL refresh-token-cleanup-ok: success message missing" >&2; exit 1; }
+
+# 6. 未知の mode → exit 2（run-task を呼ばない）。
 run_case unknown-mode search-index-migrate 0 '' 2
 if grep -q "run-task" "${work_dir}/calls.log" 2>/dev/null; then
 	echo "FAIL unknown-mode: run-task was called" >&2
