@@ -39,7 +39,7 @@ Issue #336 の expand schema に、Issue #376 の PostgreSQL compatibility write
 
 ### `refresh_tokens`
 
-生 token は保存せず、SHA-256 hash、`family_id`、親子関係、使用・失効時刻、調査用 IP / User-Agent を保存する。`token_hash` は一意、`family_id` と `user_id` は検索 index を持つ。
+生 token は保存せず、SHA-256 hash、`family_id`、親子関係、使用・失効時刻、調査用 IP / User-Agent を保存する。`token_hash` は一意、`family_id` と `user_id` は検索 index を持つ。自己参照 FK の参照する側の列（`parent_token_id` / `replaced_by_token_id`）は、期限切れファミリーの削除で FK の確認が全件走査にならないよう、`IS NOT NULL` の部分 index を持つ（Issue #542）。
 
 ### `events`
 

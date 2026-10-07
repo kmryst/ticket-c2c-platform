@@ -25,6 +25,9 @@ import { PurchasesController } from './purchases/purchases.controller';
 import { PurchasesService } from './purchases/purchases.service';
 // TicketTypeResolverModule は Ticket Type 単位前段フィルタの scope 解決 service を提供します（Issue #389）。
 import { TicketTypeResolverModule } from './purchases/ticket-type-resolver.module';
+// RefreshTokenCleanupModule は refresh_tokens 期限切れクリーンアップの日次実行を登録します
+// （Issue #542 / ADR-0041。複数タスク間の多重実行は PostgreSQL の advisory lock で防ぎます）。
+import { RefreshTokenCleanupModule } from './database/refresh-token-cleanup.module';
 
 // AppModule はこの API のルートモジュールです。
 // ここを見ると「どの controller と service がアプリに登録されているか」が分かります。
@@ -38,6 +41,7 @@ import { TicketTypeResolverModule } from './purchases/ticket-type-resolver.modul
     TicketTypeResolverModule,
     EventsModule,
     AuthModule,
+    RefreshTokenCleanupModule,
   ],
   // controllers には、HTTP リクエストを受ける入口クラスを登録します。
   controllers: [HealthController, PurchasesController],

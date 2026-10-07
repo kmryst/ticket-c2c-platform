@@ -1,38 +1,23 @@
 // ファイル概要:
-// このファイルは refresh_tokens 期限切れクリーンアップの実行入口です（L-9 残課題、Issue #195）。
-// API の boot path からは呼ばれず、次の経路からだけ実行します:
-// - AWS: EventBridge Scheduler（日次）→ ECS RunTask の command override:
+// このファイルは refresh_tokens 期限切れクリーンアップの手動実行の入口です（L-9 残課題、Issue #195）。
+// 日次の実行は api プロセス内の定期実行（refresh-token-cleanup.service.ts、Issue #542 / ADR-0041）が行い、
+// この入口は定期実行が失敗し続けたときの再実行など、運用者が手動で 1 回だけ実行する経路として残します。
+// - AWS: ECS run-task の command override で、稼働中の api の task definition から起動する:
 //   node dist/src/database/cleanup-refresh-tokens.js
-//   （run-db-migration.sh と同じ「既存 API イメージ・別コマンド」パターン。terraform/modules/scheduled-task）
 // - ローカル検証: ts-node src/database/cleanup-refresh-tokens.ts
+// api の定期実行と同じ advisory lock を取るため、api の実行と重なっても削除は 1 か所でしか走りません
+// （lock を取れなければ何もせず終わります）。
 // 短命プロセスのため、DB パスワードは静的注入の DB_PASSWORD（buildDatabaseUrl）で足ります
 // （run-migrations.ts と同じ判断。ローテーション追従は不要）。
 //
 // 出力は標準出力のみで、CloudWatch Logs（API タスクのロググループ）へそのまま流れます。
-// 新規アラーム等は追加しません（失敗時は非 0 exit で ECS タスクが failed になり、ログから追えます）。
+// 失敗時は非 0 exit で ECS タスクが failed になり、ログから追えます。
 
 import 'dotenv/config';
 import { Client } from 'pg';
 import { buildDatabaseUrl, getDatabaseSslConfig } from '../config';
-import {
-  cleanupExpiredRefreshTokenFamilies,
-  DEFAULT_RETENTION_DAYS,
-} from './refresh-token-cleanup';
-
-// resolveRetentionDays は猶予日数を環境変数から読みます（未設定なら既定 30 日）。
-function resolveRetentionDays(): number {
-  const raw = process.env.REFRESH_TOKEN_RETENTION_DAYS;
-  if (raw === undefined || raw === '') {
-    return DEFAULT_RETENTION_DAYS;
-  }
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new Error(
-      `REFRESH_TOKEN_RETENTION_DAYS must be a non-negative integer, got: ${raw}`,
-    );
-  }
-  return parsed;
-}
+import { runRefreshTokenCleanupWithLock } from './refresh-token-cleanup';
+import { resolveRetentionDays } from './refresh-token-cleanup.config';
 
 async function main(): Promise<void> {
   const retentionDays = resolveRetentionDays();
@@ -44,15 +29,23 @@ async function main(): Promise<void> {
 
   await client.connect();
   try {
-    const deleted = await cleanupExpiredRefreshTokenFamilies(
-      client,
+    const result = await runRefreshTokenCleanupWithLock(client, {
       retentionDays,
-    );
+    });
+    if (result.status === 'skipped') {
+      console.log(
+        'refresh token cleanup skipped: another process holds the advisory lock',
+      );
+      return;
+    }
     // 運用時はこの 1 行を CloudWatch Logs で確認します。
     console.log(
-      `refresh token cleanup completed: deleted ${deleted} rows (retention: expired > ${retentionDays} days ago, family-wise)`,
+      `refresh token cleanup completed: deleted ${result.deletedRows} rows in ${result.deletedFamilies} families` +
+        ` (${result.batches} batches${result.reachedMaxBatches ? ', reached max batches; run again to continue' : ''};` +
+        ` retention: expired > ${retentionDays} days ago, family-wise)`,
     );
   } finally {
+    // 接続を閉じると session も終わり、advisory lock は必ず解放されます。
     await client.end();
   }
 }

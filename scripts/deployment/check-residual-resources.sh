@@ -53,8 +53,10 @@ report "ElastiCache replication group" "$(aws elasticache describe-replication-g
 report "OpenSearch domain" "$(aws opensearch list-domain-names --region "$region" \
 	--query "DomainNames[?starts_with(DomainName, '${prefix}')].DomainName" --output text)"
 
-# EventBridge Scheduler schedule（L-9 残課題 / Issue #195。課金は起動時のみだが、
+# EventBridge Scheduler schedule（L-9 残課題 / Issue #195 の refresh token cleanup 用。課金は起動時のみだが、
 # destroy 漏れがあれば孤立した ECS RunTask 定期実行が残り続けるため検出対象にする）。
+# Issue #542 / ADR-0041 で cleanup は api 内の定期実行へ移り、Terraform は schedule を作らなくなった。
+# 撤去前に作った環境の state から消し漏れが出ないことを確認するため、確認は残す。
 report "EventBridge Scheduler schedule" "$(aws scheduler list-schedules --region "$region" \
 	--query "Schedules[?starts_with(Name, '${prefix}')].Name" --output text)"
 
