@@ -124,6 +124,7 @@ run_case() {
 		ECS_ROLLOUT_POLL_INTERVAL_SECONDS=0 \
 		ECS_ROLLOUT_MAX_POLLS="${MAX_POLLS:-6}" \
 		ECS_ROLLOUT_REQUIRED_STABLE_POLLS="${STABLE_POLLS:-3}" \
+		ECS_ROLLOUT_MAX_UNOBSERVED_POLLS="${UNOBSERVED_POLLS:-3}" \
 		bash "$script" ticket-c2c-staging "${work_dir}/td-map.txt" \
 		>"${work_dir}/${label}.stdout" 2>"${work_dir}/${label}.stderr" || actual=$?
 	if [[ $actual != "$expected" ]]; then
@@ -188,8 +189,28 @@ expect_polls services-stable-false-success 4
 run_case rolled-back 1 "$(response "$api_completed" "$worker_rolled_back")"
 expect_output rolled-back "rolled back or replaced"
 
-# 7. rollback 完了後（旧 task definition の deployment が COMPLETED）も成功にしない → 1。
-run_case rollback-completed 1 "$(response "$api_completed" "$worker_rollback_completed")"
+# 7. rollback 完了後（今回の deployment を観測した後に消え、旧 task definition が COMPLETED）も
+#    成功にしない → 即 1。
+run_case rollback-completed 1 \
+	"$(response "$api_completed" "$worker_in_progress")" \
+	"$(response "$api_completed" "$worker_rollback_completed")"
+expect_polls rollback-completed 2
+expect_output rollback-completed "disappeared after it was observed"
+
+# 7-a. update-service 直後の古い読み取り（Issue #540）: 最初の poll は更新前の PRIMARY（旧 task
+#      definition）だけが返り、その後に今回の deployment が見えて COMPLETED → 0。
+run_case stale-first-poll 0 \
+	"$(response "$api_completed" "$worker_rollback_completed")" \
+	"$(response "$api_completed" "$worker_rollback_completed")" \
+	"$(response "$api_completed" "$worker_in_progress")" \
+	"$(response "$api_completed" "$worker_completed")"
+expect_polls stale-first-poll 6
+expect_output stale-first-poll "not observed yet (1/3); the response may be stale"
+
+# 7-b. 今回の deployment を上限（3 poll）まで一度も観測できない → 4 poll 目で 1。
+MAX_POLLS=12 run_case never-observed 1 "$(response "$api_completed" "$worker_rollback_completed")"
+expect_polls never-observed 4
+expect_output never-observed "was not observed in 3 polls"
 
 # 8. 成功条件が途中で崩れたら連続回数を数え直す: COMPLETED 2 回 → IN_PROGRESS → COMPLETED 3 回 → 0（6 poll）。
 run_case stable-window-reset 0 \

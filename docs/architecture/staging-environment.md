@@ -243,7 +243,7 @@ worker は起動時に OpenSearch の `events` index の存在だけを確認し
 
 ### deploy の成功判定（Issue #538）
 
-`deploy-service.yml` は `aws ecs wait services-stable` を使わず、`scripts/deployment/wait-ecs-rollout.sh` で対象サービスすべて（backend は api と worker）の rollout を確認する。PRIMARY deployment が今回 register した task definition であること、`rolloutState=COMPLETED`、deployment circuit breaker による FAILED / rollback が無いこと、running が desired と一致することが、連続 3 回の poll（15 秒間隔）で成り立てば成功とする。FAILED / rollback を検出した時点で失敗、約 20 分で完了しなければタイムアウトで失敗する。
+`deploy-service.yml` は `aws ecs wait services-stable` を使わず、`scripts/deployment/wait-ecs-rollout.sh` で対象サービスすべて（backend は api と worker）の rollout を確認する。PRIMARY deployment が今回 register した task definition であること、`rolloutState=COMPLETED`、deployment circuit breaker による FAILED / rollback が無いこと、running が desired と一致することが、連続 3 回の poll（15 秒間隔）で成り立てば成功とする。FAILED / rollback を検出した時点で失敗、約 20 分で完了しなければタイムアウトで失敗する。update-service 直後は ECS の API が更新前の deployment だけを返すことがあるため、今回の task definition の deployment をまだ一度も観測していない間は失敗にせず待ち、8 回（約 2 分）観測できなければ失敗する（Issue #540）。
 
 `services-stable` はその時点の deployments 件数と runningCount だけで判定するため、起動直後に落ちる worker でも success になっていた（2026-10-07 の staging では deploy が success で終わった後に worker の deployment が FAILED になった）。
 
