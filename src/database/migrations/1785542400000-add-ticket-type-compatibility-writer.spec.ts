@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Client, Pool } from 'pg';
 import { DataSource, MigrationInterface } from 'typeorm';
+import { dropDatabaseWhenIdle } from '../../testing/drop-database-when-idle';
 import { InventoryCacheService } from '../../cache/inventory-cache.service';
 import { DatabaseService } from '../database.service';
 import { DomainEventsService } from '../../messaging/domain-events.service';
@@ -90,7 +91,9 @@ describeWithPostgres(
         return await run(dataSource, databaseUrl.toString());
       } finally {
         if (dataSource.isInitialized) await dataSource.destroy();
-        await adminClient.query(`DROP DATABASE ${quotedName} WITH (FORCE)`);
+        // test が作った Pool / DataSource の session が server 側で 0 になってから
+        // FORCE なしで DROP する（WITH (FORCE) は残存 backend を強制終了し 57P01 を起こす。#534）。
+        await dropDatabaseWhenIdle(adminClient, databaseName);
       }
     }
 

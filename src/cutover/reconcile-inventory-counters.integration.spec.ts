@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
 import { Client, Pool } from 'pg';
 import { DataSource } from 'typeorm';
+import { dropDatabaseWhenIdle } from '../testing/drop-database-when-idle';
 import {
   eventCounterKey,
   eventCounterVersionKey,
@@ -290,7 +291,9 @@ describeIntegration(
         await flushInventoryCounterKeys();
         await pool.end();
         if (dataSource.isInitialized) await dataSource.destroy();
-        await adminClient.query(`DROP DATABASE ${quotedName} WITH (FORCE)`);
+        // Pool / DataSource の session が server 側で 0 になってから FORCE なしで DROP する
+        // （WITH (FORCE) は残存 backend を強制終了し 57P01 を起こす。#534）。
+        await dropDatabaseWhenIdle(adminClient, databaseName);
       }
     }
 

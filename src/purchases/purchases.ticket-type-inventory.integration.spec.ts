@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
 import { Client, Pool } from 'pg';
 import { DataSource } from 'typeorm';
+import { dropDatabaseWhenIdle } from '../testing/drop-database-when-idle';
 import { InventoryCacheService } from '../cache/inventory-cache.service';
 import { DatabaseService } from '../database/database.service';
 import { DomainEventsService } from '../messaging/domain-events.service';
@@ -268,7 +269,7 @@ describeWithPostgres(
       // 対象 DB の session が 0 になるのを待ってから FORCE なしで DROP するため、
       // reap 前の backend を強制切断して 57P01 を誘発することがない。
       await runCleanupStep(cleanupErrors, () =>
-        dropDatabaseWhenIdle(adminClient, databaseName, quotedName),
+        dropDatabaseWhenIdle(adminClient, databaseName),
       );
 
       if (!outcome.ok) {
@@ -506,12 +507,6 @@ describeWithPostgres(
   },
 );
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 // cleanup step を独立に試行し、失敗しても後続 step を止めずにエラーを収集する。
 async function runCleanupStep(
   errors: unknown[],
@@ -522,61 +517,6 @@ async function runCleanupStep(
   } catch (error) {
     errors.push(error);
   }
-}
-
-// Pool / DataSource を閉じた後、対象一時 DB の session がサーバ側で 0 になるのを
-// bounded deadline 付きで待ってから、FORCE なしで DROP DATABASE する。
-//
-// 57P01（terminating connection due to administrator command）は、client 側の
-// pool.end() / dataSource.destroy() が resolve しても server 側 backend の reap が
-// 非同期に遅れる window で DROP ... WITH (FORCE) が pg_terminate_backend を発火し、
-// まだ idle client として追跡されている接続へ強制切断を送ることで発生する。
-// session が 0 であることを確認してから plain DROP すれば、terminate 対象の backend が
-// 存在しないため 57P01 は原理的に発生しない。固定 sleep ではなく実 session 数を
-// 条件に即抜けする poll のため決定的。
-async function dropDatabaseWhenIdle(
-  adminClient: Client,
-  databaseName: string,
-  quotedName: string,
-): Promise<void> {
-  const deadlineMs = 5_000;
-  const intervalMs = 50;
-  const startedAt = Date.now();
-
-  for (;;) {
-    const { rows } = await adminClient.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1`,
-      [databaseName],
-    );
-    if (rows[0].n === 0) {
-      break;
-    }
-    if (Date.now() - startedAt >= deadlineMs) {
-      // deadline 超過。残存 session を診断可能にして明示的に fail させる。
-      // credential は connection string 側の情報であり query text には出ないため、
-      // pid / state / wait_event / query 先頭のみを出力する。
-      const diagnostics = await adminClient.query(
-        `SELECT pid, state, wait_event_type, wait_event, left(query, 120) AS query
-           FROM pg_stat_activity
-          WHERE datname = $1`,
-        [databaseName],
-      );
-      // 異常系に限り best-effort で FORCE DROP し、一時 DB を残さないよう試みてから fail する。
-      // FORCE はこの失敗パスだけに限定し、正常系（session 0 確認済み）の決定性には影響しない。
-      try {
-        await adminClient.query(`DROP DATABASE ${quotedName} WITH (FORCE)`);
-      } catch {
-        // best-effort。DROP 失敗も下記の残存 session 情報付きエラーで表面化する。
-      }
-      throw new Error(
-        `一時 DB ${databaseName} の残存 session が ${deadlineMs}ms 以内に 0 になりませんでした。` +
-          ` 残存 session: ${JSON.stringify(diagnostics.rows)}`,
-      );
-    }
-    await delay(intervalMs);
-  }
-
-  await adminClient.query(`DROP DATABASE ${quotedName}`);
 }
 
 async function switchWriterMode(
