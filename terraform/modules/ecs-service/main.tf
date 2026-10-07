@@ -121,9 +121,10 @@ resource "aws_ecs_service" "this" {
   # 差分を無視する。ignore_changes は作成時には効かないため、サービス作成時の初期 deployment は
   # pending-deploy を pull できずに FAILED になり、deploy の update-service まではアプリを起動しない
   # （Issue #543 / ADR-0040）。
-  # 注意: Terraform 側でタスク定義（環境変数・リソースサイズ等）を変更した場合、
-  # 新リビジョンは作られるがサービスには自動反映されない。apply 後に deploy-app workflow を
-  # 実行して反映する。
+  # Terraform 側でタスク定義の設定（環境変数・secrets・CPU / メモリ・role・sidecar 等）を変更した場合、
+  # apply は新リビジョンを登録するだけでサービスは更新しない。deploy workflow がそのリビジョン
+  # （環境 root の output ecs_task_definition_arns）のイメージだけを差し替えて register し、update-service する
+  # ことで反映される（Issue #544 / ADR-0042。手順は docs/runbooks/apply-task-definition-config-change.md）。
   lifecycle {
     ignore_changes = [task_definition]
   }

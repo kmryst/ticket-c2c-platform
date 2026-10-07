@@ -23,8 +23,13 @@ permissions:
   contents: read
 
 concurrency:
-  # backend rollout、DB migration、Gate A readinessを同一環境で直列化する。
-  group: backend-database-operation-dev
+  # dev を変更する workflow（terraform apply / destroy、backend / frontend deploy、DB migration、
+  # Ticket Type readiness / cutover）を 1 つの group で直列化する（Issue #544 / ADR-0042）。
+  # deploy は terraform が最後の apply で登録した task definition を state から読むため、apply と並行させない。
+  # 既定（queue: single）は待機中の run を 1 件しか持たず、後から起動した run が待機中の run を cancel する。
+  # queue: max で待機中の run を cancel せず起動順に実行する（pr-policy-check.yml / Issue #220 と同じ）。
+  group: mutation-dev
+  queue: max
 
 jobs:
   deploy:
@@ -33,6 +38,8 @@ jobs:
       environment: dev
       ecr_repository: ticket-c2c-dev
       ecs_cluster: ticket-c2c-dev
+      # task definition のコピー元（terraform が最後の apply で登録した revision）を読む state（ADR-0042）。
+      terraform_dir: terraform/environments/dev
       ecs_services: "ticket-c2c-dev-api ticket-c2c-dev-worker"
       docker_context: "."
       api_service: ticket-c2c-dev-api

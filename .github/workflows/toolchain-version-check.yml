@@ -5,7 +5,7 @@
 # このファイルはトリガー・permissions・concurrency のみを持つ薄い caller workflow
 #
 # 設計判断は本リポジトリの ADR-0034 と idp-golden-path ADR-0014 に記録している。
-# 本リポジトリは 9 workflow が `terraform_version` を 1 箇所ずつ直書きしており、
+# 本リポジトリは 11 workflow が `terraform_version` を 1 箇所ずつ直書きしており、
 # その値と .mise.toml の宣言の一致は、人間の目視ではなくこの check が保証する。
 #
 # `.mise.toml` が存在しないと skip ではなく fail する（idp-golden-path ADR-0014）。

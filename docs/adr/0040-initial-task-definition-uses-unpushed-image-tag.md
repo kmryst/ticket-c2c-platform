@@ -66,11 +66,11 @@ ADR-0039 への追記にはしない。ADR-0039 は「deploy の中で何をど�
 
 - **初期 `desired_count=0` と `ignore_changes = [desired_count]`。** staging full では `aws_appautoscaling_target`（RegisterScalableTarget）が現在の desired count を min〜max の範囲に変更するため（[RegisterScalableTarget](https://docs.aws.amazon.com/autoscaling/application/APIReference/API_RegisterScalableTarget.html)）、apply の時点で min=2 まで起動する。避けるには autoscaling の登録を deploy の後に回す必要があり、desired count の正本も terraform の外（deploy workflow）に出る。
 - **`:latest` の push を migration の後にずらすだけの案。** ECR に古い `latest` が残っている状態で service を作り直すと（destroy せずに service だけ replace する場合など）、apply の時点で古いイメージが起動する。初期 deployment を起動できない状態にしない限り、前後関係は保証されない。
-- **deploy を `terraform apply -var image_tag=<SHA>` で行う案。** root module が 1 つ（[ADR-0003](./0003-terraform-state-and-environment-isolation.md)）なので、deploy のたびに環境全体の apply になる。state 分割（#544）の後に検討する。
+- **deploy を `terraform apply -var image_tag=<SHA>` で行う案。** root module が 1 つ（[ADR-0003](./0003-terraform-state-and-environment-isolation.md)）なので、deploy のたびに環境全体の apply になる。state 分割の後に検討する（長期の別案。[ADR-0042](./0042-deploy-copies-terraform-registered-task-definition.md)）。
 
 ## 再検討のトリガー
 
-- state を分割し（#544）、ECS service を deploy と同じ単位で terraform から更新できるようになったとき。
+- state を分割し（ADR-0042 の再検討のトリガー）、ECS service を deploy と同じ単位で terraform から更新できるようになったとき。
 - 本番環境（prod）や、destroy せずに使い続ける環境を作るとき。初期 deployment の FAILED を監視・アラームがどう扱うかを決める。
 - blue/green（CodeDeploy）など、ECS の deployment controller を変えるとき。初期 deployment と circuit breaker の扱いが変わる。
 - ECS が、イメージを pull できない deployment の扱い（circuit breaker の判定や再試行）を変えたとき。

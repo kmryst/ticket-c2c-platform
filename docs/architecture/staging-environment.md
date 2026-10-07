@@ -134,7 +134,7 @@ Issue #232 で `alb-http-only` 時の ALB ingress `0.0.0.0/0` 全開放を廃止
 - staging の Environment protection は branch restriction（`main` のみ）だけで required reviewer を置かないため（[ADR-0038](../adr/0038-remove-environment-required-reviewers-except-bootstrap.md)）、CI 経由にしても実質的な追加の安全性はない。
 - 通常運用（https-dns + CloudFront prefix list 限定）の workflow を汚さない。
 
-手順（ローカルで AWS 認証済み・`terraform init` 済みであることが前提。S3 backend は CI と共有のため、`terraform-staging` concurrency group の CI が動いていないことを確認してから実行する）。
+手順（ローカルで AWS 認証済み・`terraform init` 済みであることが前提。S3 backend は CI と共有のため、`mutation-staging` concurrency group の CI が動いていないことを確認してから実行する）。
 
 ```bash
 # 1. 自分のグローバル IP を確認する
@@ -228,7 +228,7 @@ terraform state list   # 空であること
 
 - migration 本体: `src/database/migrations/`（baseline は 2026-07-04 時点の `database/schema.sql` スナップショット）。適用履歴は DB の `typeorm_migrations` table で管理する。
 - 実行経路は 2 つ。いずれも ECS run-task（API タスク定義 + command override）で private subnet 内から適用する:
-  - `db-migrate-dev.yml` / `db-migrate-staging.yml`: backend deploy とは別に手動起動する単発実行（検証時など）。API サービスの現行タスク定義を使うため、最初の backend deploy より前（タスク定義が `pending-deploy` を参照している間）は run-task の前に失敗する。新しい環境の初回 migration は `deploy-backend-*.yml` の `run_migrations=true` で行う（Issue #543）。同じ環境のbackend rollout、DB migration、Gate A readinessとは共通concurrency groupを使い、同時実行を防ぐ。
+  - `db-migrate-dev.yml` / `db-migrate-staging.yml`: backend deploy とは別に手動起動する単発実行（検証時など）。API サービスの現行タスク定義を使うため、最初の backend deploy より前（タスク定義が `pending-deploy` を参照している間）は run-task の前に失敗する。新しい環境の初回 migration は `deploy-backend-*.yml` の `run_migrations=true` で行う（Issue #543）。現行タスク定義の設定は最後の backend deploy の時点の terraform の設定なので、terraform で設定を変えた後の migration は `deploy-backend-*.yml` の `run_migrations=true` で行う（Issue #544）。同じ環境の terraform apply / destroy、deploy、Gate A readiness とは共通 concurrency group（`mutation-<env>`）を使い、同時実行を防ぐ。
   - `deploy-backend-*.yml` の `run_migrations` 入力: 新イメージのタスク定義 register 後・サービス更新前に migration を実行し、成功した場合のみデプロイへ進む（スキーマ変更を含むリリース用。migration 適用〜サービス更新完了までの間、旧タスクが新スキーマ上で動くため、migration は後方互換（expand-contract）で書く）。
 - migration runner は PostgreSQL advisory lock で直列化されており、誤って多重起動しても DDL は競合しない。
 - スキーマ変更では `npm run migration:create -- src/database/migrations/<PascalCase名>` で migration を追加し、`src/database/data-source.ts` の `migrations` 配列とローカル PoC の正本 `database/schema.sql` を同じ PR で同期更新する。baseline migration は編集しない。
@@ -247,6 +247,17 @@ worker は起動時に OpenSearch の `events` index の存在だけを確認し
 `deploy-service.yml` は `aws ecs wait services-stable` を使わず、`scripts/deployment/wait-ecs-rollout.sh` で対象サービスすべて（backend は api と worker）の rollout を確認する。PRIMARY deployment が今回 register した task definition であること、`rolloutState=COMPLETED`、deployment circuit breaker による FAILED / rollback が無いこと、running が desired と一致することが、連続 3 回の poll（15 秒間隔）で成り立てば成功とする。FAILED / rollback を検出した時点で失敗、約 20 分で完了しなければタイムアウトで失敗する。update-service 直後は ECS の API が更新前の deployment だけを返すことがあるため、今回の task definition の deployment をまだ一度も観測していない間は失敗にせず待ち、8 回（約 2 分）観測できなければ失敗する（Issue #540）。
 
 `services-stable` はその時点の deployments 件数と runningCount だけで判定するため、起動直後に落ちる worker でも success になっていた（2026-10-07 の staging では deploy が success で終わった後に worker の deployment が FAILED になった）。
+
+### task definition の設定とイメージの分担（Issue #544）
+
+task definition の設定（環境変数・secrets・CPU / メモリ・role・sidecar 等）は terraform、イメージは `deploy-service.yml` が受け持つ。判断の背景と不採用案は [ADR-0042](../adr/0042-deploy-copies-terraform-registered-task-definition.md) に記録した。
+
+- `deploy-service.yml` は terraform の state から output `ecs_task_definition_arns`（service 名 → terraform が最後の apply で登録した task definition の ARN。revision 番号まで含む）を読み、その revision の `containerDefinitions[0].image` だけを commit SHA タグに差し替えて register する。register した revision を DB migration / search index migration の run-task と update-service に使う。
+- service が今使っている revision や、family の最新 ACTIVE revision はコピー元にしない。
+- output が state に無い、service のキーが無い、ARN が revision 番号を含まない、その revision のイメージが `pending-deploy` でない（terraform が登録した revision でない）場合は、イメージの push・register・migration・update-service の前に失敗する。この output を足す前の state しかない環境では、先に `terraform-apply-<env>.yml` を実行する。
+- terraform で設定を変えたら、`terraform-apply-<env>.yml` → `deploy-backend-<env>.yml` / `deploy-frontend-<env>.yml` の順に実行して反映する。apply だけではサービスは変わらない（`ignore_changes = [task_definition]`）。
+- rollback（`image_tag` に過去の short SHA）は「過去のイメージ ＋ 現在の terraform の設定」になる。設定まで戻す手順と、AWS で反映を確認する手順は [runbook](../runbooks/apply-task-definition-config-change.md) にまとめた。
+- apply / destroy と deploy、DB 操作系の workflow は、環境ごとに 1 つの concurrency group（`mutation-<env>`、`queue: max`）で直列化する。
 
 ### terraform apply 直後の初期 deployment（Issue #543）
 
@@ -267,14 +278,14 @@ dev と staging は workflow を分ける。dev workflow に `normal` / `full` �
 | --- | --- | --- | --- | --- |
 | `terraform-plan.yml` | PR ごとの plan | なし | なし | 既存 workflow。matrix `[bootstrap, dev, staging]` で staging root の plan は既に対応済み。分割対象外 |
 | `terraform-apply-bootstrap.yml` | bootstrap apply | なし | `bootstrap` | 既存 `terraform-apply.yml` の bootstrap 分を切り出す |
-| `terraform-apply-dev.yml` | dev apply | なし、または軽い confirm のみ | `dev` | 既存 `terraform-apply.yml` の dev 分を切り出す。`environment` 選択入力は持たない |
+| `terraform-apply-dev.yml` | dev apply | `task_config_check_value` 任意（AWS での確認用。[runbook](../runbooks/apply-task-definition-config-change.md)） | `dev` | 既存 `terraform-apply.yml` の dev 分を切り出す。`environment` 選択入力は持たない |
 | `terraform-destroy-dev.yml` | dev destroy | `confirm=destroy-dev` | `dev-destroy` | destroy 後の残存リソース確認を追加する |
 | `deploy-backend-dev.yml` | dev backend deploy | `image_tag` 任意、`run_migrations` | `dev` | L-11（Issue #182）で `deploy-app-dev.yml` から分離。本体は reusable workflow `deploy-service.yml`（Issue #180）。サービス更新前に OpenSearch の search index migration を毎回実行し、成功判定は全サービスの rollout 完了で行う（Issue #538 / [ADR-0039](../adr/0039-run-search-index-migration-and-verify-ecs-rollout-in-deploy.md)） |
 | `deploy-frontend-dev.yml` | dev frontend deploy | `image_tag` 任意 | `dev` | 同上（frontend 側） |
-| `terraform-apply-staging.yml` | staging apply | `capacity_profile=normal \| full`、`public_endpoint_mode=https-dns \| alb-http-only` | `staging` | `terraform/environments/staging` を apply。`environment` 選択入力は持たず、staging 固有の `capacity_profile` のみ受け取る |
+| `terraform-apply-staging.yml` | staging apply | `capacity_profile=normal \| full`、`public_endpoint_mode=https-dns \| alb-http-only`、`task_config_check_value` 任意（AWS での確認用） | `staging` | `terraform/environments/staging` を apply。`environment` 選択入力は持たず、staging 固有の `capacity_profile` のみ受け取る |
 | `deploy-backend-staging.yml` | staging backend deploy | `image_tag` 任意、`run_migrations` | `staging` | ECR / ECS 名は `ticket-c2c-staging` を使う。search index migration と rollout 確認は dev と同じ |
 | `deploy-frontend-staging.yml` | staging frontend deploy | `image_tag` 任意 | `staging` | alb-http-only モード（frontend service 不在）ではサービス更新をスキップ |
-| `db-migrate-staging.yml` | staging DB migration（backend deployとは別に手動起動） | なし | `staging` | ECS run-task でTypeORM migrationsを適用し、backend rollout/readinessとの同時実行は共通concurrency groupで防ぐ（Issue #92）。dev用は`db-migrate-dev.yml` |
+| `db-migrate-staging.yml` | staging DB migration（backend deployとは別に手動起動） | なし | `staging` | ECS run-task でTypeORM migrationsを適用し、apply / destroy・deploy・readinessとの同時実行は共通concurrency group（`mutation-staging`）で防ぐ（Issue #92 / #544）。dev用は`db-migrate-dev.yml` |
 | `staging-smoke-test.yml` | staging smoke / integration test | なし | `staging-readonly` | apply ロールを流用しない。staging state file の S3 read-only に限定した専用 IAM ロールで `terraform output` を取得し、以降の HTTP 検証は AWS credential を使わない |
 | `terraform-destroy-staging.yml` | staging destroy | `confirm=destroy-staging` | `staging-destroy` | 検証後に毎回手動で実行する |
 

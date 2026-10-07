@@ -112,3 +112,4 @@ YYYY-MM-DD
 | [0039](./0039-run-search-index-migration-and-verify-ecs-rollout-in-deploy.md) | backend deploy で search index migration を毎回実行し、成功判定を全サービスの rollout 完了で行う | Accepted |
 | [0040](./0040-initial-task-definition-uses-unpushed-image-tag.md) | terraform が作る初期 task definition は push しないイメージタグを参照し、サービスの起動を deploy の update-service に任せる | Accepted |
 | [0041](./0041-run-refresh-token-cleanup-in-api-with-advisory-lock.md) | refresh token cleanup を api 内の定期実行に移し、PostgreSQL の advisory lock で多重実行を防ぐ | Accepted |
+| [0042](./0042-deploy-copies-terraform-registered-task-definition.md) | deploy は terraform が登録した task definition revision のイメージだけを差し替え、ARN は terraform の state の output から読む | Accepted |

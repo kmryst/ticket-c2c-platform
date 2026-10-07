@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# deploy-service.yml の step 順序と条件のテスト（Issue #543 / ADR-0040）。
+# deploy-service.yml の step 順序と条件のテスト（Issue #543 / ADR-0040、Issue #544 / ADR-0042）。
 # workflow の jobs.deploy.steps を yq で読み、run step を GitHub Actions と同じ順序・条件
 # （if 式、前の step が失敗したら以降を実行しない）で実行する。aws / docker は PATH 上のスタブ、
-# run-db-migration.sh / wait-ecs-rollout.sh は呼び出しを記録するスタブに置き換える。AWS へは接続しない。
+# run-db-migration.sh / wait-ecs-rollout.sh は呼び出しを記録するスタブに置き換える。terraform も PATH 上の
+# スタブで、output ecs_task_definition_arns はケースごとの JSON を返す。AWS へは接続しない。
 #
 # 確認すること:
 # - latest と pending-deploy（terraform の初期タスク定義が参照するタグ）を push しない
@@ -10,6 +11,10 @@
 # - DB migration または search index migration が失敗したら update-service を呼ばない
 # - 正常時は SHA タグの task definition で update-service を呼び、その前に migration と index 作成が終わる
 # - workflow の PENDING_DEPLOY_IMAGE_TAG と terraform の image_tag 既定値が一致する
+# - register のコピー元は terraform の output ecs_task_definition_arns が指す revision で、service が今使っている
+#   revision や family の最新 revision ではない（既存環境で terraform の設定を変えた後の deploy。Issue #544）
+# - output が無い・service のキーが無い・terraform が登録した revision でない（image が pending-deploy でない、
+#   revision 番号が無い）なら、push・register・migration・update-service の前に失敗する
 #
 # 必要なコマンド: bash, jq, yq（mikefarah v4）, python3（GitHub-hosted ubuntu runner に同梱）
 
@@ -25,10 +30,11 @@ trap '[[ -n ${KEEP_WORK_DIR:-} ]] || rm -rf "$work_dir"' EXIT
 stub_dir="${work_dir}/bin"
 mkdir -p "$stub_dir"
 
-# aws スタブ。呼び出しを calls.log に記録する。
-# - describe-services: status は ACTIVE、taskDefinition は terraform の初期リビジョン（:1）
-# - describe-task-definition: image は pending-deploy（terraform apply 直後の状態）
-# - register-task-definition: 渡された JSON を保存し、リビジョン :2 の ARN を返す
+# aws スタブ。呼び出しを calls.log に記録する。task definition はケースごとの fixture（td/<family>:<revision>.json）。
+# - describe-services: status は STUB_SERVICE_STATUS（既定 ACTIVE）、taskDefinition は service-revision-<service>
+#   （既定 1）の revision。deploy はこれをコピー元に使ってはいけない
+# - describe-task-definition: revision 番号付きの ARN だけを受け付け、fixture を返す（無ければ ClientException）
+# - register-task-definition: 渡された JSON を保存し、リビジョン STUB_REGISTER_REVISION（既定 2）の ARN を返す
 # - ecr describe-images: STUB_EXISTING_TAGS（空白区切り）にあるタグだけ存在する
 cat >"${stub_dir}/aws" <<'STUB'
 #!/usr/bin/env bash
@@ -44,9 +50,11 @@ case "$1 $2" in
 		prev=$arg
 	done
 	if [[ $args == *"services[0].status"* ]]; then
-		echo "ACTIVE"
+		echo "${STUB_SERVICE_STATUS:-ACTIVE}"
 	else
-		echo "arn:aws:ecs:ap-northeast-1:111122223333:task-definition/${svc}:1"
+		rev=1
+		[[ -f "${STUB_WORK_DIR}/service-revision-${svc}" ]] && rev=$(<"${STUB_WORK_DIR}/service-revision-${svc}")
+		echo "arn:aws:ecs:ap-northeast-1:111122223333:task-definition/${svc}:${rev}"
 	fi
 	;;
 "ecs describe-task-definition")
@@ -56,17 +64,17 @@ case "$1 $2" in
 		[[ $prev == "--task-definition" ]] && td=$arg
 		prev=$arg
 	done
-	family=${td##*/}
-	family=${family%%:*}
-	jq -n --arg td "$td" --arg family "$family" --arg image "${STUB_REGISTRY}/${STUB_REPOSITORY}:pending-deploy" '{
-		taskDefinitionArn: $td, family: $family, revision: 1, status: "ACTIVE",
-		registeredAt: "2026-10-07T00:00:00Z", registeredBy: "terraform",
-		compatibilities: ["EC2", "FARGATE"], requiresAttributes: [],
-		containerDefinitions: [
-			{name: $family, image: $image, essential: true},
-			{name: "otel-collector", image: "public.ecr.aws/aws-observability/aws-otel-collector:v0.40.0", essential: false}
-		]
-	}'
+	name=${td##*/}
+	if [[ $name != *:* ]]; then
+		echo "stub: describe-task-definition without a revision (family only) is not allowed: ${td}" >&2
+		exit 98
+	fi
+	fixture="${STUB_WORK_DIR}/td/${name}.json"
+	if [[ ! -f $fixture ]]; then
+		echo "An error occurred (ClientException) when calling the DescribeTaskDefinition operation: Unable to describe task definition." >&2
+		exit 254
+	fi
+	cat "$fixture"
 	;;
 "ecs register-task-definition")
 	file=""
@@ -77,7 +85,7 @@ case "$1 $2" in
 	done
 	family=$(jq -r '.family' "$file")
 	cp "$file" "${STUB_WORK_DIR}/registered-${family}.json"
-	echo "arn:aws:ecs:ap-northeast-1:111122223333:task-definition/${family}:2"
+	echo "arn:aws:ecs:ap-northeast-1:111122223333:task-definition/${family}:${STUB_REGISTER_REVISION:-2}"
 	;;
 "ecs update-service")
 	prev=""
@@ -108,7 +116,28 @@ cat >"${stub_dir}/docker" <<'STUB'
 set -euo pipefail
 echo "docker $*" >>"${STUB_WORK_DIR}/calls.log"
 STUB
-chmod +x "${stub_dir}/aws" "${stub_dir}/docker"
+# terraform スタブ。init は何もしない。output -json ecs_task_definition_arns はケースの tf-output.json を返す
+# （無ければ、その output が state に無い時と同じく失敗する）。
+cat >"${stub_dir}/terraform" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "terraform $*" >>"${STUB_WORK_DIR}/calls.log"
+args=" $* "
+if [[ $args == *" init "* ]]; then
+	exit 0
+fi
+if [[ $args == *" output -json ecs_task_definition_arns "* ]]; then
+	if [[ -f "${STUB_WORK_DIR}/tf-output.json" ]]; then
+		cat "${STUB_WORK_DIR}/tf-output.json"
+		exit 0
+	fi
+	echo "Error: Output \"ecs_task_definition_arns\" not found" >&2
+	exit 1
+fi
+echo "unexpected terraform call: $*" >&2
+exit 99
+STUB
+chmod +x "${stub_dir}/aws" "${stub_dir}/docker" "${stub_dir}/terraform"
 
 # workflow が相対パスで呼ぶ script のスタブ（実体は run-db-migration.spec.sh / wait-ecs-rollout.spec.sh で検証済み）。
 fake_root="${work_dir}/checkout"
@@ -262,18 +291,63 @@ backend_inputs() {
 	jq -cn --argjson extra "$extra" '{
 		environment: "staging", ecr_repository: "ticket-c2c-staging", ecs_cluster: "ticket-c2c-staging",
 		ecs_services: "ticket-c2c-staging-api ticket-c2c-staging-worker", docker_context: ".",
+		terraform_dir: "terraform/environments/staging",
 		api_service: "ticket-c2c-staging-api", run_migrations: true, run_search_index_migration: true
 	} + $extra'
 }
 
+TD_ARN_PREFIX="arn:aws:ecs:ap-northeast-1:111122223333:task-definition"
+OTEL_IMAGE="public.ecr.aws/aws-observability/aws-otel-collector:v0.40.0"
+
+# write_td <family> <revision> <image> <CONFIG_MARKER の値> <cpu>
+# case_dir に task definition の fixture（describe-task-definition の taskDefinition）を書く。
+# 設定の違いは環境変数 CONFIG_MARKER と cpu で表す。containerDefinitions[1] は ADOT collector sidecar。
+write_td() {
+	local family=$1 revision=$2 image=$3 marker=$4 cpu=$5
+	mkdir -p "${case_dir}/td"
+	jq -n --arg arn "${TD_ARN_PREFIX}/${family}:${revision}" --arg family "$family" \
+		--argjson revision "$revision" --arg image "$image" --arg marker "$marker" --arg cpu "$cpu" \
+		--arg otel "$OTEL_IMAGE" '{
+		taskDefinitionArn: $arn, family: $family, revision: $revision, status: "ACTIVE",
+		registeredAt: "2026-10-07T00:00:00Z", registeredBy: "arn:aws:sts::111122223333:assumed-role/stub",
+		compatibilities: ["EC2", "FARGATE"], requiresAttributes: [{name: "com.amazonaws.ecs.capability.logging-driver.awslogs"}],
+		requiresCompatibilities: ["FARGATE"], networkMode: "awsvpc", cpu: $cpu, memory: "1024",
+		executionRoleArn: "arn:aws:iam::111122223333:role/ticket-c2c-staging-execution",
+		taskRoleArn: ("arn:aws:iam::111122223333:role/" + $family + "-task"),
+		containerDefinitions: [
+			{name: $family, image: $image, essential: true,
+			 environment: [{name: "CONFIG_MARKER", value: $marker}]},
+			{name: "otel-collector", image: $otel, essential: false}
+		]
+	}' >"${case_dir}/td/${family}:${revision}.json"
+}
+
+# prepare_case <label>: case_dir を作る。fixture を書くケースは run_case の前に呼ぶ。
+prepare_case() {
+	label=$1
+	case_dir="${work_dir}/case-${label}"
+	mkdir -p "$case_dir"
+}
+
 # run_case <label> <inputs JSON> [VAR=value ...]
+# fixture（td/）が無いケースは「新しい環境の最初の deploy」にする: service と terraform の output が同じ
+# revision :1（image pending-deploy）を指す。
 run_case() {
 	local label=$1 inputs=$2
 	shift 2
 	case_dir="${work_dir}/case-${label}"
 	mkdir -p "$case_dir"
-	local repository
+	local repository svc
 	repository=$(jq -r '.ecr_repository' <<<"$inputs")
+	if [[ ! -d "${case_dir}/td" ]]; then
+		echo '{}' >"${case_dir}/tf-output.json"
+		for svc in $(jq -r '.ecs_services' <<<"$inputs"); do
+			write_td "$svc" 1 "${REGISTRY}/${repository}:pending-deploy" initial 256
+			jq --arg svc "$svc" --arg arn "${TD_ARN_PREFIX}/${svc}:1" '. + {($svc): $arn}' \
+				"${case_dir}/tf-output.json" >"${case_dir}/tf-output.json.tmp"
+			mv "${case_dir}/tf-output.json.tmp" "${case_dir}/tf-output.json"
+		done
+	fi
 	env PATH="${stub_dir}:${PATH}" \
 		STUB_WORK_DIR="$case_dir" STUB_CHECKOUT="$fake_root" \
 		STUB_REGISTRY="$REGISTRY" STUB_REPOSITORY="$repository" STUB_GITHUB_SHA="$SHA" \
@@ -365,6 +439,10 @@ expect_order "^run-db-migration search-index-migration arn:.*/ticket-c2c-staging
 expect_order "^docker push " "^run-db-migration migration "
 expect_order "^aws ecs update-service " "^wait-ecs-rollout "
 expect_call "^wait-ecs-rollout ticket-c2c-staging ticket-c2c-staging-api arn:.*:2 ticket-c2c-staging-worker arn:.*:2 $"
+# 新しい環境の最初の deploy: コピー元は terraform の output が指す revision :1（service の revision と同じ）。
+expect_call "^terraform -chdir=terraform/environments/staging output -json ecs_task_definition_arns$"
+expect_call "^aws ecs describe-task-definition --task-definition ${TD_ARN_PREFIX}/ticket-c2c-staging-api:1 "
+expect_order "^terraform .* output " "^docker build "
 echo "ok   ${label}"
 
 # 2. DB migration が失敗 → search index migration・update-service・rollout 確認を実行しない。
@@ -429,7 +507,8 @@ done
 label=frontend-success
 run_case "$label" "$(jq -cn '{
 	environment: "staging", ecr_repository: "ticket-c2c-staging-frontend", ecs_cluster: "ticket-c2c-staging",
-	ecs_services: "ticket-c2c-staging-frontend", docker_context: "frontend", skip_if_services_missing: true
+	ecs_services: "ticket-c2c-staging-frontend", docker_context: "frontend", skip_if_services_missing: true,
+	terraform_dir: "terraform/environments/staging"
 }')"
 [[ $(jq -r '.failed' "${case_dir}/result.json") == "false" ]] || fail "workflow failed"
 expect_no_forbidden_push
@@ -446,6 +525,147 @@ if yq '.jobs.deploy.steps[].run // ""' "$workflow" | grep -nE ':latest|"latest"'
 	grep -vF "$rejection_check"; then
 	fail "deploy-service.yml still references the latest tag outside the rejection checks"
 fi
+echo "ok   ${label}"
+
+# 9. 既存の環境（Issue #544）: service は deploy が前に register した revision :42（旧設定 + 旧イメージ）を使い、
+#    terraform は設定を変えた revision :43（新設定 + pending-deploy）を登録済み。さらに失敗した deploy が
+#    register した revision :44（旧設定 + 別のイメージ）が family の最新 ACTIVE revision として残っている。
+#    deploy は :43 の設定 + 今回の SHA の revision（:45）を register し、migration・index 作成・update-service に使う。
+#    修正前の workflow（service の revision をコピーする）では :42 の旧設定が register されるため、このケースが失敗する。
+label=existing-environment-terraform-config-change
+prepare_case "$label"
+OLD_IMAGE="${REGISTRY}/ticket-c2c-staging:1111111"
+FAILED_IMAGE="${REGISTRY}/ticket-c2c-staging:2222222"
+PENDING_IMAGE="${REGISTRY}/ticket-c2c-staging:pending-deploy"
+echo '{}' >"${case_dir}/tf-output.json"
+for svc in ticket-c2c-staging-api ticket-c2c-staging-worker; do
+	write_td "$svc" 42 "$OLD_IMAGE" old-config 256
+	write_td "$svc" 43 "$PENDING_IMAGE" new-config 512
+	write_td "$svc" 44 "$FAILED_IMAGE" old-config 256
+	echo 42 >"${case_dir}/service-revision-${svc}"
+	jq --arg svc "$svc" --arg arn "${TD_ARN_PREFIX}/${svc}:43" '. + {($svc): $arn}' \
+		"${case_dir}/tf-output.json" >"${case_dir}/tf-output.json.tmp"
+	mv "${case_dir}/tf-output.json.tmp" "${case_dir}/tf-output.json"
+done
+run_case "$label" "$(backend_inputs)" STUB_REGISTER_REVISION=45
+[[ $(jq -r '.failed' "${case_dir}/result.json") == "false" ]] || fail "workflow failed"
+for svc in ticket-c2c-staging-api ticket-c2c-staging-worker; do
+	registered="${case_dir}/registered-${svc}.json"
+	# register した内容 = terraform の revision :43 から ECS が付ける属性を除き、アプリのイメージだけを差し替えたもの。
+	expected=$(jq -S --arg image "${REGISTRY}/ticket-c2c-staging:${SHORT_SHA}" '
+		del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities,
+			.registeredAt, .registeredBy, .deregisteredAt)
+		| .containerDefinitions[0].image = $image' "${case_dir}/td/${svc}:43.json")
+	[[ $(jq -S . "$registered") == "$expected" ]] || fail "${svc} registered task definition is not terraform :43 + new image: $(jq -c . "$registered")"
+	[[ $(jq -r '.containerDefinitions[0].environment[] | select(.name == "CONFIG_MARKER") | .value' "$registered") == "new-config" ]] ||
+		fail "${svc} registered the old configuration"
+	[[ $(jq -r '.cpu' "$registered") == "512" ]] || fail "${svc} registered the old cpu"
+	expect_call "^aws ecs describe-task-definition --task-definition ${TD_ARN_PREFIX}/${svc}:43 "
+	expect_no_call "^aws ecs describe-task-definition --task-definition ${TD_ARN_PREFIX}/${svc}:42 "
+	expect_no_call "^aws ecs describe-task-definition --task-definition ${TD_ARN_PREFIX}/${svc}:44 "
+	expect_no_call "^aws ecs describe-task-definition --task-definition (${TD_ARN_PREFIX}/)?${svc} "
+	expect_call "^aws ecs update-service --cluster ticket-c2c-staging --service ${svc} --task-definition ${TD_ARN_PREFIX}/${svc}:45 "
+done
+expect_no_call "^aws ecs list-task-definitions"
+expect_call "^run-db-migration migration ${TD_ARN_PREFIX}/ticket-c2c-staging-api:45$"
+expect_call "^run-db-migration search-index-migration ${TD_ARN_PREFIX}/ticket-c2c-staging-api:45$"
+expect_order "^run-db-migration search-index-migration " "^aws ecs update-service "
+expect_call "^wait-ecs-rollout ticket-c2c-staging ticket-c2c-staging-api ${TD_ARN_PREFIX}/ticket-c2c-staging-api:45 ticket-c2c-staging-worker ${TD_ARN_PREFIX}/ticket-c2c-staging-worker:45 $"
+echo "ok   ${label}"
+
+# 10. 既存の環境で rollback（image_tag に過去の short SHA）: 設定は terraform の現在の revision :43、イメージは過去のタグ。
+label=existing-environment-rollback
+prepare_case "$label"
+cp -r "${work_dir}/case-existing-environment-terraform-config-change/td" "${case_dir}/td"
+cp "${work_dir}/case-existing-environment-terraform-config-change/tf-output.json" "${case_dir}/"
+cp "${work_dir}/case-existing-environment-terraform-config-change/"service-revision-* "${case_dir}/"
+run_case "$label" "$(backend_inputs '{"image_tag": "1111111", "run_migrations": false}')" STUB_EXISTING_TAGS="1111111" STUB_REGISTER_REVISION=45
+[[ $(jq -r '.failed' "${case_dir}/result.json") == "false" ]] || fail "workflow failed"
+expect_no_call "^docker "
+registered="${case_dir}/registered-ticket-c2c-staging-api.json"
+[[ $(jq -r '.containerDefinitions[0].image' "$registered") == "$OLD_IMAGE" ]] || fail "rollback image is not the past tag"
+[[ $(jq -r '.containerDefinitions[0].environment[0].value' "$registered") == "new-config" ]] ||
+	fail "rollback must keep the current terraform configuration"
+echo "ok   ${label}"
+
+# 11. terraform の output が state に無い（その環境に一度も apply していない、この output を足す前の state）:
+#     push・register・migration・update-service の前に失敗する。
+label=terraform-output-missing
+prepare_case "$label"
+write_td ticket-c2c-staging-api 1 "${REGISTRY}/ticket-c2c-staging:pending-deploy" initial 256
+run_case "$label" "$(backend_inputs)"
+expect_step "Resolve terraform task definitions" failure
+expect_step "Build and push image" skipped
+expect_step "Register SHA-pinned task definitions" skipped
+expect_step "Run DB migration (before service update)" skipped
+expect_step "Update services" skipped
+expect_no_call "^docker "
+expect_no_call "^aws ecs register-task-definition "
+expect_no_call "^run-db-migration "
+expect_no_call "^aws ecs update-service "
+echo "ok   ${label}"
+
+# 12. output に service のキーが無い / revision 番号の無い ARN / terraform が登録した revision でない
+#     （image が pending-deploy でない）/ describe できない ARN: どれも同じく register の前に失敗する。
+for variant in missing-key family-only not-terraform-revision unknown-revision; do
+	label="terraform-arn-${variant}"
+	prepare_case "$label"
+	for svc in ticket-c2c-staging-api ticket-c2c-staging-worker; do
+		write_td "$svc" 43 "$PENDING_IMAGE" new-config 512
+		write_td "$svc" 44 "$FAILED_IMAGE" old-config 256
+	done
+	api_arn="${TD_ARN_PREFIX}/ticket-c2c-staging-api:43"
+	case "$variant" in
+	missing-key) jq -n --arg w "${TD_ARN_PREFIX}/ticket-c2c-staging-worker:43" '{"ticket-c2c-staging-worker": $w}' >"${case_dir}/tf-output.json" ;;
+	family-only) api_arn="${TD_ARN_PREFIX}/ticket-c2c-staging-api" ;;
+	not-terraform-revision) api_arn="${TD_ARN_PREFIX}/ticket-c2c-staging-api:44" ;;
+	unknown-revision) api_arn="${TD_ARN_PREFIX}/ticket-c2c-staging-api:99" ;;
+	esac
+	if [[ $variant != missing-key ]]; then
+		jq -n --arg a "$api_arn" --arg w "${TD_ARN_PREFIX}/ticket-c2c-staging-worker:43" \
+			'{"ticket-c2c-staging-api": $a, "ticket-c2c-staging-worker": $w}' >"${case_dir}/tf-output.json"
+	fi
+	run_case "$label" "$(backend_inputs)"
+	expect_step "Resolve terraform task definitions" failure
+	expect_step "Register SHA-pinned task definitions" skipped
+	expect_step "Update services" skipped
+	expect_no_call "^docker "
+	expect_no_call "^aws ecs register-task-definition "
+	expect_no_call "^run-db-migration "
+	expect_no_call "^aws ecs update-service "
+	echo "ok   ${label}"
+done
+
+# 13. frontend service が無い環境（staging alb-http-only、skip_if_services_missing）: terraform の output を読まない
+#     （frontend のキーが無くても失敗しない）。イメージの build / push だけ行う。
+label=frontend-service-missing
+prepare_case "$label"
+mkdir -p "${case_dir}/td"
+run_case "$label" "$(jq -cn '{
+	environment: "staging", ecr_repository: "ticket-c2c-staging-frontend", ecs_cluster: "ticket-c2c-staging",
+	ecs_services: "ticket-c2c-staging-frontend", docker_context: "frontend", skip_if_services_missing: true,
+	terraform_dir: "terraform/environments/staging"
+}')" STUB_SERVICE_STATUS=MISSING
+[[ $(jq -r '.failed' "${case_dir}/result.json") == "false" ]] || fail "workflow failed"
+expect_step "Resolve terraform task definitions" skipped
+expect_no_call "^terraform "
+expect_no_call "^aws ecs update-service "
+expect_call "^docker push ${REGISTRY}/ticket-c2c-staging-frontend:${SHORT_SHA}$"
+echo "ok   ${label}"
+
+# 14. 呼び出し側の 4 workflow が、自分の環境の terraform root を terraform_dir に渡している。
+label=callers-pass-terraform-dir
+case_dir="${work_dir}/case-${label}"
+mkdir -p "$case_dir"
+echo '{"steps":[]}' >"${case_dir}/result.json"
+touch "${case_dir}/calls.log"
+for env_name in dev staging; do
+	for kind in backend frontend; do
+		caller="${repo_root}/.github/workflows/deploy-${kind}-${env_name}.yml"
+		dir=$(yq '.jobs.deploy.with.terraform_dir' "$caller")
+		[[ $dir == "terraform/environments/${env_name}" ]] || fail "deploy-${kind}-${env_name}.yml terraform_dir is '${dir}'"
+	done
+done
 echo "ok   ${label}"
 
 echo "deploy-service workflow fixtures passed"

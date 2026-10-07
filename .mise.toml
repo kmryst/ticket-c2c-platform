@@ -17,7 +17,7 @@
 # 3 リポジトリ共通の標準バージョン。
 # リモート state（bootstrap / dev / staging）に記録済みの terraform_version が
 # いずれも 1.14.8 であり、state は前方互換がないためダウングレードできない。
-# CI の 9 workflow に直書きされた terraform_version もこの値と一致させる。
+# CI の 11 workflow に直書きされた terraform_version もこの値と一致させる（deploy-service.yml は state の output を読むために使う。ADR-0042）。
 terraform = "1.14.8"
 # CI の setup-node（node-version: "24"）と Dockerfile / frontend/Dockerfile
 # （node:24-slim）に合わせる。package.json の engines も 24 系を要求する。

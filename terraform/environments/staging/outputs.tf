@@ -72,3 +72,20 @@ output "app_url" {
   description = "フロントエンドの公開 HTTPS エンドポイント（https-dns のみ。ADR-0011）"
   value       = local.https_enabled ? "https://${var.app_subdomain}.${var.hosted_zone_name}" : null
 }
+
+output "ecs_task_definition_arns" {
+  description = <<-EOT
+    ECS service 名 → terraform が最後の apply で登録した task definition の ARN（revision 番号まで含む）。
+    deploy workflow（deploy-service.yml）がこの revision を describe し、イメージだけを commit SHA タグに
+    差し替えて register する（Issue #544 / ADR-0042）。service が使っている revision や family の最新 revision は使わない。
+  EOT
+  value = merge(
+    {
+      (module.api_service.service_name)    = module.api_service.task_definition_arn
+      (module.worker_service.service_name) = module.worker_service.task_definition_arn
+    },
+    local.https_enabled ? {
+      (module.frontend_service[0].service_name) = module.frontend_service[0].task_definition_arn
+    } : {},
+  )
+}

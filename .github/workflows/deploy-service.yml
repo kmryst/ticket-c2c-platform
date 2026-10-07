@@ -9,7 +9,11 @@
 # 進み、どこかで失敗したら以降の step を実行しない（Issue #538 / ADR-0039）。
 # イメージは commit SHA タグだけを push する。terraform が作る初期タスク定義は push しない固定タグ
 # pending-deploy を参照するため、アプリはこの workflow の update-service まで起動しない（Issue #543 / ADR-0040）。
-# concurrency group は呼び出し側 workflow で定義する（deploy-backend-dev など）。
+# task definition の設定（環境変数・secrets・CPU / メモリ・role・sidecar 等）は terraform、イメージはこの workflow が
+# 受け持つ。コピー元は terraform が最後の apply で登録した revision（state の output ecs_task_definition_arns）で、
+# service が今使っている revision や family の最新 revision ではない（Issue #544 / ADR-0042）。
+# concurrency group は呼び出し側 workflow で定義する。terraform apply / destroy と同じ group
+# （mutation-<env>）で直列化する（ADR-0042）。
 name: deploy-service
 
 on:
@@ -33,6 +37,10 @@ on:
         type: string
       docker_context:
         description: "docker build の context（backend: リポジトリルート '.' / frontend: 'frontend'）"
+        required: true
+        type: string
+      terraform_dir:
+        description: "task definition の ARN を読む terraform の環境 root（例: terraform/environments/staging）。output ecs_task_definition_arns を state から読む（ADR-0042）"
         required: true
         type: string
       api_service:
@@ -115,6 +123,65 @@ jobs:
           fi
           echo "deploy=$ACTIVE" >> "$GITHUB_OUTPUT"
 
+      # terraform の state から output を読むためだけに使う（plan / apply はしない）。
+      # output の生値を取るため wrapper は無効化する（staging-smoke-test.yml と同じ）。
+      - name: Setup Terraform
+        if: steps.svc.outputs.deploy == 'true'
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.8"
+          terraform_wrapper: false
+
+      # コピー元の task definition を決める（Issue #544 / ADR-0042）。terraform が最後の apply で登録した
+      # revision の ARN（revision 番号まで含む）を state の output ecs_task_definition_arns から読む。
+      # service が今使っている revision をコピーすると、ecs-service モジュールの ignore_changes = [task_definition]
+      # により terraform の設定変更が永久に届かない。family の最新 ACTIVE revision は、deploy が register した
+      # revision や失敗した deploy の revision の方が新しくなるので使わない。
+      # 次のどれかに当たれば、イメージの push・register・migration・update-service の前に失敗する。
+      # - output が無い、または service のキーが無い（その環境に一度も apply していない、apply 前のコード）
+      # - ARN の family が service 名と違う、revision 番号が無い
+      # - その revision のアプリコンテナが service 名でない、またはイメージが pending-deploy でない
+      #   （terraform が登録した revision は必ず pending-deploy を参照する。ADR-0040）
+      - name: Resolve terraform task definitions
+        if: steps.svc.outputs.deploy == 'true'
+        env:
+          TERRAFORM_DIR: ${{ inputs.terraform_dir }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          if ! terraform -chdir="$TERRAFORM_DIR" init -input=false -no-color > terraform-init.log 2>&1; then
+            cat terraform-init.log
+            echo "::error::terraform init failed in $TERRAFORM_DIR"
+            exit 1
+          fi
+          if ! terraform -chdir="$TERRAFORM_DIR" output -json ecs_task_definition_arns > tf-task-definitions.json; then
+            echo "::error::terraform output ecs_task_definition_arns is not in the state of $TERRAFORM_DIR. Run terraform-apply-<env>.yml first (Issue #544 / ADR-0042)"
+            exit 1
+          fi
+          EXPECTED_IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${PENDING_DEPLOY_IMAGE_TAG}"
+          : > td-source.txt
+          for SVC in $ECS_SERVICES; do
+            SOURCE_TD=$(jq -r --arg svc "$SVC" '.[$svc] // empty' tf-task-definitions.json)
+            if [ -z "$SOURCE_TD" ]; then
+              echo "::error::terraform output ecs_task_definition_arns has no entry for $SVC. Run terraform-apply-<env>.yml first (Issue #544 / ADR-0042)"
+              exit 1
+            fi
+            if ! [[ $SOURCE_TD =~ ^arn:aws:ecs:[a-z0-9-]+:[0-9]{12}:task-definition/${SVC}:[0-9]+$ ]]; then
+              echo "::error::unexpected task definition ARN for $SVC in terraform output: $SOURCE_TD"
+              exit 1
+            fi
+            aws ecs describe-task-definition \
+              --task-definition "$SOURCE_TD" \
+              --query 'taskDefinition' > "td-source-${SVC}.json"
+            NAME=$(jq -r '.containerDefinitions[0].name' "td-source-${SVC}.json")
+            SOURCE_IMAGE=$(jq -r '.containerDefinitions[0].image' "td-source-${SVC}.json")
+            if [ "$NAME" != "$SVC" ] || [ "$SOURCE_IMAGE" != "$EXPECTED_IMAGE" ]; then
+              echo "::error::$SOURCE_TD is not a task definition registered by terraform (containerDefinitions[0]: name=$NAME image=$SOURCE_IMAGE, expected name=$SVC image=$EXPECTED_IMAGE)"
+              exit 1
+            fi
+            echo "$SVC $SOURCE_TD" >> td-source.txt
+            echo "terraform task definition for $SVC: ${SOURCE_TD##*/}" >> "$GITHUB_STEP_SUMMARY"
+          done
+
       # デプロイするタグを決める（production-readiness M-7: タスク定義は commit SHA 固定で参照する）。
       # image_tag 入力があればビルドせず既存タグを使う（ロールバック経路）。存在しないタグは即失敗させる。
       # pending-deploy（terraform の初期タスク定義が参照する、push しないタグ）と latest（Issue #543 より前の
@@ -157,38 +224,32 @@ jobs:
           docker push "$IMAGE:$TAG"
           echo "pushed $IMAGE:$TAG" >> "$GITHUB_STEP_SUMMARY"
 
-      # 現行タスク定義のイメージだけを commit SHA タグへ差し替えた新リビジョンを register する。
-      # これによりタスク定義から稼働コミットを特定でき、ロールバックは過去タグの再指定だけで済む
-      # （再ビルド不要）。サービス更新は migration（任意）の後に行う。
-      # terraform apply 直後の最初の deploy では、現行タスク定義は terraform のもの（pending-deploy）で、
-      # そのイメージだけをここで差し替える（Issue #543）。
+      # terraform が登録した revision（Resolve terraform task definitions）のイメージだけを commit SHA タグへ
+      # 差し替えた新リビジョンを register する（Issue #544 / ADR-0042）。設定は terraform の最新の apply のもの、
+      # イメージは今回のタグになる。これによりタスク定義から稼働コミットを特定でき、ロールバックは過去タグの
+      # 再指定だけで済む（再ビルド不要。設定は戻らず、現在の terraform の設定のままになる）。
+      # register した revision を DB migration / search index migration と update-service に使う。
       - name: Register SHA-pinned task definitions
         if: steps.svc.outputs.deploy == 'true'
         id: td
         run: |
           IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${{ steps.tag.outputs.tag }}"
           : > td-map.txt
-          for SVC in $ECS_SERVICES; do
-            CURRENT_TD=$(aws ecs describe-services \
-              --cluster "$ECS_CLUSTER" --services "$SVC" \
-              --query 'services[0].taskDefinition' --output text)
-            aws ecs describe-task-definition \
-              --task-definition "$CURRENT_TD" \
-              --query 'taskDefinition' > td.json
+          while read -r SVC SOURCE_TD; do
             jq --arg image "$IMAGE" '
               del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                   .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
               | .containerDefinitions[0].image = $image
-            ' td.json > td-new.json
+            ' "td-source-${SVC}.json" > td-new.json
             NEW_TD=$(aws ecs register-task-definition \
               --cli-input-json file://td-new.json \
               --query 'taskDefinition.taskDefinitionArn' --output text)
-            echo "registered $SVC -> ${NEW_TD##*/} ($IMAGE)" >> "$GITHUB_STEP_SUMMARY"
+            echo "registered $SVC -> ${NEW_TD##*/} (from ${SOURCE_TD##*/}, $IMAGE)" >> "$GITHUB_STEP_SUMMARY"
             echo "$SVC $NEW_TD" >> td-map.txt
             if [ -n "${{ inputs.api_service }}" ] && [ "$SVC" = "${{ inputs.api_service }}" ]; then
               echo "td_api=$NEW_TD" >> "$GITHUB_OUTPUT"
             fi
-          done
+          done < td-source.txt
 
       # スキーマ変更を含むリリースでは、migration 成功後にサービス更新へ進む（Issue #92）。
       # 新イメージのタスク定義（command override）で migration を実行するため、

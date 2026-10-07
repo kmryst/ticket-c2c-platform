@@ -4,13 +4,25 @@ name: terraform-apply-dev
 
 on:
   workflow_dispatch:
+    inputs:
+      task_config_check_value:
+        description: "AWS での確認用に api / worker / frontend の task definition へ入れる環境変数 TASK_CONFIG_CHECK_VALUE の値（アプリは読まない。空なら入れない。Issue #544 / ADR-0042）"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write
   contents: read
 
 concurrency:
-  group: terraform-dev
+  # dev を変更する workflow（terraform apply / destroy、backend / frontend deploy、DB migration、
+  # Ticket Type readiness / cutover）を 1 つの group で直列化する（Issue #544 / ADR-0042）。
+  # deploy は terraform が最後の apply で登録した task definition を state から読むため、apply と並行させない。
+  # 既定（queue: single）は待機中の run を 1 件しか持たず、後から起動した run が待機中の run を cancel する。
+  # queue: max で待機中の run を cancel せず起動順に実行する（pr-policy-check.yml / Issue #220 と同じ）。
+  group: mutation-dev
+  queue: max
 
 jobs:
   apply:
@@ -19,6 +31,8 @@ jobs:
     defaults:
       run:
         working-directory: terraform/environments/dev
+    env:
+      TF_VAR_task_config_check_value: ${{ inputs.task_config_check_value }}
     steps:
       - uses: actions/checkout@v7
 
