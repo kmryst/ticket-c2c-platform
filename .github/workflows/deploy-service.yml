@@ -3,7 +3,7 @@
 # デプロイ対象（ECR リポジトリ・ECS サービス群・Docker build context）と
 # GitHub Environment 名を input で受け取る。backend（api + worker）/ frontend の
 # どちらか一方だけをビルド・デプロイする（L-11: デプロイとロールバックの独立性）。
-# 承認は呼び出し側が指定する GitHub Environment の protection で行う。
+# 実行できる branch の制限は、呼び出し側が指定する GitHub Environment の protection で行う。
 # concurrency group は呼び出し側 workflow で定義する（deploy-backend-dev など）。
 name: deploy-service
 

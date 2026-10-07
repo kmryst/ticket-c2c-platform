@@ -1,5 +1,5 @@
 # dev 専用の terraform apply workflow（staging-environment.md「GitHub Actions」）。
-# 環境選択入力は持たない。承認は GitHub Environment `dev` の protection で行う。
+# 環境選択入力は持たない。GitHub Environment `dev` は branch restriction（main のみ）で、required reviewer は置かない。
 name: terraform-apply-dev
 
 on:

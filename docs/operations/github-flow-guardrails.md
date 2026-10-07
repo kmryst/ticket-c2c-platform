@@ -187,6 +187,9 @@ required status check として扱う check 名は、workflow の job `name` と
 
 ### Environment 承認の強化
 
+2026-10-07 以降、required reviewer は `bootstrap` だけに置いている（[ADR-0038](../adr/0038-remove-environment-required-reviewers-except-bootstrap.md)）。次の条件では承認を戻すか見直す。
+
+- write 権限者が増える
 - dev / staging ではなく、誤実行コストの高い prod 相当環境へ移行する
 - deploy / destroy の実行者と確認者を分けられる体制になる
 - 常設運用で夜間・障害時対応を含む変更管理が必要になる

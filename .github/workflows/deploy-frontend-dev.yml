@@ -1,5 +1,5 @@
 # dev 専用の frontend（Next.js SSR）デプロイ workflow（L-11 / Issue #182）。
-# 環境選択入力は持たない。承認は GitHub Environment `dev` の protection で行う。
+# 環境選択入力は持たない。GitHub Environment `dev` は branch restriction（main のみ）で、required reviewer は置かない。
 # デプロイ手順本体は deploy-service.yml（reusable workflow。Issue #180）に共通化し、
 # このファイルは dev の frontend 固有値を渡すだけにする。
 # backend のデプロイは deploy-backend-dev.yml（タグ・ロールバックは互いに独立）。
