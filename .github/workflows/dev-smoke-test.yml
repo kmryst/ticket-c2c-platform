@@ -2,6 +2,7 @@
 # apply ロールは流用せず、dev state の S3 read-only に限定した専用ロール
 # （Environment `dev-readonly`）で `terraform output` を取得する。
 # 以降の HTTP 検証（scripts/staging/smoke-test.ts）は AWS credential を使わない。
+# 外形監視（CloudWatch Synthetics canary）の状態確認だけは同じロールで synthetics:GetCanary を呼ぶ（Issue #546）。
 # dev は CloudFront 統合オリジン + ALB 直叩き遮断（ADR-0011 / ADR-0013）が常設のため、
 # base URL は常に CloudFront 経由（dev/outputs.tf の api_base_url）。
 # dev の test data は destroy まで残存する（dev は平常時 destroy 済みが正常状態。dev-environment.md）。
@@ -45,6 +46,27 @@ jobs:
           BASE_URL=$(terraform output -raw api_base_url)
           echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
           echo "base URL: $BASE_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      # Issue #546 / ADR-0043: 外形監視（CloudWatch Synthetics canary）は最初の deploy の後、
+      # 2 回目の apply（enable_synthetic_check=true）で作る。その apply を忘れていないかを、canary が state にあり、
+      # AWS 上で RUNNING であることで確かめる。読み取りは synthetics:GetCanary だけ（bootstrap の read-only ロール）。
+      - name: Check synthetic check canary is RUNNING
+        working-directory: terraform/environments/dev
+        run: |
+          terraform output -json > outputs.json
+          CANARY_NAME=$(jq -r '.synthetic_check_canary_name.value // empty' outputs.json)
+          if [ -z "$CANARY_NAME" ]; then
+            echo "::error::外形監視（CloudWatch Synthetics canary）が無い。deploy-backend-dev.yml → deploy-frontend-dev.yml の後、terraform-apply-dev.yml を enable_synthetic_check=true で実行する（Issue #546 / ADR-0043）"
+            exit 1
+          fi
+          # canary は us-east-1 に作る（terraform/modules/synthetics-canary）
+          CANARY_STATE=$(aws synthetics get-canary --region us-east-1 --name "$CANARY_NAME" \
+            --query 'Canary.Status.State' --output text)
+          echo "synthetic check canary: $CANARY_NAME ($CANARY_STATE)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CANARY_STATE" != "RUNNING" ]; then
+            echo "::error::外形監視 $CANARY_NAME の状態が RUNNING ではない（$CANARY_STATE）。docs/runbooks/alarm-synthetic-check-failure.md を参照する"
+            exit 1
+          fi
 
       - uses: actions/setup-node@v7
         with:
