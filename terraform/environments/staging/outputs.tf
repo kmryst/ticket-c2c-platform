@@ -89,3 +89,11 @@ output "ecs_task_definition_arns" {
     } : {},
   )
 }
+
+output "synthetic_check_canary_name" {
+  description = <<-EOT
+    外形監視（CloudWatch Synthetics canary、us-east-1）の名前。作っていない（enable_synthetic_check = false、または alb-http-only）ときは null。
+    <env>-smoke-test.yml が canary の存在と状態（RUNNING）の確認に使う（Issue #546 / ADR-0043）。
+  EOT
+  value       = length(module.synthetic_check) > 0 ? module.synthetic_check[0].canary_name : null
+}

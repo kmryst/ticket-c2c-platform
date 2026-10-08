@@ -1288,8 +1288,11 @@ module "dashboard" {
 # read-only の代表 3 endpoint（healthz 相当・frontend HTML・API 代表 read endpoint）を
 # 定期的に外形監視する。severity は Critical（docs/architecture/observability.md 参照）。
 # canary 自体・失敗アラームは us-east-1 に作成する（edge_alerts SNS トピックと同一リージョンに
-# 揃える理由は L-16 / Issue #252 と同じ）。dev は CloudFront が常設のため無条件で作成する。
+# 揃える理由は L-16 / Issue #252 と同じ）。
+# 作成は var.enable_synthetic_check（既定 false）で切り替える（Issue #546 / ADR-0043）。最初の apply では作らず、
+# apply → deploy-backend → deploy-frontend の後の 2 回目の apply（enable_synthetic_check=true）で作る。
 module "synthetic_check" {
+  count  = var.enable_synthetic_check ? 1 : 0
   source = "../../modules/synthetics-canary"
   providers = {
     aws = aws.us_east_1
@@ -1298,4 +1301,15 @@ module "synthetic_check" {
   name          = var.name
   app_fqdn      = local.app_fqdn
   alarm_actions = aws_sns_topic.edge_alerts[*].arn
+}
+
+# Issue #546 で module "synthetic_check" に count を付けたため、state のアドレスが
+# module.synthetic_check から module.synthetic_check[0] に変わる。移行しないと canary・IAM ロール・
+# S3 バケット（force_destroy = true）が delete と create になるため、moved で state を移す
+# （Terraform "Refactoring modules": Enable count or for_each for a module call）。
+# count を外す変更（revert を含む）では、逆向きの moved（from = module.synthetic_check[0]、to = module.synthetic_check）を
+# 入れる（ADR-0043）。
+moved {
+  from = module.synthetic_check
+  to   = module.synthetic_check[0]
 }
