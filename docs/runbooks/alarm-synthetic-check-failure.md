@@ -70,6 +70,10 @@ aws cloudwatch describe-alarms --region us-east-1 --state-value ALARM \
 2. **ALB / ECS / API 側が原因の場合**（`alb-5xx` / `unhealthy-hosts` / ECS 系と併発）: `alarm-alb.md` / `alarm-ecs-cpu-memory.md` など対応する runbook に従う。synthetic 側は origin 復旧後に自然回復する。
 3. **canary script / endpoint path の不整合が原因の場合**（環境は正常、手動 curl は成功するのに canary だけ失敗）: canary の step 定義（`terraform/modules/synthetics-canary`）とアプリのルーティングの乖離を特定し、Terraform / script 修正を Issue 化して対応する（インシデントではなく監視側の保守）。
 
+## 2 回目の apply の直後に OK の通知が届いた場合（Issue #546）
+
+2 回目の apply（`enable_synthetic_check=true`）でアラームを作った直後に、INSUFFICIENT_DATA → OK の遷移で OK の通知メールが 1 通届く。ALARM ではなく想定内の通知で、対応は不要である（`docs/architecture/observability.md`「作成のタイミング（Issue #546）」）。
+
 ## smoke test が外形監視の確認で失敗した場合（Issue #546）
 
 外形監視は最初の apply では作らず、deploy の後の 2 回目の apply（`enable_synthetic_check=true`）で作る（[ADR-0043](../adr/0043-create-synthetic-check-after-first-deploy.md)）。`<env>-smoke-test.yml` の「Check synthetic check canary is RUNNING」step が失敗した場合は、エラーメッセージで次のどちらかを判断する。

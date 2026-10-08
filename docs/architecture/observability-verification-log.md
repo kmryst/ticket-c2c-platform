@@ -80,3 +80,25 @@
 Issue #256 の実装時点では apply を見送ったが、2026-07-12、Issue #276 で dev / staging の canary 成功 run と alarm action 配線を実地確認した。画面証跡は上記の dev / staging スクリーンショット一覧を参照する。
 
 **destroy 後の残存リソース確認（2026-07-19）**: dev / staging が destroy 済みの状態で実地確認した。両環境とも、Synthetics canary、`cwsyn-*` Lambda 関数・Layer、artifact S3 bucket、canary IAM role、`synthetic-check-failure` alarm、関連 CloudWatch Logs log group は 0 件であり、`delete_lambda = true` を含む削除設計どおり残存していないことを確認した。[AWS Synthetics DeleteCanary のドキュメント](https://docs.aws.amazon.com/AmazonSynthetics/latest/APIReference/API_DeleteCanary.html)も参照。
+
+**最初の deploy の後に作成する方式の staging 通し確認（2026-10-08、Issue #546 / PR #551）**: 外形監視を最初の apply では作らず、deploy の後の 2 回目の apply（`enable_synthetic_check=true`）で作る方式（[ADR-0043](../adr/0043-create-synthetic-check-after-first-deploy.md)）を、staging（`capacity_profile=normal`、`public_endpoint_mode=https-dns`）で GitHub Actions の workflow だけを使って確認した。事前に `terraform-apply-bootstrap.yml`（run 37778837312）で、smoke test の読み取り専用ロールに `synthetics:GetCanary` を追加した（`aws_iam_role_policy` 2 件の in-place 変更のみ）。時刻はすべて UTC。
+
+| 手順 | run | 結果 |
+| --- | --- | --- |
+| apply（`enable_synthetic_check=false`） | 37779053761 | success（12:44:35〜13:00:46）。127 add。canary とアラームは作られず、削除検査は「削除する計画は無い」 |
+| deploy-backend（`run_migrations=true`） | 37781096020 | success（13:01:08〜13:08:25） |
+| deploy-frontend | 37782059721 | success（13:08:41〜13:11:58） |
+| apply（`true`） | 37782497674 | success。`module.synthetic_check[0]` の 8 add のみ。canary は 13:13:00 に作成され `RUNNING` |
+| smoke test | 37782778126 | success。canary の確認（`RUNNING`）と HTTP 検証の両方が pass |
+| apply（`false`、canary あり） | 37782968906 | 想定どおり failure。plan は 8 to destroy、削除検査が 8 件の delete を列挙して exit 1、apply は skipped。canary は `RUNNING` のまま |
+| destroy | 37783980477 | success。135 destroyed、残存リソース検査はすべて ok |
+| apply（`false`、canary なし） | 37786746073 | success |
+| smoke test（canary なし） | 37788996095 | 想定どおり failure。canary の確認 step が「外形監視（CloudWatch Synthetics canary）が無い。…」で exit 1、HTTP 検証は skipped |
+| destroy | 37789122557 | success。127 destroyed、残存リソース検査はすべて ok |
+
+- apply（`false`）の開始から deploy-frontend の完了までの 27 分 23 秒、`synthetic-check-failure` は存在せず、alarm history の ALARM 遷移は us-east-1 と ap-northeast-1 とも 0 件だった（Issue #546 の受け入れ条件）。
+- canary の最初の run は 13:13:14 で PASSED。続く 13:18 / 13:23 の run も PASSED で、`SuccessPercent` は 100（13:10 / 13:15 の 5 分枠、各 1 サンプル）。
+- `synthetic-check-failure` は作成直後の 13:13:19 に INSUFFICIENT_DATA → OK に遷移し、edge-alerts の SNS action が 1 回実行された（OK の通知メールが 1 通届く）。ALARM ではなく想定内の通知である（[observability.md「作成のタイミング」](observability.md#作成のタイミングissue-546)）。
+- `cloudfront-5xx-rate` は 2 回の apply のどちらの時間帯でも ALARM にならなかった（INSUFFICIENT_DATA → OK のみ。Issue #550 の参考）。apply から deploy までの間に CloudFront 経由のアクセスが少なかったためと考えられる（推測）。
+- 「canary が無い状態で smoke test が失敗する」確認は、本来は最初の apply（`false`）の直後に実施する手順だったが、その時点で実施し忘れた。canary を手作業で消すなど手順外の操作はせず、destroy → apply（`false`）→ smoke test → destroy をもう 1 回行って確認した。そのため staging の稼働時間が約 35 分延びた。
+- 最終 destroy の後、読み取り専用の aws CLI で ECS クラスター、canary、`ticket-c2c` のアラーム（us-east-1 / ap-northeast-1）、`cwsyn-ticket-c2c*` の Lambda 関数、`ticket-c2c-staging*` の S3 バケット、CloudFront distribution、`ticket-c2c-*` の VPC が 0 件であることを確認した。dev は今回実施していない。
