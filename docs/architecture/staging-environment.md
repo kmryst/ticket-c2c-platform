@@ -267,6 +267,15 @@ terraform が作るタスク定義（api / worker / frontend）は、どこか�
 - 最初の deploy は FAILED の初期 deployment からの update-service になる。新しい deployment が PRIMARY になり、初期 deployment は task が 0 のまま消える。成功判定（`wait-ecs-rollout.sh`）は今回の task definition の deployment だけを見るので、FAILED の初期 deployment を失敗とみなさない。
 - ロールバック用の `image_tag` 入力には過去の short SHA を指定する。`latest` と `pending-deploy` は拒否する。
 - Issue #543 より前に作り、destroy せずに使い続ける環境は、ECR に残った `latest` タグを一度だけ削除する（[runbook](../runbooks/remove-ecr-latest-tag.md)）。
+- 外形監視（CloudWatch Synthetics canary）はこの時点ではまだ作らない（`enable_synthetic_check` の既定値 `false`）。アプリが起動する前に canary を動かすと ALB 503 を記録し、`synthetic-check-failure`（Critical）の通知が出るためである。deploy-backend / deploy-frontend の後、2 回目の `terraform-apply-<env>.yml`（`enable_synthetic_check=true`）で作る（Issue #546 / [ADR-0043](../adr/0043-create-synthetic-check-after-first-deploy.md)、下記「staging の手動検証フロー」）。
+
+### 外形監視の作成と削除検査（Issue #546）
+
+- `terraform-apply-<env>.yml` の入力 `enable_synthetic_check`（boolean、既定 `false`）を `TF_VAR_enable_synthetic_check` で渡す。`true` のときだけ `module.synthetic_check` を作る。staging は `public_endpoint_mode=https-dns` のときだけ作る（`alb-http-only` では `true` でも作らない）。
+- apply workflow は plan の後、`terraform show -json` の結果を `scripts/deployment/check-synthetic-check-plan.sh` で検査する。`module.synthetic_check` 配下のリソースを delete する計画（replace の `["delete","create"]` / `["create","delete"]` を含む）なら、入力の値に関係なく apply の前に失敗する。作成済みの環境を `false` で apply して外形監視が消える事故と、`moved` の書き忘れなどで canary・S3 バケット（`force_destroy = true`）が作り直される事故を防ぐ。
+- 外形監視を作った後の apply は、常に `enable_synthetic_check=true` で実行する。外形監視を外す手段は `terraform-destroy-<env>.yml` での環境ごとの削除だけとする。空の state からの apply では delete が出ないので、検査は止めない。
+- ローカルでの apply はこの検査を通らない。外形監視を作った環境では `-var enable_synthetic_check=true` を付ける。
+- smoke test は、外形監視が state にあり（output `synthetic_check_canary_name`）、AWS 上で `RUNNING` であることを確認する。2 回目の apply を忘れると smoke test が失敗する。
 
 ## GitHub Actions
 
@@ -278,15 +287,15 @@ dev と staging は workflow を分ける。dev workflow に `normal` / `full` �
 | --- | --- | --- | --- | --- |
 | `terraform-plan.yml` | PR ごとの plan | なし | なし | 既存 workflow。matrix `[bootstrap, dev, staging]` で staging root の plan は既に対応済み。分割対象外 |
 | `terraform-apply-bootstrap.yml` | bootstrap apply | なし | `bootstrap` | 既存 `terraform-apply.yml` の bootstrap 分を切り出す |
-| `terraform-apply-dev.yml` | dev apply | `task_config_check_value` 任意（AWS での確認用。[runbook](../runbooks/apply-task-definition-config-change.md)） | `dev` | 既存 `terraform-apply.yml` の dev 分を切り出す。`environment` 選択入力は持たない |
+| `terraform-apply-dev.yml` | dev apply | `task_config_check_value` 任意（AWS での確認用。[runbook](../runbooks/apply-task-definition-config-change.md)）、`enable_synthetic_check`（既定 `false`。2 回目の apply から `true`。Issue #546） | `dev` | 既存 `terraform-apply.yml` の dev 分を切り出す。`environment` 選択入力は持たない |
 | `terraform-destroy-dev.yml` | dev destroy | `confirm=destroy-dev` | `dev-destroy` | destroy 後の残存リソース確認を追加する |
 | `deploy-backend-dev.yml` | dev backend deploy | `image_tag` 任意、`run_migrations` | `dev` | L-11（Issue #182）で `deploy-app-dev.yml` から分離。本体は reusable workflow `deploy-service.yml`（Issue #180）。サービス更新前に OpenSearch の search index migration を毎回実行し、成功判定は全サービスの rollout 完了で行う（Issue #538 / [ADR-0039](../adr/0039-run-search-index-migration-and-verify-ecs-rollout-in-deploy.md)） |
 | `deploy-frontend-dev.yml` | dev frontend deploy | `image_tag` 任意 | `dev` | 同上（frontend 側） |
-| `terraform-apply-staging.yml` | staging apply | `capacity_profile=normal \| full`、`public_endpoint_mode=https-dns \| alb-http-only`、`task_config_check_value` 任意（AWS での確認用） | `staging` | `terraform/environments/staging` を apply。`environment` 選択入力は持たず、staging 固有の `capacity_profile` のみ受け取る |
+| `terraform-apply-staging.yml` | staging apply | `capacity_profile=normal \| full`、`public_endpoint_mode=https-dns \| alb-http-only`、`task_config_check_value` 任意（AWS での確認用）、`enable_synthetic_check`（既定 `false`。2 回目の apply から `true`。Issue #546） | `staging` | `terraform/environments/staging` を apply。`environment` 選択入力は持たず、staging 固有の `capacity_profile` のみ受け取る。plan の後、外形監視の削除検査で失敗すると apply しない |
 | `deploy-backend-staging.yml` | staging backend deploy | `image_tag` 任意、`run_migrations` | `staging` | ECR / ECS 名は `ticket-c2c-staging` を使う。search index migration と rollout 確認は dev と同じ |
 | `deploy-frontend-staging.yml` | staging frontend deploy | `image_tag` 任意 | `staging` | alb-http-only モード（frontend service 不在）ではサービス更新をスキップ |
 | `db-migrate-staging.yml` | staging DB migration（backend deployとは別に手動起動） | なし | `staging` | ECS run-task でTypeORM migrationsを適用し、apply / destroy・deploy・readinessとの同時実行は共通concurrency group（`mutation-staging`）で防ぐ（Issue #92 / #544）。dev用は`db-migrate-dev.yml` |
-| `staging-smoke-test.yml` | staging smoke / integration test | なし | `staging-readonly` | apply ロールを流用しない。staging state file の S3 read-only に限定した専用 IAM ロールで `terraform output` を取得し、以降の HTTP 検証は AWS credential を使わない |
+| `staging-smoke-test.yml` | staging smoke / integration test | なし | `staging-readonly` | apply ロールを流用しない。staging state file の S3 read-only に限定した専用 IAM ロールで `terraform output` を取得し、以降の HTTP 検証は AWS credential を使わない。https-dns では、同じロールの `synthetics:GetCanary` で外形監視が `RUNNING` であることも確認する（Issue #546） |
 | `terraform-destroy-staging.yml` | staging destroy | `confirm=destroy-staging` | `staging-destroy` | 検証後に毎回手動で実行する |
 
 `staging-ephemeral-verify.yml` は初期には作らない。apply / deploy / smoke / destroy を個別 workflow として実行し、どこで失敗したかを追いやすくする。
@@ -318,11 +327,12 @@ bootstrap の IAM OIDC trust には、上記 Environment を引き受けられ�
 staging は毎回 destroy する。自動 destroy ではなく、検証結果を確認してから人間が `terraform-destroy-staging.yml` を実行する。
 
 ```text
-terraform-apply-staging.yml
+terraform-apply-staging.yml（enable_synthetic_check=false。既定値）
   -> deploy-backend-staging.yml（初回・スキーマ変更時は run_migrations=true。
      OpenSearch の events index は毎回自動で作成・更新される）
   -> deploy-frontend-staging.yml（https-dns のみ）
-  -> staging-smoke-test.yml
+  -> terraform-apply-staging.yml（enable_synthetic_check=true。https-dns で外形監視を作る。Issue #546）
+  -> staging-smoke-test.yml（https-dns では外形監視が RUNNING でなければ失敗する）
   -> 結果確認
   -> terraform-destroy-staging.yml
   -> destroy 後確認
@@ -332,7 +342,7 @@ terraform-apply-staging.yml
 
 ## smoke test
 
-`staging-smoke-test.yml` は Terraform output `api_base_url` を取得し、`SMOKE_TEST_BASE_URL` に設定して TypeScript の検証スクリプトを実行する。`STAGING_BASE_URL` はローカル実行の後方互換名として script 側だけで受け付ける。
+`staging-smoke-test.yml` は Terraform output `api_base_url` を取得し、`SMOKE_TEST_BASE_URL` に設定して TypeScript の検証スクリプトを実行する。その前に、https-dns（output `app_url` がある）では output `synthetic_check_canary_name` が state にあり、`aws synthetics get-canary --region us-east-1` の `Status.State` が `RUNNING` であることを確認する。どちらかが満たされなければ失敗し、2 回目の apply（`enable_synthetic_check=true`）の実行を案内する（Issue #546 / [ADR-0043](../adr/0043-create-synthetic-check-after-first-deploy.md)）。`STAGING_BASE_URL` はローカル実行の後方互換名として script 側だけで受け付ける。
 
 実装（Issue #90 / #94）:
 

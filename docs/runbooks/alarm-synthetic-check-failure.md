@@ -70,6 +70,15 @@ aws cloudwatch describe-alarms --region us-east-1 --state-value ALARM \
 2. **ALB / ECS / API 側が原因の場合**（`alb-5xx` / `unhealthy-hosts` / ECS 系と併発）: `alarm-alb.md` / `alarm-ecs-cpu-memory.md` など対応する runbook に従う。synthetic 側は origin 復旧後に自然回復する。
 3. **canary script / endpoint path の不整合が原因の場合**（環境は正常、手動 curl は成功するのに canary だけ失敗）: canary の step 定義（`terraform/modules/synthetics-canary`）とアプリのルーティングの乖離を特定し、Terraform / script 修正を Issue 化して対応する（インシデントではなく監視側の保守）。
 
+## smoke test が外形監視の確認で失敗した場合（Issue #546）
+
+外形監視は最初の apply では作らず、deploy の後の 2 回目の apply（`enable_synthetic_check=true`）で作る（[ADR-0043](../adr/0043-create-synthetic-check-after-first-deploy.md)）。`<env>-smoke-test.yml` の「Check synthetic check canary is RUNNING」step が失敗した場合は、エラーメッセージで次のどちらかを判断する。
+
+- **外形監視（CloudWatch Synthetics canary）が無い**（output `synthetic_check_canary_name` が state に無い）: 2 回目の apply が未実行。`deploy-backend-<env>.yml` / `deploy-frontend-<env>.yml` が成功していることを確認し、`terraform-apply-<env>.yml` を `enable_synthetic_check=true` で実行してから smoke test をやり直す。staging は `public_endpoint_mode=https-dns` のときだけ確認する。
+- **状態が `RUNNING` ではない**: `aws synthetics get-canary --region us-east-1 --name <name>-synthetic-check` の `Status.State` と `Status.StateReason` を確認する。`STOPPED` / `ERROR` なら、上の「初動確認」「主な原因候補」から原因を切り分ける。`CREATING` / `STARTING` / `UPDATING` なら数分おいて smoke test をやり直す。
+
+`terraform-apply-<env>.yml` が「外形監視（module.synthetic_check）のリソースを削除する計画のため、apply を中止する」で失敗した場合は、作成済みの環境を `enable_synthetic_check=false` で apply しようとしている。`true` で実行し直す。外形監視を外す必要がある場合は `terraform-destroy-<env>.yml` で環境ごと削除する。入力が `true` でも失敗する場合は、`module.synthetic_check` 配下の replace（名前の変更など）か、state のアドレス変更（`moved` の書き忘れ）が起きている。run log の plan と検査の出力（address と actions）を確認し、コードを直す PR を出す。
+
 ## エスカレーション条件
 
 - **Critical**: 通知受信次第、1 時間以内に状況確認を開始する。

@@ -106,15 +106,27 @@ terraform/
 | workflow | トリガー | 内容 |
 | --- | --- | --- |
 | `terraform-plan.yml` | PR（`terraform/**`） | fmt / validate / plan。plan 専用ロール |
-| `terraform-apply-dev.yml` | workflow_dispatch | plan → Environment `dev` の branch restriction を通して apply |
+| `terraform-apply-dev.yml` | workflow_dispatch | plan → 外形監視の削除検査 → Environment `dev` の branch restriction を通して apply。入力 `enable_synthetic_check`（既定 `false`）で外形監視（CloudWatch Synthetics canary）を作るかを切り替える（Issue #546 / [ADR-0043](../adr/0043-create-synthetic-check-after-first-deploy.md)） |
 | `terraform-destroy-dev.yml` | workflow_dispatch | `confirm` 入力（`destroy-dev` 完全一致）+ Environment `dev-destroy` の branch restriction（`main` のみ） |
 | `deploy-backend-dev.yml` | workflow_dispatch | backend（api + worker）の Docker build → ECR push → （任意）DB migration → OpenSearch の search index migration（毎回）→ ECS サービス更新 → 全サービスの rollout 完了確認。`run_migrations` 入力あり（L-11 / Issue #182 で `deploy-app-dev.yml` から分離。search index migration と rollout 確認は Issue #538。詳細は [staging-environment.md](./staging-environment.md)「OpenSearch の search index migration」「deploy の成功判定」） |
 | `deploy-frontend-dev.yml` | workflow_dispatch | frontend（Next.js SSR）の Docker build → ECR push → ECS サービス更新 |
-| `dev-smoke-test.yml` | workflow_dispatch | dev の配線を機械的に検証する smoke / integration test（staging-smoke-test.yml を踏襲。Issue #192）。apply ロールを流用せず、dev state file の S3 read-only に限定した専用ロール（Environment `dev-readonly`）で `terraform output` を取得し、以降の HTTP 検証（`scripts/staging/smoke-test.ts`、`npm run smoke:dev`）は AWS credential を使わない。dev の test data は destroy まで残存する。**セットアップ・実地検証済み**（2026-07-08、Issue #192）: bootstrap apply で `dev_state_readonly_role_arn`（`ticket-c2c-platform-gha-dev-state-readonly`）を作成し、GitHub Environment `dev-readonly`（`staging-readonly` と同じ branch policy = `main` 限定）と repo Variable `AWS_DEV_READONLY_ROLE_ARN` を設定。`terraform-apply-dev` → `deploy-backend-dev`（`run_migrations=true`）→ `dev-smoke-test.yml` の順に実行し、`dev-smoke-test.yml` が AWS credential なしの HTTP 検証込みで成功することを確認。検証後 dev は destroy 済み |
+| `dev-smoke-test.yml` | workflow_dispatch | dev の配線を機械的に検証する smoke / integration test（staging-smoke-test.yml を踏襲。Issue #192）。apply ロールを流用せず、dev state file の S3 read-only に限定した専用ロール（Environment `dev-readonly`）で `terraform output` を取得し、以降の HTTP 検証（`scripts/staging/smoke-test.ts`、`npm run smoke:dev`）は AWS credential を使わない。dev の test data は destroy まで残存する。**セットアップ・実地検証済み**（2026-07-08、Issue #192）: bootstrap apply で `dev_state_readonly_role_arn`（`ticket-c2c-platform-gha-dev-state-readonly`）を作成し、GitHub Environment `dev-readonly`（`staging-readonly` と同じ branch policy = `main` 限定）と repo Variable `AWS_DEV_READONLY_ROLE_ARN` を設定。`terraform-apply-dev` → `deploy-backend-dev`（`run_migrations=true`）→ `dev-smoke-test.yml` の順に実行し、`dev-smoke-test.yml` が AWS credential なしの HTTP 検証込みで成功することを確認。検証後 dev は destroy 済み。HTTP 検証の前に、外形監視（CloudWatch Synthetics canary）が state にあり RUNNING であることを同じロールの `synthetics:GetCanary` で確認する（Issue #546） |
 
 backend / frontend のデプロイは L-11（Issue #182）で分離した。イメージタグは各 workflow が自分のビルド時点のコミット short SHA を独立して使い、backend / frontend でタグを意図的に同期しない。ロールバック（`image_tag` 入力）も workflow 単位で独立して行う。デプロイ手順本体は reusable workflow `deploy-service.yml`（Issue #180）に共通化されている。
 
 `terraform-apply-dev.yml` が作るタスク定義は、どこからも push しないイメージタグ `pending-deploy` を参照する。apply 直後の api / worker / frontend は `CannotPullContainerError` で起動せず、初期 deployment は deployment circuit breaker で FAILED になる。アプリは `deploy-backend-dev.yml`（初回は `run_migrations=true`）/ `deploy-frontend-dev.yml` の update-service で初めて起動する。deploy workflow は `latest` を push しない（Issue #543 / [ADR-0040](../adr/0040-initial-task-definition-uses-unpushed-image-tag.md)。詳細は [staging-environment.md](./staging-environment.md)「terraform apply 直後の初期 deployment」）。
+
+外形監視（CloudWatch Synthetics canary）は最初の apply では作らない。apply 直後はアプリが起動していないため、canary が ALB 503 を記録して `synthetic-check-failure`（Critical）の通知が出るからである。dev の起動手順は次のとおり（Issue #546 / [ADR-0043](../adr/0043-create-synthetic-check-after-first-deploy.md)）。
+
+```text
+terraform-apply-dev.yml（enable_synthetic_check=false。既定値）
+  -> deploy-backend-dev.yml（初回・スキーマ変更時は run_migrations=true）
+  -> deploy-frontend-dev.yml
+  -> terraform-apply-dev.yml（enable_synthetic_check=true。外形監視を作る）
+  -> dev-smoke-test.yml（外形監視が RUNNING でなければ失敗する）
+```
+
+外形監視を作った後の apply は、常に `enable_synthetic_check=true` で実行する。`false` のままだと外形監視を削除する計画になり、`terraform-apply-dev.yml` は apply の前に失敗する（`scripts/deployment/check-synthetic-check-plan.sh`。replace を含め、`module.synthetic_check` 配下の delete はすべて止める）。外形監視を外す手段は `terraform-destroy-dev.yml` での環境ごとの削除だけとする。ローカルでの apply はこの検査を通らないため、外形監視を作った環境では `-var enable_synthetic_check=true` を付ける。
 
 deploy workflow は、terraform が最後の apply で登録したタスク定義（state の output `ecs_task_definition_arns`）のイメージだけを差し替えて register する。terraform で環境変数などの設定を変えたら、`terraform-apply-dev.yml` の後に deploy workflow を実行して反映する。rollback（`image_tag`）は「過去のイメージ ＋ 現在の terraform の設定」になる。apply / destroy・deploy・DB 操作系の workflow は concurrency group `mutation-dev` で同時実行を防ぐ（実行順は保証されないので、apply の完了を確認してから deploy を起動する。Issue #544 / [ADR-0042](../adr/0042-deploy-copies-terraform-registered-task-definition.md)。詳細は [staging-environment.md](./staging-environment.md)「task definition の設定とイメージの分担」、手順は [runbook](../runbooks/apply-task-definition-config-change.md)）。
 
@@ -124,7 +136,7 @@ GitHub Environments / Variables:
 | --- | --- | --- |
 | Environment | `dev` | apply / deploy。`main` branch restriction を設定し、required reviewer は設定しない |
 | Environment | `dev-destroy` | destroy 専用。`main` branch restriction を設定し、required reviewer は設定しない（[ADR-0038](../adr/0038-remove-environment-required-reviewers-except-bootstrap.md)） |
-| Environment | `dev-readonly` | smoke test 専用（Issue #192）。dev state file の S3 read-only ロールのみ引き受け、apply / destroy 権限は持たない。権限が最小のため required reviewer は必須にしない（staging-readonly と同じ方針） |
+| Environment | `dev-readonly` | smoke test 専用（Issue #192）。dev state file の S3 read-only ロールのみ引き受け、apply / destroy 権限は持たない（外形監視の状態確認用に dev の canary 1 つへの `synthetics:GetCanary` だけを持つ。Issue #546）。権限が最小のため required reviewer は必須にしない（staging-readonly と同じ方針） |
 | Variable | `AWS_REGION` | `ap-northeast-1` |
 | Variable | `AWS_PLAN_ROLE_ARN` | plan 用読み取りロール |
 | Variable | `AWS_APPLY_ROLE_ARN` | apply / destroy / deploy 用ロール |

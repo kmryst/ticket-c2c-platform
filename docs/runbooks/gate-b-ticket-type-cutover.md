@@ -269,6 +269,8 @@ desiredCount を 0 にしてから deploy し、手動で `search-index-migrate`
 9. **smoke**
    - 実行: `staging-smoke-test.yml` / `dev-smoke-test.yml` を dispatch。
    - 合格条件: smoke の全ケース成功（失敗 0）。
+   - smoke は HTTP 検証の前に外形監視（CloudWatch Synthetics canary）が `RUNNING` であることを確認する（Issue #546）。
+     環境の構築時に、deploy の後の 2 回目の `terraform-apply-<env>.yml`（`enable_synthetic_check=true`）を済ませておく。
    - 停止条件: 1 件でも失敗したら rollback session（5 章）の判断へ入る。
    - 注意: smoke workflow は独立 concurrency group のため機械排他されない。**この step 以外で
      session 中に smoke を dispatch しない**。
