@@ -12,7 +12,7 @@ ECS service は `ignore_changes = [task_definition]` なので、apply だけで
 ## 設定を変えて反映する
 
 1. terraform のコードを変える PR をマージする。
-2. `terraform-apply-<env>.yml` を実行する。plan で、対象の `aws_ecs_task_definition` が作り直され（`must be replaced`）、`aws_ecs_service` に差分が無いことを確認する。
+2. `terraform-apply-<env>.yml` を実行する。外形監視を作った環境では入力 `enable_synthetic_check=true` を付ける（`false` だと外形監視を削除する計画になり、apply の前に失敗する。Issue #546）。plan で、対象の `aws_ecs_task_definition` が作り直され（`must be replaced`）、`aws_ecs_service` に差分が無いことを確認する。
 3. **apply の run が success で完了したことを確認してから**、変えた service の deploy workflow を実行する。
    - api / worker: `deploy-backend-<env>.yml`。migration が新しい設定を必要とする場合は `run_migrations=true`。
    - frontend: `deploy-frontend-<env>.yml`。
@@ -33,7 +33,7 @@ apply と deploy は同じ concurrency group（`mutation-<env>`、`queue: max`�
 設定まで過去に戻す場合:
 
 1. terraform の設定を戻す PR をマージする（`git revert` など）。
-2. `terraform-apply-<env>.yml` を実行する。
+2. `terraform-apply-<env>.yml` を実行する（外形監視を作った環境では `enable_synthetic_check=true`）。
 3. `deploy-backend-<env>.yml` / `deploy-frontend-<env>.yml` を `image_tag=<戻したい short SHA>` で実行する。
 
 新しいイメージが新しい設定（追加した環境変数など）を必須にしている場合、過去のイメージは問題なく動くが、新しいイメージを過去の設定で動かす組み合わせは作れない（deploy は常に terraform の現在の設定を使う）。設定を戻すのは、そのイメージも戻す時だけにする。
@@ -68,6 +68,9 @@ service_td() {
 gh workflow run terraform-apply-staging.yml -f capacity_profile=normal -f public_endpoint_mode=https-dns
 gh workflow run deploy-backend-staging.yml -f run_migrations=true
 gh workflow run deploy-frontend-staging.yml
+# 外形監視（CloudWatch Synthetics canary）は deploy の後の 2 回目の apply で作る（Issue #546）
+gh workflow run terraform-apply-staging.yml -f capacity_profile=normal -f public_endpoint_mode=https-dns \
+  -f enable_synthetic_check=true
 gh workflow run staging-smoke-test.yml
 ```
 
@@ -85,7 +88,7 @@ done
 
 ```bash
 gh workflow run terraform-apply-staging.yml -f capacity_profile=normal -f public_endpoint_mode=https-dns \
-  -f task_config_check_value="$CHECK_VALUE"
+  -f enable_synthetic_check=true -f task_config_check_value="$CHECK_VALUE"
 ```
 
 合格条件:
@@ -142,4 +145,4 @@ gh workflow run deploy-backend-staging.yml -f image_tag=<手順 1 の commit の
 
 ### 5. 後片付け
 
-staging は destroy する（`terraform-destroy-staging.yml`）。destroy しない環境では、`task_config_check_value` を空にして `terraform-apply-<env>.yml` を実行し、続けて deploy workflow を実行すると `TASK_CONFIG_CHECK_VALUE` が消える。
+staging は destroy する（`terraform-destroy-staging.yml`）。destroy しない環境では、`task_config_check_value` を空にして `terraform-apply-<env>.yml` を実行し（外形監視を作った環境では `enable_synthetic_check=true` を付ける）、続けて deploy workflow を実行すると `TASK_CONFIG_CHECK_VALUE` が消える。

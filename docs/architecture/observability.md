@@ -267,9 +267,20 @@ canary 本体（`aws_synthetics_canary`）・IAM 実行ロール・アーティ�
 
 2026-07-19、dev / staging が destroy 済みの状態で、canary 本体・補助リソース（`cwsyn-*` Lambda 関数・Layer 等）が両環境とも残存していないことを実地確認済み。確認内容の詳細は [observability-verification-log.md「Synthetics canary 実地検証」](observability-verification-log.md#synthetics-canary-実地検証) を参照。
 
+### 作成のタイミング（Issue #546）
+
+canary と失敗アラームは、最初の `terraform apply` では作らない。作成は変数 `enable_synthetic_check`（既定 `false`）で切り替え、apply → deploy-backend → deploy-frontend の後の 2 回目の apply（`terraform-apply-<env>.yml` の入力 `enable_synthetic_check=true`）で作る。判断の背景と不採用案は [ADR-0043](../adr/0043-create-synthetic-check-after-first-deploy.md) に記録した。
+
+- 理由: apply 直後のタスク定義は push しないイメージタグ `pending-deploy` を参照し、最初の deploy の update-service までアプリが起動しない（[ADR-0040](../adr/0040-initial-task-definition-uses-unpushed-image-tag.md)）。その間に canary が動くと ALB 503 で `SuccessPercent=0` を記録し、10 分で `synthetic-check-failure`（Critical）が ALARM になる。0 という実データが出るため `treat_missing_data = notBreaching` では防げない（2026-10-07 の staging で 3 回観測。Issue #546）。
+- 作成時点ですでに deploy が終わっているので、モジュールの `start_canary = true` は変えない。作成直後から監視が動く。
+- 無効（`false`）の間は canary もアラームも存在しないため、外形監視は働かない。2 回目の apply を忘れると外形監視が無いままになるので、`<env>-smoke-test.yml` が「canary が state にあり、`RUNNING` である」ことを確認し、満たさなければ失敗する。
+- 作成済みの環境を `false` で apply すると canary を削除する計画になる。apply workflow は plan の JSON を `scripts/deployment/check-synthetic-check-plan.sh` で検査し、`module.synthetic_check` 配下の delete（replace を含む）があれば、入力の値に関係なく apply の前に失敗する。外形監視を外す手段は環境の destroy だけとする。
+- dev は Issue #546 で `module "synthetic_check"` に `count` を付けたため、state のアドレスを `moved`（`module.synthetic_check` → `module.synthetic_check[0]`）で移す。staging は以前から `count` があり、アドレスは変わらない。
+- `cloudfront-5xx-rate` が apply 直後に発火する件は、canary の GET だけでは評価条件（`Requests >= 10`）に届かないと考えられるため、Issue #550 で別に扱う。
+
 ### staging の `alb-http-only` モードでの扱い
 
-staging は `public_endpoint_mode=alb-http-only` の場合 CloudFront / `app_fqdn` が存在しないため、canary モジュール呼び出し自体を `count = local.https_enabled ? 1 : 0` で条件化し、この場合は canary を作成しない（dev は CloudFront が常設のため無条件で作成する）。
+staging は `public_endpoint_mode=alb-http-only` の場合 CloudFront / `app_fqdn` が存在しないため、canary モジュール呼び出し自体を `count = local.https_enabled && var.enable_synthetic_check ? 1 : 0` で条件化し、この場合は `enable_synthetic_check=true` でも canary を作成しない。dev は CloudFront が常設のため、`enable_synthetic_check` だけで切り替える。
 
 ### 検証
 

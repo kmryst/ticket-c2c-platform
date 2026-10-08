@@ -98,3 +98,17 @@ variable "task_config_check_value" {
     error_message = "task_config_check_value は英数字と . _ - の 64 文字以内（空なら環境変数を足さない）。"
   }
 }
+
+variable "enable_synthetic_check" {
+  description = <<-EOT
+    外形監視（CloudWatch Synthetics canary）と失敗アラーム synthetic-check-failure を作るか（Issue #546 / ADR-0043）。
+    既定は false で、最初の apply では作らない。apply 直後は ECS タスクが起動しておらず（ADR-0040）、
+    canary が ALB 503 を記録して Critical 通知が出るためである。
+    apply → deploy-backend → deploy-frontend の後、terraform-apply-<env>.yml を入力 enable_synthetic_check=true で
+    もう一度実行して作る（TF_VAR_enable_synthetic_check で渡す）。一度作った後は、false で apply すると
+    canary を削除する計画になり、apply workflow の検査（scripts/deployment/check-synthetic-check-plan.sh）で失敗する。
+    ローカルで apply する場合はこの検査を通らないため、作成済みの環境では -var enable_synthetic_check=true を付ける。
+  EOT
+  type        = bool
+  default     = false
+}

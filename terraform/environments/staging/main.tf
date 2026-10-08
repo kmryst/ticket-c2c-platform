@@ -1402,8 +1402,11 @@ module "dashboard" {
 # canary 自体・失敗アラームは us-east-1 に作成する（edge_alerts SNS トピックと同一リージョンに
 # 揃える理由は L-16 / Issue #252 と同じ）。staging は public_endpoint_mode（alb-http-only）次第で
 # CloudFront / app_fqdn が存在しないことがあるため、その場合は canary ごと作成しない。
+# https-dns でも、作成は var.enable_synthetic_check（既定 false）で切り替える（Issue #546 / ADR-0043）。最初の apply では
+# 作らず、apply → deploy-backend → deploy-frontend の後の 2 回目の apply（enable_synthetic_check=true）で作る。
+# count は Issue #256 から付いており、state のアドレス（module.synthetic_check[0]）は変わらないため moved は要らない。
 module "synthetic_check" {
-  count  = local.https_enabled ? 1 : 0
+  count  = local.https_enabled && var.enable_synthetic_check ? 1 : 0
   source = "../../modules/synthetics-canary"
   providers = {
     aws = aws.us_east_1

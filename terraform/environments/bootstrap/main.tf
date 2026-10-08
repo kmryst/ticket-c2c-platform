@@ -60,10 +60,20 @@ module "github_oidc" {
   create_oidc_provider = false
 }
 
+# smoke test が状態を確認する外形監視（CloudWatch Synthetics canary）の ARN（Issue #546 / ADR-0043）。
+# canary は us-east-1 に作る（terraform/modules/synthetics-canary）。名前は "<環境の var.name>-synthetic-check"
+# （dev: ticket-c2c-dev、staging: ticket-c2c-staging）。どちらかを変えるときはここも同じ PR で変える。
+data "aws_caller_identity" "current" {}
+
+locals {
+  dev_synthetic_check_canary_arn     = "arn:aws:synthetics:us-east-1:${data.aws_caller_identity.current.account_id}:canary:ticket-c2c-dev-synthetic-check"
+  staging_synthetic_check_canary_arn = "arn:aws:synthetics:us-east-1:${data.aws_caller_identity.current.account_id}:canary:ticket-c2c-staging-synthetic-check"
+}
+
 # ---------- staging smoke test 用の state 読み取り専用ロール ----------
 # staging-smoke-test.yml は apply ロールを流用せず、staging state file の読み取りに限定した
 # このロールで `terraform output` を取得する（staging-environment.md）。以降の HTTP 検証は
-# AWS credential を使わない。
+# AWS credential を使わない。外形監視の状態確認（synthetics:GetCanary）だけは AWS API を読む（Issue #546）。
 data "aws_iam_policy_document" "staging_state_readonly_assume" {
   statement {
     effect  = "Allow"
@@ -112,6 +122,13 @@ resource "aws_iam_role_policy" "staging_state_readonly" {
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
         Resource = ["${aws_s3_bucket.tfstate.arn}/staging/*"]
+      },
+      {
+        # staging-smoke-test.yml が外形監視（CloudWatch Synthetics canary）の状態（RUNNING）を確認する
+        # （Issue #546 / ADR-0043）。GetCanary は canary の ARN でリソースを絞れる（Service Authorization Reference）。
+        Effect   = "Allow"
+        Action   = ["synthetics:GetCanary"]
+        Resource = [local.staging_synthetic_check_canary_arn]
       }
     ]
   })
@@ -120,7 +137,7 @@ resource "aws_iam_role_policy" "staging_state_readonly" {
 # ---------- dev smoke test 用の state 読み取り専用ロール ----------
 # dev-smoke-test.yml は apply ロールを流用せず、dev state file の読み取りに限定した
 # このロールで `terraform output` を取得する（dev-environment.md、staging 版の設計を踏襲。Issue #192）。
-# 以降の HTTP 検証は AWS credential を使わない。
+# 以降の HTTP 検証は AWS credential を使わない。外形監視の状態確認（synthetics:GetCanary）だけは AWS API を読む（Issue #546）。
 data "aws_iam_policy_document" "dev_state_readonly_assume" {
   statement {
     effect  = "Allow"
@@ -169,6 +186,13 @@ resource "aws_iam_role_policy" "dev_state_readonly" {
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
         Resource = ["${aws_s3_bucket.tfstate.arn}/dev/*"]
+      },
+      {
+        # dev-smoke-test.yml が外形監視（CloudWatch Synthetics canary）の状態（RUNNING）を確認する
+        # （Issue #546 / ADR-0043）。GetCanary は canary の ARN でリソースを絞れる（Service Authorization Reference）。
+        Effect   = "Allow"
+        Action   = ["synthetics:GetCanary"]
+        Resource = [local.dev_synthetic_check_canary_arn]
       }
     ]
   })
