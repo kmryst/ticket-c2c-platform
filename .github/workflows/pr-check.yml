@@ -95,6 +95,11 @@ jobs:
       - name: Validate ECS rollout check
         run: bash scripts/deployment/wait-ecs-rollout.spec.sh
 
+      # Issue #546 / ADR-0043: terraform-apply-<env>.yml が apply の前に実行する外形監視の削除検査を、
+      # plan JSON の fixture（delete / replace / moved による no-op / create のみ）で検証する。
+      - name: Validate synthetic check plan deletion check
+        run: bash scripts/deployment/check-synthetic-check-plan.spec.sh
+
       # Issue #543 / ADR-0040: deploy-service.yml の step を順序と if 条件どおりに AWS CLI / docker の
       # スタブで実行し、latest と pending-deploy を push しないこと、DB migration / search index migration が
       # 失敗したら update-service を呼ばないことを確認する（AWS へは接続しない）。

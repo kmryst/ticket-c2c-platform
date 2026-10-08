@@ -10,6 +10,11 @@ on:
         required: false
         type: string
         default: ""
+      enable_synthetic_check:
+        description: "外形監視（CloudWatch Synthetics canary）を作る。最初の apply は false、deploy-backend → deploy-frontend の後の 2 回目の apply から true（作成済みの環境で false にすると削除の計画になり、apply の前に失敗する。Issue #546 / ADR-0043）"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
@@ -34,12 +39,15 @@ jobs:
         working-directory: terraform/environments/dev
     env:
       TF_VAR_task_config_check_value: ${{ inputs.task_config_check_value }}
+      TF_VAR_enable_synthetic_check: ${{ inputs.enable_synthetic_check }}
     steps:
       - uses: actions/checkout@v7
 
       - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: "1.14.8"
+          # plan の JSON（terraform show -json）をファイルへ書き出すため wrapper を無効化する（Issue #546）
+          terraform_wrapper: false
 
       - name: Configure AWS credentials (apply role)
         uses: aws-actions/configure-aws-credentials@v6
@@ -53,8 +61,20 @@ jobs:
       - name: Terraform plan
         run: terraform plan -input=false -no-color -out=tfplan.bin
 
+      # Issue #546 / ADR-0043: 外形監視（module.synthetic_check）のリソースを削除する計画（replace を含む）なら、
+      # 入力 enable_synthetic_check の値に関係なく apply の前に失敗させる（作成済みの環境を false で apply する事故、
+      # moved の書き忘れによる canary の作り直しを防ぐ）。外形監視を外す場合は terraform-destroy-dev.yml を使う。
+      - name: Check synthetic check deletion in plan
+        run: |
+          terraform show -json tfplan.bin > tfplan.json
+          "$GITHUB_WORKSPACE/scripts/deployment/check-synthetic-check-plan.sh" tfplan.json
+
       - name: Terraform apply
         run: terraform apply -input=false -no-color tfplan.bin
 
       - name: Outputs
-        run: terraform output -no-color >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          {
+            echo "enable_synthetic_check: ${{ inputs.enable_synthetic_check }}"
+            terraform output -no-color
+          } >> "$GITHUB_STEP_SUMMARY"
