@@ -28,6 +28,10 @@ locals {
   # edge widget の有無で以降の y 座標を詰める（widget なしの帯を残さないため）。
   base_y = local.has_edge ? 8 : 2
 
+  # frontend / CloudFront / WAF の名前は未構築なら null で渡る。templatefile には null を空文字に置き換えて渡す
+  # （テンプレートでは has_edge / has_frontend の分岐の中でだけ参照する）。coalesce(null, "") は
+  # 「null でも空文字でもない引数が無い」としてエラーになるため条件式で書く（Issue #552）。
+
   dashboard_body = templatefile("${path.module}/templates/dashboard.json.tftpl", {
     name        = var.name
     region      = var.region
@@ -37,20 +41,20 @@ locals {
 
     alb_arn_suffix                       = var.alb_arn_suffix
     alb_api_target_group_arn_suffix      = var.alb_api_target_group_arn_suffix
-    alb_frontend_target_group_arn_suffix = coalesce(var.alb_frontend_target_group_arn_suffix, "")
+    alb_frontend_target_group_arn_suffix = var.alb_frontend_target_group_arn_suffix == null ? "" : var.alb_frontend_target_group_arn_suffix
 
     ecs_cluster_name          = var.ecs_cluster_name
     ecs_api_service_name      = var.ecs_api_service_name
     ecs_worker_service_name   = var.ecs_worker_service_name
-    ecs_frontend_service_name = coalesce(var.ecs_frontend_service_name, "")
+    ecs_frontend_service_name = var.ecs_frontend_service_name == null ? "" : var.ecs_frontend_service_name
 
     aurora_cluster_identifier = var.aurora_cluster_identifier
 
     sqs_dlq_name          = var.sqs_dlq_name
     sqs_source_queue_name = var.sqs_source_queue_name
 
-    cloudfront_distribution_id = coalesce(var.cloudfront_distribution_id, "")
-    waf_web_acl_name           = coalesce(var.waf_web_acl_name, "")
+    cloudfront_distribution_id = var.cloudfront_distribution_id == null ? "" : var.cloudfront_distribution_id
+    waf_web_acl_name           = var.waf_web_acl_name == null ? "" : var.waf_web_acl_name
 
     purchase_success_slo_percent = var.purchase_success_slo_percent
     purchase_latency_slo_ms      = var.purchase_latency_slo_ms

@@ -323,6 +323,8 @@ CloudWatch コンソール → Dashboards → `<name>-overview` で開く。障�
 
 `terraform fmt -check -recursive terraform` と dev / staging 両 root の `terraform validate` が通ることを確認済み。加えて、`dashboard_body`（JSON テンプレート）が `has_edge` / `has_frontend` の 4 通りの組み合わせ（true/true, true/false, false/true, false/false）すべてで妥当な JSON にレンダリングされ、widget 数が期待どおり（edge 込み 12 枚 / edge 抜き 10 枚）になることをローカルの `templatefile()` 単体レンダリングで確認した。`terraform plan` では `module.dashboard.aws_cloudwatch_dashboard.main` が dev / staging 両方でエラーなく作成計画されることを確認した。2026-07-12、Issue #276 で dev / staging 両環境の Dashboard 表示を実地確認し、2026-07-13、Issue #285 でスクリーンショットを保存した。詳細は [可観測性 実地検証ログ](observability-verification-log.md#observability-一回通し実地検証2026-07-1213) を参照。
 
+上記の `templatefile()` 単体レンダリングでは、モジュールの `locals` で null を空文字に置き換える `coalesce(<名前>, "")` を通っていなかった。`coalesce` は null と空文字の両方を読み飛ばすため（[Terraform docs: coalesce](https://developer.hashicorp.com/terraform/language/functions/coalesce)）、frontend / CloudFront / WAF の名前が null で渡る staging の `alb-http-only` では plan が失敗していた。Issue #552 で条件式（`var.x == null ? "" : var.x`）に置き換え、`alb-http-only` の plan を `terraform/environments/staging/tests/public_endpoint_mode.tftest.hcl`（mock provider の `terraform test`。PR の CI で実行）で確認するようにした。2026-10-09 時点の widget 数は、Issue #377 で source queue の widget が増えたため、edge 込み 13 枚 / edge 抜き 11 枚（上の widget 構成の表と一致）。全入力ありのときの `dashboard_body` は修正前後で同じ（モジュール単体の mock plan で sha256 が一致）。
+
 ## アラームの severity と escalation 方針（Issue #257）
 
 prod 化前に、CloudWatch アラームをどの緊急度で扱うかを明文化する。severity による通知経路の分岐は設けず、alarm description と運用方針で区別する。

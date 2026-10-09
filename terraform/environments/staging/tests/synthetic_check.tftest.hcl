@@ -107,14 +107,8 @@ run "enabled_creates_synthetic_check" {
 }
 
 # alb-http-only では CloudFront / app FQDN が無いため、true でも外形監視を作らない。
-# module.dashboard は alb-http-only の plan で coalesce(null, "") が失敗する（この Issue より前からの不具合で、
-# 外形監視とは関係しない）。この run は外形監視の count だけを確かめるため、dashboard は override_module で評価しない。
 run "alb_http_only_does_not_create_synthetic_check" {
   command = plan
-
-  override_module {
-    target = module.dashboard
-  }
 
   variables {
     public_endpoint_mode   = "alb-http-only"
