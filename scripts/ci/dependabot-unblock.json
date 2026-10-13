@@ -40,17 +40,5 @@
     ],
     "review-by": "2026-11-02",
     "tracking": "https://github.com/kmryst/ticket-c2c-platform/issues/426"
-  },
-  {
-    "directory": "/frontend",
-    "dependency-name": "eslint",
-    "probe": true,
-    "spec": "eslint@10",
-    "steps": [
-      "npm install --no-audit --no-fund eslint@10",
-      "npm run lint"
-    ],
-    "review-by": "2026-11-02",
-    "tracking": "https://github.com/kmryst/ticket-c2c-platform/issues/427"
   }
 ]
