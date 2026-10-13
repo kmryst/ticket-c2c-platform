@@ -55,7 +55,7 @@ jobs:
   # （v1.7.0 では default: true の宣言が無く、省略すると boolean input が false に評価されて
   # SARIF アップロード step が黙って skip された。idp-golden-path#186 / PR #188 で修正済み）。
   trivy-image-backend:
-    uses: kmryst/idp-golden-path/.github/workflows/trivy-image.yml@v1.7.1
+    uses: kmryst/idp-golden-path/.github/workflows/trivy-image.yml@v1.7.2
     permissions:
       contents: read
       security-events: write
@@ -64,7 +64,7 @@ jobs:
       dockerfile: Dockerfile
 
   trivy-image-frontend:
-    uses: kmryst/idp-golden-path/.github/workflows/trivy-image.yml@v1.7.1
+    uses: kmryst/idp-golden-path/.github/workflows/trivy-image.yml@v1.7.2
     permissions:
       contents: read
       security-events: write
