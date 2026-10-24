@@ -2,7 +2,7 @@
 
 ## ステータス
 
-Accepted
+Deprecated（2026-10-24。GHSA-vfj7-8cjw-p6xm が withdrawn され、root / frontend の例外を削除した。末尾の「追記 2026-10-24」参照）
 
 ## 日付
 
@@ -72,10 +72,21 @@ root の本番依存には別の high（`@grpc/grpc-js` / `@nestjs/platform-fast
 ## 再検討のトリガー
 
 - braces 3.0.4 以上が公開された、または依存経路から braces がなくなった → 例外を削除し #522 を close する
+- GHSA-vfj7-8cjw-p6xm が withdrawn された（`npm audit` で検出されなくなる） → 例外を削除し #522 を close する
 - 2026-12-31 までに解除条件が揃わない → #522 に依存経路と継続理由を記録し、期限を更新する
 - 期限の更新を 2 回以上繰り返しても修正版が出ない → 依存元の置き換えを再検討する
 - 本番依存で修正版のない high が出た → 露出が違うため本 ADR の対象外として個別に判断する
 - idp-golden-path が消費側にも撤去 PR を自動で作るようになった（idp-golden-path#310） → 運用を見直す
+
+## 追記 2026-10-24
+
+GHSA-vfj7-8cjw-p6xm は 2026-10-23 に GitHub Advisory Database で withdrawn された（修正版は出ていない）。
+root / frontend の lockfile の braces は 3.0.3 のままだが、`npm audit` で検出されなくなり、評価器の Step Summary に
+`not detected (remove the stale exception)` が出ていた。そこで `dependency-audit.yml` の root job / frontend job から
+`npm-audit-exceptions` を削除し、#522 を close した。両 job は例外なしの `npm audit --audit-level=high` で判定される。
+
+期限付き例外の仕組み（`npm-audit-exceptions`）自体は idp-golden-path の reusable workflow に残っており、
+修正版のない advisory が再び出た場合は [セキュリティスキャン運用](../operations/security-scanning.md) の手順で個別に判断する。
 
 ## 関連
 
