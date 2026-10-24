@@ -76,7 +76,7 @@
     "typeorm": "^1.1.2"
   },
   "devDependencies": {
-    "@commitlint/cli": "^21.2.3",
+    "@commitlint/cli": "^21.2.4",
     "@commitlint/config-conventional": "^21.2.0",
     "@opentelemetry/context-async-hooks": "^2.10.0",
     "@types/bcrypt": "^6.0.0",
