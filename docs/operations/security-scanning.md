@@ -52,18 +52,18 @@ devDependencies を含む全依存区分を見ているのは
 
 ### 現在の例外
 
-| GHSA | package | job | 依存経路 | expires | tracking |
-| --- | --- | --- | --- | --- | --- |
-| [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | `braces@3.0.3`（修正版なし） | root | devDependency の `markdownlint-cli2` → `micromatch` → `braces` | 2026-12-31 | [#522](https://github.com/kmryst/ticket-c2c-platform/issues/522) |
-| [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | `braces@3.0.3`（修正版なし） | frontend | devDependency の `eslint-config-next` → `@next/eslint-plugin-next` → `fast-glob` → `micromatch` → `braces` | 2026-12-31 | [#522](https://github.com/kmryst/ticket-c2c-platform/issues/522) |
+なし。
 
-root は本番依存に別の high が残っている間、本番依存の判定で fail closed になるため、braces の例外は適用されません。
+root / frontend の両 job にあった braces の例外（[GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)、[#522](https://github.com/kmryst/ticket-c2c-platform/issues/522)）は、
+advisory が 2026-10-23 に GitHub Advisory Database で withdrawn され `npm audit` で検出されなくなったため、2026-10-24 に削除しました（[ADR-0036](../adr/0036-expiring-npm-audit-exception-for-braces.md) の追記）。
+
+`npm-audit-exceptions` を渡していない job では、reusable workflow は例外評価器を使わず、例外なしの `npm audit --audit-level=high` で判定します。
 
 ### 解除手順
 
-上流で修正版が出た（braces 3.0.4 以上の公開、または依存経路から braces がなくなった）ら、次を 1 つの PR で行います。
+上流で修正版が出た（修正版の公開、または依存経路から該当パッケージがなくなった）、または advisory が withdrawn された（`npm audit` で検出されなくなる）ら、次を 1 つの PR で行います。
 
-1. 依存を更新し、`npm audit --include=dev` で該当 GHSA が出ないことを確認する
+1. 必要なら依存を更新し、`npm audit --include=dev` で該当 GHSA が出ないことを確認する
 2. `dependency-audit.yml` から該当要素を削除する（要素が空になったら `npm-audit-exceptions` ごと削除する）
 3. 上の「現在の例外」表から該当行を削除し、追跡 Issue を close する
 
