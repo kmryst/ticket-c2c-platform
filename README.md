@@ -5,11 +5,13 @@
 
 ## Architecture
 
-![Architecture](docs/architecture/images/architecture.png)
+![購入リクエストの流れ（staging）](docs/architecture/images/request-flow.png)
 
-- CloudFront + AWS WAF → ALB → ECS Fargate（API / Worker / Frontend）の構成で、Next.js SSR と NestJS API を同一オリジンで配信します。
-- 正本 DB は Aurora PostgreSQL Serverless v2、在庫の前段フィルタに ElastiCache (Valkey)、イベント検索に OpenSearch を使います。
-- 検索インデックスは EventBridge → SQS → Worker で非同期に同期します。
+①〜⑨ は購入リクエスト 1 回分の処理順です。CloudFront + AWS WAF → ALB → ECS Fargate 上の API が、在庫を ElastiCache (Valkey) で前段判定して Aurora PostgreSQL Serverless v2 で確定し、確定後のイベントを EventBridge → SQS → Worker で OpenSearch に反映します。画面は同じ CloudFront 配下の Next.js SSR で配信します。
+
+![デプロイ・運用・監視（staging）](docs/architecture/images/operations.png)
+
+GitHub Actions が OpenID Connect で AWS に認証して Terraform の apply / destroy とデプロイを実行し、CloudWatch・X-Ray・Synthetics canary の監視結果は Amazon SNS からメールで通知します。
 
 ## Tech Stack
 
