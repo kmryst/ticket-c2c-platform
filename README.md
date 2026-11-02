@@ -23,7 +23,7 @@
 ## Highlights
 
 - **在庫超過 0 件**: staging（本番寄せ構成）で hot event の在庫 6,000 を k6 の spike で売り切り、全 6 event で `remainingQuantity` が負値にならないことを確認しました（[staging 検証記録](docs/architecture/staging-environment-verification-log.md)）。
-- **売り切れ後の DB 保護**: dev の sold-out spike で 12,001 リクエストすべてを Valkey の前段フィルタで拒否し、Aurora への到達は 0 件、p50 10.7ms でした（[スパイク PoC 結果](docs/poc/spike-poc-results.md)）。
+- **売り切れ後の DB 保護**: dev の sold-out spike で 12,001 リクエストすべてを Valkey の前段判定で拒否し、Aurora への到達は 0 件、p50 10.7ms でした（[スパイク PoC 結果](docs/poc/spike-poc-results.md)）。
 - **レイテンシ**: staging の baseline（20 req/s）で p95 68.7ms、エラー率 0% でした。一方 hot event へ 200 req/s を集中させると pg pool が枯渇し p95 7.4〜7.5s まで劣化することも実測し、容量計画の課題として記録しています（[staging 検証記録](docs/architecture/staging-environment-verification-log.md)）。
 - **failover**: Aurora reader failover（AWS 側の切替約 35〜39 秒）で、アプリ観測の断時間を修正前の約 84.2 秒から修正後は約 4.4 秒以下（2 回目は単発 0.5 秒のブリップのみ）へ短縮しました。Valkey の automatic failover（切替約 30 秒）では断時間約 18.2 秒で自動復旧しました（[staging 検証記録](docs/architecture/staging-environment-verification-log.md)）。
 - **同一オリジン配信**: Next.js SSR と NestJS API を CloudFront の 1 つのドメインで配信し、`/api/*` を API、それ以外を Frontend へ振り分けます（[ADR-0011](docs/adr/0011-nextjs-ssr-on-ecs-with-cloudfront-unified-origin.md)）。
