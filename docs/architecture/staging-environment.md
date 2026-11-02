@@ -23,7 +23,7 @@
 
 - リージョンは `ap-northeast-1`。
 - VPC はリージョン内に作成され、複数リージョンにはまたがらない。
-- AZ はリージョン内の物理的な分離単位で、VPC と AZ は概念上どちらかが完全に内包する関係ではなく、図では直交する軸として扱う。
+- AZ はリージョン内の物理的な分離単位で、VPC と AZ は概念上どちらかが完全に内包する関係ではなく、直交する軸として扱う。
 - Subnet は「VPC の CIDR を AZ ごとに切ったもの」。1 subnet は必ず 1 AZ に属する。
 - ALB は 1 つの logical load balancer を複数 public subnet に関連付ける。AWS が各 AZ に ALB node を配置するが、利用者が `ALB A` / `ALB C` の 2 個を作るわけではない。
 - NAT Gateway は logical ALB と違い、配置する subnet ごとに個別リソースができる。`normal` は 1 個、`full` は AZ ごとに 1 個。
@@ -38,76 +38,17 @@ CIDR は環境ごとに重ならないようにする。
 
 ## 構成図
 
-Mermaid / Notion では VPC と AZ の長方形を厳密にクロスさせる表現が難しいため、この図では subnet を VPC x AZ の交点として見せる。ALB は 1 つの logical resource として public subnet A / C の両方に関連付ける。
+README と同じ構成図を載せる。図 1 は購入リクエスト 1 回分の処理順（①〜⑨）、図 2 はデプロイ・運用・監視の構成を示す。capacity profile ごとの NAT Gateway・タスク数・Aurora / Valkey / OpenSearch の構成の違いは [capacity profile](#capacity-profile) の表を参照する。
 
-```mermaid
-flowchart TB
-  internet[Internet]
-  edge["CloudFront + WAF\nhttps-dns の公開入口"]
+図 1: 購入リクエストの流れ
 
-  subgraph region["ap-northeast-1 Region"]
-    direction TB
+![図 1: ブラウザから CloudFront・AWS WAF・ALB を経て ECS Fargate 上の API が ElastiCache (Valkey) で在庫を前段判定して Aurora PostgreSQL で購入を確定し、EventBridge・SQS・Worker を経て OpenSearch へ反映する購入リクエストの流れ](./images/request-flow.png)
 
-    subgraph vpc["VPC: ticket-c2c-staging / 10.10.0.0/16"]
-      direction TB
+図 2: デプロイ・運用・監視
 
-      subgraph public_subnets["Public subnets across AZ-a / AZ-c"]
-        direction LR
-        alb["ALB\n1 logical load balancer\nassociated with Public Subnet A and C"]
-        nat_a["NAT Gateway A\nnormal: enabled"]
-        nat_c["NAT Gateway C\nnormal: disabled\nfull: enabled"]
-      end
+![図 2: GitHub Actions から OpenID Connect で AWS に認証する Terraform・デプロイ、Amazon S3 の Terraform state と Amazon ECR、CloudWatch・X-Ray・Synthetics canary の監視と Amazon SNS のメール通知の構成](./images/operations.png)
 
-      subgraph private_subnets["Private subnets across AZ-a / AZ-c"]
-        direction LR
-
-        subgraph az_a_private["AZ-a private subnet"]
-          api_a["ECS API task\nnormal: 1 total\nfull: 2+ total"]
-          frontend_a["ECS Frontend task\nnormal: 1 total\nfull: 2 total"]
-          worker_a["ECS Worker task\nnormal: 1 total\nfull: 2 total"]
-          aurora_writer["Aurora writer"]
-          valkey_primary["Valkey primary"]
-          os_a["OpenSearch node"]
-        end
-
-        subgraph az_c_private["AZ-c private subnet"]
-          api_c["ECS API task\nfull target"]
-          frontend_c["ECS Frontend task\nfull target"]
-          worker_c["ECS Worker task\nfull target"]
-          aurora_reader["Aurora reader / failover"]
-          valkey_replica["Valkey replica"]
-          os_c["OpenSearch node\nfull target"]
-        end
-      end
-    end
-
-    eventbridge["EventBridge\n(regional service, VPC 外)"]
-    sqs["SQS Standard + DLQ\n(regional service, VPC 外)"]
-  end
-
-  internet --> edge
-  edge --> alb
-  internet -. "alb-http-only escape hatch\n許可 CIDR のみ" .-> alb
-  alb --> api_a
-  alb --> api_c
-  alb --> frontend_a
-  alb --> frontend_c
-  api_a --> aurora_writer
-  api_a --> valkey_primary
-  api_a --> os_a
-  api_c --> aurora_reader
-  api_c --> valkey_replica
-  api_c --> os_c
-  api_a -. "NAT Gateway 経由" .-> eventbridge
-  api_c -. "NAT Gateway 経由\n(full のみ、normal は NAT A 経由)" .-> eventbridge
-  eventbridge --> sqs
-  sqs -. "NAT Gateway 経由" .-> worker_a
-  sqs -. "NAT Gateway 経由\n(full のみ)" .-> worker_c
-  worker_a --> os_a
-  worker_c --> os_c
-```
-
-CloudFront / WAF と Frontend service は `https-dns` で作成し、`alb-http-only` では作成しない。EventBridge / SQS はリージョナルサービスで VPC 外にある。private subnet の ECS タスクは NAT Gateway 経由で到達する。`worker_c --> os_c` は「AZ-c の Worker が AZ-c の OpenSearch ノードに固定される」という意味ではなく、OpenSearch domain endpoint への到達を模式的に示したもの。NAT / EventBridge / SQS への依存を減らせる VPC endpoint（Interface Endpoint）は、必要になった時点で段階的に追加を検討する。
+CloudFront / WAF と Frontend service は `https-dns` で作成し、`alb-http-only` では作成しない。EventBridge / SQS はリージョナルサービスで VPC 外にある。private subnet の ECS タスクは NAT Gateway 経由で到達する。NAT / EventBridge / SQS への依存を減らせる VPC endpoint（Interface Endpoint）は、必要になった時点で段階的に追加を検討する。
 
 現状は API / Worker / Frontend が同じ app Security Group を共有し、その SG から Aurora / Valkey / OpenSearch へ到達できる。サービス別の最小権限化は [Production Readiness L-24](./production-readiness.md) で追跡し、prod 化前に SG を分離する。
 
