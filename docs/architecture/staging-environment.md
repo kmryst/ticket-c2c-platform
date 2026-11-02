@@ -42,13 +42,13 @@ README と同じ構成図を載せる。図 1 は購入リクエスト 1 回分�
 
 図 1: 購入リクエストの流れ
 
-![図 1: ブラウザから CloudFront・AWS WAF・ALB を経て ECS Fargate 上の API が ElastiCache (Valkey) で在庫を前段判定して Aurora PostgreSQL で購入を確定し、EventBridge・SQS・Worker を経て OpenSearch へ反映する購入リクエストの流れ](./images/request-flow.png)
+![図 1: ブラウザから CloudFront・AWS WAF・ALB を経て ECS Fargate 上の API が ElastiCache (Valkey) で在庫を前段判定して Aurora PostgreSQL で購入を確定し、EventBridge・SQS・Worker を経て OpenSearch へ反映する購入リクエストの流れ](./diagrams/request-flow.png)
 
 `RESP` は REdis Serialization Protocol（Valkey のクライアントとサーバーの間のプロトコル）である。
 
 図 2: デプロイ・運用・監視
 
-![図 2: GitHub Actions から OpenID Connect で AWS に認証する Terraform・デプロイ、Amazon S3 の Terraform state と Amazon ECR、CloudWatch・X-Ray・Synthetics canary の監視と Amazon SNS のメール通知の構成](./images/operations.png)
+![図 2: GitHub Actions から OpenID Connect で AWS に認証する Terraform・デプロイ、Amazon S3 の Terraform state と Amazon ECR、CloudWatch・X-Ray・Synthetics canary の監視と Amazon SNS のメール通知の構成](./diagrams/operations.png)
 
 CloudFront / WAF と Frontend service は `https-dns` で作成し、`alb-http-only` では作成しない。EventBridge / SQS はリージョナルサービスで VPC 外にある。private subnet の ECS タスクは NAT Gateway 経由で到達する。NAT / EventBridge / SQS への依存を減らせる VPC endpoint（Interface Endpoint）は、必要になった時点で段階的に追加を検討する。
 
