@@ -5,6 +5,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export PYTHONDONTWRITEBYTECODE=1
 python3 scripts/build_architecture.py architecture.drawio
-python3 scripts/build_request_flow.py views/request-flow.drawio
-python3 scripts/build_operations.py views/operations.drawio
-python3 scripts/check_d5.py architecture.drawio views/request-flow.drawio views/operations.drawio
+python3 scripts/build_request_flow.py ../request-flow.drawio
+python3 scripts/build_operations.py ../operations.drawio
+python3 scripts/check_d5.py architecture.drawio ../request-flow.drawio ../operations.drawio

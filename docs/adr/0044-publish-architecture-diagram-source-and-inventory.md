@@ -10,7 +10,7 @@ Accepted
 
 ## 背景
 
-README に載せている構成図（`docs/architecture/images/request-flow.png`、`docs/architecture/images/operations.png`）は、Python の作図スクリプトで drawio を生成し、PNG に書き出したものである。
+README に載せている構成図（`docs/architecture/diagrams/request-flow.png`、`docs/architecture/diagrams/operations.png`）は、Python の作図スクリプトで drawio を生成し、PNG に書き出したものである。
 作図スクリプトと、その元にした inventory（IaC・CI/CD・docs から作ったリソースと接続の一覧）はリポジトリの外にあり、図を直すときに同じ図を再現できなかった（Issue #619）。
 
 inventory には、リソース名、Terraform のリソースの論理名（例: `aws_route53_record.app_alias`）、サービス名などの識別子が入っている。
@@ -21,7 +21,7 @@ deny list は隠したい値そのものの一覧である。
 
 ## 決定
 
-1. 作図スクリプト（`elements.py`、`squeeze.py`、`build_*.py`、`check_d5.py`）、inventory、全体図と観点ごとの図の drawio を `docs/architecture/src/` に置く。公開済みの PNG の位置（`docs/architecture/images/`）は変えない。
+1. README に載せる観点ごとの図は、drawio と PNG を `docs/architecture/diagrams/` に並べて置く。作図スクリプト（`elements.py`、`squeeze.py`、`build_*.py`、`check_d5.py`）、inventory、全体図の drawio は `docs/architecture/diagrams/src/` に置く。
 2. inventory の識別子（リソース名、IaC の論理名、サービス名など）は外さずに入れる。まだ公開されていない値（AWS account ID、ARN の account 部分、メールアドレス、人の名前、アカウントや契約の事情、secret の値、tfvars の値で未公開のもの）は入れない。
 3. 線とノードのラベル（線の目的と技術、ノードの名前、凡例の文言）は `elements.py` の 1 か所で定義する。図ごとに変えてよいのは改行の位置だけで、改行と空白を除いて共通定義と一致しなければ生成が失敗する。
 4. 調査担当の報告（inventory の元）と deny list / allow list は公開リポジトリに置かず、非公開リポジトリ `check-publish-lists` で管理する。
