@@ -64,6 +64,11 @@ mock_provider "aws" {
 mock_provider "random" {}
 mock_provider "archive" {}
 
+# alert_email は既定値を持たない必須変数（Issue #623）。このファイルのテスト対象ではないため、例示用の値を渡す。
+variables {
+  alert_email = "alerts@example.com"
+}
+
 # alb-http-only では CloudFront / WAF / frontend を作らないため、dashboard モジュールにはそれらの名前が null で渡る。
 # その状態で plan が通り、dashboard 自体は作ることを確かめる。
 run "alb_http_only_plan_succeeds" {

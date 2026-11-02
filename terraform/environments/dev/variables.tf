@@ -75,11 +75,18 @@ variable "app_subdomain" {
 variable "alert_email" {
   description = <<-EOT
     CloudWatch アラーム通知（SNS email subscription）の宛先メールアドレス（production-readiness L-5 / Issue #200）。
-    apply は GitHub Actions（terraform-apply-dev.yml）が変数入力なしで実行するため、既定値で運用者宛先を固定する。
-    空文字を渡すと SNS トピック・subscription を作らず、アラームは可視化のみになる。
+    通知先は環境ごとの設定なので既定値を持たない（Issue #623）。ローカルでは gitignore 済みの terraform.tfvars で、
+    GitHub Actions（terraform-plan.yml / terraform-apply-dev.yml / terraform-destroy-dev.yml）では
+    repository secret ALERT_EMAIL を TF_VAR_alert_email で渡す。
+    空文字とメール形式でない値は validation で拒否する（secret が渡らずに apply して subscription が消えるのを防ぐ）。
   EOT
   type        = string
-  default     = "komurayoshitodesu@gmail.com"
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alert_email))
+    error_message = "alert_email はメールアドレスの形式で指定すること（空文字は不可）。terraform.tfvars または TF_VAR_alert_email で渡す。"
+  }
 }
 
 variable "task_config_check_value" {

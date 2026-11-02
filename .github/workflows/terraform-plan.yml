@@ -24,6 +24,11 @@ jobs:
     defaults:
       run:
         working-directory: terraform/environments/${{ matrix.environment }}
+    env:
+      # alert_email は既定値を持たない（Issue #623）。repository secret ALERT_EMAIL から渡す。
+      # secret が渡らない（fork からの PR など）場合は空文字になり、variables.tf の validation で dev / staging の plan が失敗する。
+      # bootstrap root はこの変数を宣言していないため、TF_VAR_alert_email は無視される。
+      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
     steps:
       - uses: actions/checkout@v7
 
