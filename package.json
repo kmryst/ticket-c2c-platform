@@ -2,7 +2,7 @@
   "name": "ticket-c2c-platform",
   "version": "0.1.0",
   "private": true,
-  "description": "C2C ticket platform architecture and local PoC workspace.",
+  "description": "B2C primary ticket sales platform: high-concurrency inventory control on AWS (ECS Fargate, Aurora PostgreSQL, ElastiCache Valkey).",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/main.js",
