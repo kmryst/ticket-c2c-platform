@@ -65,6 +65,11 @@ mock_provider "aws" {
 mock_provider "random" {}
 mock_provider "archive" {}
 
+# alert_email は既定値を持たない必須変数（Issue #623）。このファイルのテスト対象ではないため、例示用の値を渡す。
+variables {
+  alert_email = "alerts@example.com"
+}
+
 # 既定値（pending-deploy）で plan が通る。
 run "default_image_tag_plans" {
   command = plan

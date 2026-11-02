@@ -94,6 +94,10 @@ override_resource {
     arn = "arn:aws:ecs:ap-northeast-1:111122223333:task-definition/ticket-c2c-staging-frontend:8"
   }
 }
+# alert_email は既定値を持たない必須変数（Issue #623）。このファイルのテスト対象ではないため、例示用の値を渡す。
+variables {
+  alert_email = "alerts@example.com"
+}
 
 # https-dns（既定）: api / worker / frontend の 3 service。キーは ECS service 名、値はその service の
 # task definition（terraform が登録した revision）の ARN。

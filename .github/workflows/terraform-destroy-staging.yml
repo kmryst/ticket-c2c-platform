@@ -36,6 +36,10 @@ jobs:
     defaults:
       run:
         working-directory: terraform/environments/staging
+    env:
+      # alert_email は既定値を持たない（Issue #623）。repository secret ALERT_EMAIL から渡す。
+      # secret が渡らない（空文字）場合は variables.tf の validation で plan が失敗し、apply / destroy まで進まない。
+      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
     steps:
       - uses: actions/checkout@v7
 

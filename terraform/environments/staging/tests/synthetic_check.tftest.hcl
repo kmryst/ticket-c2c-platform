@@ -67,6 +67,11 @@ mock_provider "aws" {
 mock_provider "random" {}
 mock_provider "archive" {}
 
+# alert_email は既定値を持たない必須変数（Issue #623）。このファイルのテスト対象ではないため、例示用の値を渡す。
+variables {
+  alert_email = "alerts@example.com"
+}
+
 # 既定値（false）では外形監視を作らない。最初の apply で canary が ALB 503 を記録しないようにするため。
 run "default_does_not_create_synthetic_check" {
   command = plan

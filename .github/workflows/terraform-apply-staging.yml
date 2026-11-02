@@ -56,6 +56,9 @@ jobs:
       TF_VAR_public_endpoint_mode: ${{ inputs.public_endpoint_mode }}
       TF_VAR_task_config_check_value: ${{ inputs.task_config_check_value }}
       TF_VAR_enable_synthetic_check: ${{ inputs.enable_synthetic_check }}
+      # alert_email は既定値を持たない（Issue #623）。repository secret ALERT_EMAIL から渡す。
+      # secret が渡らない（空文字）場合は variables.tf の validation で plan が失敗し、apply / destroy まで進まない。
+      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
     steps:
       - uses: actions/checkout@v7
 
