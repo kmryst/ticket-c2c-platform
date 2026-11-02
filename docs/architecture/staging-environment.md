@@ -44,6 +44,8 @@ README と同じ構成図を載せる。図 1 は購入リクエスト 1 回分�
 
 ![図 1: ブラウザから CloudFront・AWS WAF・ALB を経て ECS Fargate 上の API が ElastiCache (Valkey) で在庫を前段判定して Aurora PostgreSQL で購入を確定し、EventBridge・SQS・Worker を経て OpenSearch へ反映する購入リクエストの流れ](./images/request-flow.png)
 
+`RESP` は REdis Serialization Protocol（Valkey のクライアントとサーバーの間のプロトコル）である。
+
 図 2: デプロイ・運用・監視
 
 ![図 2: GitHub Actions から OpenID Connect で AWS に認証する Terraform・デプロイ、Amazon S3 の Terraform state と Amazon ECR、CloudWatch・X-Ray・Synthetics canary の監視と Amazon SNS のメール通知の構成](./images/operations.png)
