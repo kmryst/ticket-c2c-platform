@@ -114,3 +114,4 @@ YYYY-MM-DD
 | [0041](./0041-run-refresh-token-cleanup-in-api-with-advisory-lock.md) | refresh token cleanup を api 内の定期実行に移し、PostgreSQL の advisory lock で多重実行を防ぐ | Accepted |
 | [0042](./0042-deploy-copies-terraform-registered-task-definition.md) | deploy は terraform が登録した task definition revision のイメージだけを差し替え、ARN は terraform の state の output から読む | Accepted |
 | [0043](./0043-create-synthetic-check-after-first-deploy.md) | 外形監視（CloudWatch Synthetics canary）は最初の deploy の後、2 回目の terraform apply で作る | Accepted |
+| [0044](./0044-publish-architecture-diagram-source-and-inventory.md) | 構成図の作図スクリプトと inventory を公開リポジトリに置き、deny list / allow list は非公開リポジトリで管理する | Accepted |
