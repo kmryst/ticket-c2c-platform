@@ -51,12 +51,26 @@ jobs:
       - name: Terraform validate
         run: terraform validate -no-color
 
+      # Dependabot の PR では Actions secret が渡らず plan が必ず失敗するため、明示的にスキップする（Issue #642）。
       - name: Terraform plan
+        if: github.actor != 'dependabot[bot]'
         run: |
-          terraform plan -input=false -lock=false -no-color -out=tfplan.bin | tee plan.txt
+          set -o pipefail
+          plan_status=0
+          terraform plan -input=false -lock=false -no-color -out=tfplan.bin | tee plan.txt || plan_status=$?
           {
             echo "## terraform plan (${{ matrix.environment }})"
             echo '```'
             grep -E "^(Plan:|No changes|  # )" plan.txt || true
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$plan_status"
+
+      - name: Terraform plan (skipped for Dependabot PR)
+        if: github.actor == 'dependabot[bot]'
+        run: |
+          echo "::notice::Dependabot の PR のため terraform plan をスキップしました。Actions secret（ALERT_EMAIL）が渡らないためです（Issue #642）。"
+          {
+            echo "## terraform plan (${{ matrix.environment }})"
+            echo "Dependabot の PR のため terraform plan をスキップしました。"
           } >> "$GITHUB_STEP_SUMMARY"
