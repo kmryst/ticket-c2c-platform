@@ -56,4 +56,7 @@ jobs:
     with:
       # skip-dirs は指定しない。走査対象になるのは Dockerfile / frontend/Dockerfile /
       # terraform/** / catalog-info.yaml のみで、除外したい生成物・ベンダリングコードが無いため。
+      # ただし catalog-info.yaml は on.pull_request.paths に含めていないので、
+      # catalog-info.yaml だけを変更した PR ではこの workflow は起動せず、
+      # 週次の schedule（と workflow_dispatch）でのみ走査される。
       scan-ref: "."
