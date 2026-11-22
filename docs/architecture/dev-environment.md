@@ -105,7 +105,7 @@ terraform/
 
 | workflow | トリガー | 内容 |
 | --- | --- | --- |
-| `terraform-plan.yml` | PR（`terraform/**`） | fmt / validate / plan。plan 専用ロール |
+| `terraform-plan.yml` | PR（`terraform/**`） | fmt / validate / plan。plan 専用ロール。Dependabot の PR では Actions secret の `ALERT_EMAIL` が渡らないため、dev / staging の plan をスキップする（bootstrap は実行。Issue #642） |
 | `terraform-apply-dev.yml` | workflow_dispatch | plan → 外形監視の削除検査 → Environment `dev` の branch restriction を通して apply。入力 `enable_synthetic_check`（既定 `false`）で外形監視（CloudWatch Synthetics canary）を作るかを切り替える（Issue #546 / [ADR-0043](../adr/0043-create-synthetic-check-after-first-deploy.md)） |
 | `terraform-destroy-dev.yml` | workflow_dispatch | `confirm` 入力（`destroy-dev` 完全一致）+ Environment `dev-destroy` の branch restriction（`main` のみ） |
 | `deploy-backend-dev.yml` | workflow_dispatch | backend（api + worker）の Docker build → ECR push → （任意）DB migration → OpenSearch の search index migration（毎回）→ ECS サービス更新 → 全サービスの rollout 完了確認。`run_migrations` 入力あり（L-11 / Issue #182 で `deploy-app-dev.yml` から分離。search index migration と rollout 確認は Issue #538。詳細は [staging-environment.md](./staging-environment.md)「OpenSearch の search index migration」「deploy の成功判定」） |
